@@ -50,7 +50,7 @@ Cyclic code does not require cyclic execution. Settle a shared interface first o
 
 ## 7. Author valid YAML directly
 
-Use task-oriented names, brief source-grounded responsibilities, explicit triggers and staged prompts containing artifact and acceptance requirements, following SKILL.md syntax. Include only permitted tools. A read-only role has no edit, release or change-report instructions; constrain any shell access to read-only operations. Editing roles coordinate shared-file handoffs without claiming exclusive ownership or inventing hard file boundaries beyond the user's restrictions.
+Use task-oriented names, brief source-grounded responsibilities, explicit consumable work triggers and registered prompts containing artifact and acceptance requirements, following SKILL.md syntax. Include only permitted tools. A read-only role has no edit, release or change-report instructions; constrain any shell access to read-only operations. Editing roles coordinate shared-file handoffs without claiming exclusive ownership or inventing hard file boundaries beyond the user's restrictions.
 
 Prefer flat workers unless a requested loop or nested agency needs wrappers. Use the standard Ralph pattern when appropriate. Write valid runtime YAML from the outset: no `files` metadata, post-processing pass, intermediate workflow schema, topology generator or exhaustive repository manifest.
 
@@ -87,7 +87,6 @@ Run `syntax.parse(source)` and `schedules.validateLadder(ladder)` before agent a
 Adapt SKILL.md's runner with the authored scheduler, verified models/ladder and any exported code nodes. An exported runner must also return the terminal text. This lifecycle helper uses the root sink selection rather than an arbitrary graph root:
 
 ```ts
-import { contentText } from "@earendil-works/pi-ai";
 import { JuncoGraph, syntax } from "junco";
 import source from "./<name>.yml" with { type: "text" };
 
@@ -98,10 +97,8 @@ export async function run(config: syntax.FromYamlOptions): Promise<string> {
   try {
     await execution.run();
     const terminal = execution.graph.result(execution.graph.sink.id);
-    if (terminal._tag !== "Some" || terminal.value.stopReason !== "stop")
-      throw new Error("Terminal did not finish normally");
-    terminalText = contentText(terminal.value.content).trim();
-    if (!terminalText) throw new Error("Terminal returned an empty report");
+    if (terminal._tag !== "Some") throw new Error("No terminal result");
+    terminalText = syntax.finalText(terminal.value, "Terminal");
   } finally {
     await execution.graph.close();
   }

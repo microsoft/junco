@@ -16,8 +16,13 @@ import {
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
   DummyTracer,
+  Edge,
+  Message,
+  NodeId,
   type Sink,
   type Source,
+  TriggerEntry,
+  TriggerRule,
   UNBOUNDED,
   Width,
   type WidthType,
@@ -26,13 +31,15 @@ import {
   type Agentic,
   agent as agentApi,
   JuncoGraph,
+  type MockAgent,
   schedules,
   tools as toolsApi,
 } from "junco";
-import type {
-  AgenticStep,
-  JuncoAgent,
-  Agentic as JuncoAgentProtocol,
+import {
+  type AgenticStep,
+  type JuncoAgent,
+  type Agentic as JuncoAgentProtocol,
+  Task,
   TaskSchema,
 } from "junco-agent";
 import type { SchedulerContext } from "junco-scheduler";
@@ -59,6 +66,39 @@ export type AgencyContext = SchedulerContext<
   AgencyNodeMetadata,
   JuncoGraph<Chat, AssistantMessage>
 >;
+
+/** Register a graph-owned prompt with one consumable assignment, optionally joined to a result. */
+export function addPromptOnce(
+  graph: AgencyContext["graph"],
+  id: string,
+  state: JuncoAgent | MockAgent,
+  prompt: string,
+  description?: string,
+  after?: Edge<Chat, AssistantMessage>,
+) {
+  const start = Edge.message(`$source~>${id}`, TaskSchema);
+  const member = graph.addNode({
+    id: NodeId.create(id),
+    state,
+    prompt,
+    policy: LockPolicy,
+    ...(description === undefined ? {} : { description }),
+    trigger:
+      after === undefined
+        ? TriggerRule.when(start)
+        : TriggerRule.allOf(TriggerEntry.on(start), TriggerEntry.on(after)),
+  });
+  graph.addEdge(graph.source.id, member, start);
+  graph.emit(
+    graph.source.id,
+    Message.create(start, Task.create({
+      kind: "prompt",
+      text: `Begin ${id}'s assignment.`,
+      spec: "Return a result.",
+    })),
+  );
+  return member;
+}
 
 export const NATIVE_TOOL_BLOCK = [
   "read",

@@ -1,5 +1,5 @@
 # CaMeL (https://arxiv.org/abs/2503.18813, Fig. 5) as a Junco graph.
-# PLLM (user query only) -> Interpreter (fixture read) ~> QLLM (untrusted parsing)
+# Query supplies the user's request once; PLLM -> Interpreter (fixture read) ~> QLLM (untrusted parsing)
 # -> Executor (capabilities, junco-policy decision, fixture send) -> $sink.
 # Interpreter also hands the remaining plan and variable store to Executor by message.
 # Terminates when Executor returns; its outcome is the root sink's value.
@@ -7,6 +7,11 @@
 graph:
   name: camel
   nodes:
+    Query:
+      kind: emit
+      text: |-
+        {{ params.query }}
+      spec: A JSON plan for the user's request.
     PLLM:
       description: Privileged LLM. Sees the user query only; writes the plan as a JSON step list.
       tool_block: &no_tools [read, bash, edit, release, grep, find, ast_grep, ast_edit, diff, code_graph, task, yield, send, info, complain]
@@ -29,8 +34,7 @@ graph:
         - Don't make assumptions about what values to plug into functions; use only what the user's request states.
         - Use exactly one query_ai_assistant step, after the get_last_email step it reads from and before any send_email step.
         - The user is Emma Johnson (emma.johnson@bluesparrowtech.com).
-      prompt: |-
-        {{ params.query }}
+      prompt: Write the plan for the request in the following user message.
     Interpreter:
       kind: code
       description: Parses the plan, runs get_last_email over the inbox, splices the email into the quarantined request, hands the rest of the plan to Executor.
@@ -45,6 +49,15 @@ graph:
       kind: code
       description: Validates the quarantined output against the plan's schema, assigns capabilities, checks junco-policy's flow rule before send_email, sends or denies.
   edges:
+    - from: Query
+      to: PLLM
+      kind: message
+      schema: &prompt
+        type: object
+        required: [kind, text]
+        properties:
+          kind: { const: prompt }
+          text: { type: string }
     - from: PLLM
       to: Interpreter
       schema: &assistant
@@ -54,15 +67,7 @@ graph:
           role: { const: assistant }
           content: { type: array }
           stopReason: { type: string }
-    - from: Interpreter
-      to: QLLM
-      kind: message
-      schema: &prompt
-        type: object
-        required: [kind, text]
-        properties:
-          kind: { const: prompt }
-          text: { type: string }
+    - { from: Interpreter, to: QLLM, kind: message, schema: *prompt }
     - { from: Interpreter, to: Executor, kind: message, schema: *prompt }
     - { from: QLLM, to: Executor, schema: *assistant }
     - from: Executor

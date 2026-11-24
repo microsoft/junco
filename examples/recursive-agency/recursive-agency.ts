@@ -1,6 +1,7 @@
 // Offline recursive agency: root → child → grandchild → a leaf that yields once, plus a root sibling.
 // Scheduler models select one current wave from SchedulerSnapshot; only work graphs own members.
-// recursive-agency.yml declares the topology; this module supplies Join and the faux agents.
+// Start sends the assignment to both branches; the nested source routes carry it to the grandchild.
+// Join checks both reports and returns the grandchild's exact result.
 // Run: bun run examples/recursive-agency/recursive-agency.ts
 
 import assert from "node:assert/strict";
@@ -27,28 +28,17 @@ const { NodeId } = graphApi;
 type Request = schedules.SchedulerRequest<schedules.AgencyNodeMetadata>;
 type Plan = { readonly waves: readonly (readonly string[])[] };
 
-/** Start both root branches with one null control value each. */
-const Start: syntax.DeterministicNode = ({ policy }) => ({
-  state: new graphApi.nodes.Deterministic<TSchema, unknown>(async function* () {
-    yield [];
-    return null;
-  }, policy),
-});
-
 /** Join both root branches, retaining the child's exact result after validating both reports. */
-const Join: syntax.DeterministicNode = ({ policy }) => {
-  return {
-    state: new graphApi.nodes.Deterministic<TSchema, unknown>(async function* () {
-      const inputs = yield [];
-      for (const id of ["0->Join", "1->Join"]) {
-        const result = inputs.values.get(graphApi.EdgeId.create(id));
-        if (!Value.Check(AssistantMessageSchema, result) || result.stopReason !== "stop" || !contentText(result.content).trim())
-          throw new Error(`${id} did not produce a complete report`);
-      }
-      return inputs.values.get(graphApi.EdgeId.create("0->Join"));
-    }, policy),
-  };
-};
+const Join: syntax.DeterministicNode = ({ policy }) =>
+  new graphApi.nodes.Deterministic<TSchema, unknown>(async function* () {
+    const inputs = yield [];
+    for (const id of ["0->Join", "1->Join"]) {
+      const result = inputs.values.get(graphApi.EdgeId.create(id));
+      if (!Value.Check(AssistantMessageSchema, result) || result.stopReason !== "stop" || !contentText(result.content).trim())
+        throw new Error(`${id} did not produce a complete report`);
+    }
+    return inputs.values.get(graphApi.EdgeId.create("0->Join"));
+  }, policy);
 
 
 const NATIVE_TOOL_BLOCK = [
@@ -154,7 +144,7 @@ async function main(signal: AbortSignal) {
     context: await JuncoGraph.fromYaml(source, {
       cwd: process.cwd(),
       scheduler: (name) => fauxScheduler(name, decide[name]!, name === "root" ? decisions : []),
-      code: { Start, Join },
+      code: { Join },
       recorder,
       tracer: observer,
       createAgent: async (spec) => {

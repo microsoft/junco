@@ -15,6 +15,7 @@ import { LockPolicy } from "junco-tools";
 import { tools } from "../src/index.ts";
 import { resultText, terminalPorts } from "./deterministic-support.ts";
 import {
+  addPromptOnce,
   type AgencyContext,
   agencyGraph,
   drive,
@@ -31,14 +32,10 @@ import {
 
 const TIMEOUT_MS = 30_000;
 const MEMBER = NodeId.create("0");
-/** Nested consumers retain the context while native node state remains its actual graph. */
-const member = (state: JuncoAgent | AgencyContext, description = "member") =>
-  state instanceof JuncoAgent
-    ? { state, policy: LockPolicy, description, trigger: TriggerRule.always() }
-    : { state, description, trigger: TriggerRule.always() };
+type Member = AgencyContext | { agent: JuncoAgent; parked?: true };
 
 async function agency(
-  members: readonly (JuncoAgent | AgencyContext)[],
+  members: readonly Member[],
   script: Script = runAvailable,
   { idle = false } = {},
 ) {
@@ -50,8 +47,28 @@ async function agency(
     idle ? {} : { prompt: "run the graph" },
   );
   const graph = fixture.context.graph;
-  for (const [index, state] of members.entries())
-    graph.addNode(member(state, `member ${index}`));
+  for (const [index, member] of members.entries()) {
+    const id = NodeId.create(String(index));
+    const description = `member ${index}`;
+    if ("graph" in member)
+      graph.addNode({
+        id,
+        description,
+        state: member,
+        trigger: idle ? TriggerRule.never() : TriggerRule.always(),
+      });
+    else if (!idle && !member.parked)
+      addPromptOnce(graph, id, member.agent, "go", description);
+    else
+      graph.addNode({
+        id,
+        description,
+        state: member.agent,
+        policy: LockPolicy,
+        prompt: "go",
+        trigger: TriggerRule.never(),
+      });
+  }
   ports.connect(graph, MEMBER);
   return fixture;
 }
@@ -87,11 +104,9 @@ function counting(
 test(
   "thirty-two nested agencies forward the identical innermost sink result",
   async () => {
-    const innermost = await leaf([fauxAssistantMessage("deep")], {
-      prompt: "go",
-    });
+    const innermost = await leaf([fauxAssistantMessage("deep")]);
     const levels: AgencyContext[] = [];
-    let current: JuncoAgent | AgencyContext = innermost.agent;
+    let current: Member = innermost;
     for (let depth = 0; depth < 32; depth++) {
       const level = await agency([current]);
       levels.push(level.context);
@@ -124,7 +139,7 @@ test(
   "abort and close traverse 4096 idle nested agencies without growing the stack",
   async () => {
     const innermost = await leaf([]);
-    let current: JuncoAgent | AgencyContext = innermost.agent;
+    let current: Member = innermost;
     let root: AgencyContext | undefined;
     for (let depth = 0; depth < 4096; depth++) {
       root = (await agency([current], runAvailable, { idle: true })).context;
@@ -151,7 +166,7 @@ test(
         toolTurn(fauxToolCall("grandchild_work", {}, { id: "g1" })),
         fauxAssistantMessage("unused"),
       ],
-      { prompt: "go", tools: [grandchildTool.tool] },
+      { tools: [grandchildTool.tool] },
     );
     const siblingTool = waitingTool("sibling_work");
     const sibling = await leaf(
@@ -159,11 +174,11 @@ test(
         toolTurn(fauxToolCall("sibling_work", {}, { id: "s1" })),
         fauxAssistantMessage("unused"),
       ],
-      { prompt: "go", tools: [siblingTool.tool] },
+      { tools: [siblingTool.tool] },
     );
-    const child = await agency([grandchild.agent]);
+    const child = await agency([grandchild]);
     const { context: root } = await agency(
-      [child.context, sibling.agent],
+      [child.context, sibling],
       plan([["0", "1"]], [["0"]], [["0", "1"]]),
     );
     const signal = root.graph.signal;
@@ -215,10 +230,10 @@ test(
         toolTurn(fauxToolCall("sibling_work", {}, { id: "s1" })),
         fauxAssistantMessage("unused"),
       ],
-      { prompt: "go", tools: [siblingTool.tool] },
+      { tools: [siblingTool.tool] },
     );
     const { context: root } = await agency(
-      [failing, sibling.agent],
+      [{ agent: failing, parked: true }, sibling],
       plan([["0", "1"]], [["1"]]),
     );
     const running = root.run().then(
@@ -246,14 +261,11 @@ test(
   async () => {
     const calls: string[] = [];
     const counted = await counting(calls, (await nativeOptions([])).options);
-    const grandchild = await leaf(
-      [
-        toolTurn(fauxToolCall("yield", { reason: "hold" }, { id: "y1" })),
-        fauxAssistantMessage("unused"),
-      ],
-      { prompt: "go" },
-    );
-    const child = await agency([grandchild.agent]);
+    const grandchild = await leaf([
+      toolTurn(fauxToolCall("yield", { reason: "hold" }, { id: "y1" })),
+      fauxAssistantMessage("unused"),
+    ]);
+    const child = await agency([grandchild]);
     const held = Promise.withResolvers<void>();
     const cleaned = Promise.withResolvers<void>();
     const schedule = (id: string) =>
@@ -261,7 +273,7 @@ test(
         stopReason: "toolUse",
       });
     const { context: root } = await agency(
-      [child.context, counted],
+      [child.context, { agent: counted, parked: true }],
       [
         schedule("s1"),
         schedule("s2"),
@@ -313,7 +325,9 @@ test("repeated graph.close joins a failed close without duplicating its error", 
     }
   }
   const failing = await FailingClose.make((await nativeOptions([])).options);
-  const { context } = await agency([failing], runAvailable, { idle: true });
+  const { context } = await agency([{ agent: failing }], runAvailable, {
+    idle: true,
+  });
   const direct = await context.graph.close().then(
     () => assert.fail("member close failure must surface"),
     (error: unknown) => error,
@@ -332,12 +346,18 @@ test("repeated graph.close joins a failed close without duplicating its error", 
 test("shared and cyclic native member graphs cascade abort and close once each", async () => {
   const calls: string[] = [];
   const counted = await counting(calls, (await nativeOptions([])).options);
-  const { context: root } = await agency([counted], runAvailable, {
+  const { context: root } = await agency([{ agent: counted }], runAvailable, {
     idle: true,
   });
-  const child = await agency([counted, root], runAvailable, { idle: true });
-  root.graph.addNode(member(child.context));
-  root.graph.addNode(member(child.context));
+  const child = await agency([{ agent: counted }, root], runAvailable, {
+    idle: true,
+  });
+  for (const id of ["child-a", "child-b"])
+    root.graph.addNode({
+      id: NodeId.create(id),
+      state: child.context,
+      trigger: TriggerRule.never(),
+    });
   await root.graph.abort();
   assert.deepEqual(calls, ["abort"]);
   assert.equal(root.graph.signal.aborted, false);

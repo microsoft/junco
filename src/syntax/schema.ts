@@ -18,6 +18,7 @@ const edge = Type.Object(
     kind: Type.Optional(
       Type.Union([Type.Literal("value"), Type.Literal("message")]),
     ),
+    on: Type.Optional(Type.Literal("return")),
     id: Type.Optional(Type.String()),
     // JuncoGraphValidator checks the mapping's contents (Draft 2020-12, local refs only).
     schema: Type.Unsafe<TSchema>(Type.Object({})),
@@ -35,7 +36,7 @@ const agentFields = {
   tools: Type.Optional(strings),
   tool_block: Type.Optional(strings),
   skills: Type.Optional(strings),
-  prompt: Type.Optional(Type.String()),
+  prompt: Type.String({ pattern: "\\S" }),
 };
 // TypeBox 1.x spells recursive schemas Cyclic (Recursive was removed).
 const graphSchema = Type.Cyclic(
@@ -51,6 +52,7 @@ const graphSchema = Type.Cyclic(
           Type.Object(
             {
               description: common.description,
+              trigger: Type.Optional(trigger),
               routes: Type.Optional(Type.Record(Type.String(), strings)),
             },
             strict,

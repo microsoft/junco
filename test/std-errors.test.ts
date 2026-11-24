@@ -25,6 +25,7 @@ import {
 } from "../src/index.ts";
 import { applyModel } from "../src/node-policy.ts";
 import {
+  addPromptRun,
   assistant,
   failed,
   pause,
@@ -190,18 +191,13 @@ for (const strategy of STRATEGIES) {
       const ports = terminalPorts();
       const context = plainContext(ports.source, ports.sink, strategy);
       graphs.push(context.graph);
-      const id = context.graph.addNode({
-        state: agent,
-        policy: LockPolicy,
-        trigger: TriggerRule.always(),
-      });
+      const id = addPromptRun(context.graph, agent, "worker", "go");
       ports.connect(context.graph, id);
       return { context, graph: context.graph, id };
     };
 
     test("retries thrown failures with a continuation in the same session", async () => {
       const agent = new MockAgent({
-        prompt: "go",
         runs: [
           run([{ step: failed(new Error("down")) }]),
           run([settle(assistant("ok"))]),
@@ -210,13 +206,15 @@ for (const strategy of STRATEGIES) {
       });
       const { context, id } = setup(agent);
       assert.equal(textOf((await context.run()).get(id)!), "ok");
-      assert.ok(
-        agent.calls.some(
-          (call) =>
-            call.method === "stagePrompt" &&
-            call.args[0] ===
-              "Your previous attempt ended with an error, not because the work was finished. Continue the same task, building on what you already did, and return the complete answer.",
+      assert.equal(agent.calls.filter(({ method }) => method === "steer").length, 1);
+      assert.deepEqual(
+        agent.calls.flatMap((call) =>
+          call.method === "stagePrompt" ? call.args : [],
         ),
+        [
+          "go",
+          "Your previous attempt ended with an error, not because the work was finished. Continue the same task, building on what you already did, and return the complete answer.",
+        ],
       );
     });
 
@@ -225,7 +223,6 @@ for (const strategy of STRATEGIES) {
       const attempts: number[] = [];
       const retry = errors.retry({ afterMs: 0, times: 1 }, errors.crash());
       const agent = new MockAgent({
-        prompt: "go",
         runs: [
           run([{ step: failed(cause) }]),
           run([pause([reason("work", "y")]), { step: failed(cause) }]),
@@ -245,13 +242,13 @@ for (const strategy of STRATEGIES) {
       );
       assert.deepEqual(attempts, [1, 2]);
       assert.ok(O.isNone(graph.result(id)));
+      assert.equal(graph.getNode(id)!.status, "done");
     });
 
     test("soft errors route to children without producing a parent result", async () => {
       const cause = new Error("down");
       const edge = Edge.message("parent->child", TaskSchema);
       const parent = new MockAgent({
-        prompt: "go",
         runs: [run([{ step: failed(cause) }])],
         errorHandler: ({ error }) => [
           Message.create(edge, {
@@ -265,20 +262,16 @@ for (const strategy of STRATEGIES) {
         ],
       });
       const child = new MockAgent({
-        prompt: "child",
         runs: [run([settle(assistant("received"), { drain: ["steer"] })])],
       });
       const ports = terminalPorts();
       const context = plainContext(ports.source, ports.sink, strategy);
       const graph = context.graph;
       graphs.push(graph);
-      const p = graph.addNode({
-        state: parent,
-        policy: LockPolicy,
-        trigger: TriggerRule.always(),
-      });
+      const p = addPromptRun(graph, parent, "parent", "go");
       const c = graph.addNode({
         state: child,
+        prompt: "child",
         policy: LockPolicy,
         trigger: TriggerRule.when(edge),
       });
@@ -291,6 +284,7 @@ for (const strategy of STRATEGIES) {
         ),
       );
       assert.ok(O.isNone(graph.result(p)));
+      assert.equal(graph.getNode(p)!.status, "done");
       assert.equal(textOf(results.get(c)!), "received");
     });
 
@@ -298,7 +292,6 @@ for (const strategy of STRATEGIES) {
       const boom = assistant("boom", "error");
       for (const mode of ["retry", "crash", "unchanged"] as const) {
         const agent = new MockAgent({
-          prompt: "go",
           runs: [run([settle(boom)]), run([settle(assistant("ok"))])],
           errorHandler:
             mode === "retry"
@@ -327,7 +320,6 @@ for (const strategy of STRATEGIES) {
 
     test("escalation applies the next model before the retried request", async () => {
       const agent = new MockAgent({
-        prompt: "go",
         models: [model("a"), model("b")],
         model: { provider: "p", modelId: "a" },
         runs: [
@@ -373,7 +365,6 @@ for (const strategy of STRATEGIES) {
       ]) {
         let handled = false;
         const agent = new MockAgent({
-          prompt: "go",
           runs: [run([{ step: failed(cause) }])],
           errorHandler: () => {
             handled = true;
@@ -395,7 +386,6 @@ for (const strategy of STRATEGIES) {
       const controller = new AbortController();
       const reason = new Error("cancel");
       const agent = new MockAgent({
-        prompt: "go",
         runs: [run([{ step: failed(new Error("down")) }])],
         errorHandler: () => {
           controller.abort(reason);
@@ -409,7 +399,7 @@ for (const strategy of STRATEGIES) {
       );
       assert.deepEqual(
         agent.calls.filter((call) => call.method === "stagePrompt"),
-        [],
+        [{ method: "stagePrompt", args: ["go"] }],
       );
     });
   });

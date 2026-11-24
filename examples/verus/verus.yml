@@ -3,6 +3,9 @@
 graph:
   name: Verus
   nodes:
+    VerifierAssignment:
+      kind: code
+      description: Deliver the workspace, specification and previous feedback once for this round.
     Verifier:
       system: |-
         You are one of exactly three persistent roles in a continuous Verus loop, not an approval gate.
@@ -18,7 +21,8 @@ graph:
         For Cargo, configure each copied package that needs verification with [package.metadata.verus] verify = true and the required vstd dependency, preserving package names. Inspect installed vstd metadata/context through the MCP before adding a dependency; use its exact registry version (version = "=<version>") and retain existing compatible declarations. Missing version metadata is an explicit Cargo-setup diagnostic, never a guessed version. Keep Cargo default features; the copied lockfile may be updated, no --locked requirement.
         Address both previous Reviewer recommendations and Cleanup observations every subsequent cycle. Check translated source with the Verus MCP diagnostics tools; preserve full diagnostics in your report.
       description: "Translate Rust and infer local specifications"
-      trigger: "always"
+      trigger: "VerifierAssignment~>Verifier"
+      prompt: Translate or repair the current output for the delivered assignment and address both feedback reports. Write actual source, then report evidence and unresolved obligations.
     PrepareReviewer:
       kind: code
       description: Validate the Verifier report and sample the per-round Reviewer diagnostics baseline.
@@ -37,7 +41,8 @@ graph:
         Review vacuity, missing behavior/error cases, unjustified preconditions, weakened postconditions, uncovered modules/definitions, trusted boundaries, name/architecture drift, and semantic changes. Explicitly inspect assume, admit, external_body, and axiom annotations, reporting any preexisting boundary.
         Recommend concrete stronger guarantees/invariants, shorter proofs, and idiomatic semantically equivalent code with file/definition anchors and real diagnostics. Do not declare overall completion merely because Verus exits zero.
       description: "Run Verus and review specification adequacy"
-      trigger: "PrepareReviewer->Reviewer"
+      trigger: "PrepareReviewer~>Reviewer"
+      prompt: Use the delivered assignment and current Verifier report as evidence. Inspect the current output and call mcp__verus__lsp_diagnostics yourself this round. Report stronger specifications and smaller proofs, even if verification succeeds.
     PrepareCleanup:
       kind: code
       description: Validate the Reviewer report and require fresh diagnostics before preparing Cleanup.
@@ -55,8 +60,13 @@ graph:
         Do not weaken accepted contracts, strengthen preconditions to exclude valid original behavior, inflate executable code to game a proof/code ratio, or remove obligations just to shorten code. Preserve existing names and architecture.
         Check edits with mcp__verus__lsp_diagnostics. Report remaining failures and unresolved stricter-spec recommendations for the next Verifier. The proof/code ratio is an optimization goal, not a fabricated exact metric or a guarantee of monotonic decrease.
       description: "Simplify code and proofs without weakening obligations"
-      trigger: "PrepareCleanup->Cleanup"
+      trigger: "PrepareCleanup~>Cleanup"
+      prompt: Use the delivered assignment and current Reviewer report as evidence. Simplify real source and proofs without weakening contracts. Check edits with Verus MCP diagnostics; retain unresolved stronger-spec recommendations for the next Verifier.
   edges:
+    - from: VerifierAssignment
+      to: Verifier
+      kind: message
+      schema: { type: string }
     - from: Verifier
       to: PrepareReviewer
       schema: &assistant
@@ -85,13 +95,20 @@ graph:
           errorMessage: { type: string }
     - from: PrepareReviewer
       to: Reviewer
-      schema: *assistant
+      kind: message
+      schema: &assignmentWithReport
+        type: object
+        required: [assignment, report]
+        properties:
+          assignment: { type: string }
+          report: *assistant
     - from: Reviewer
       to: PrepareCleanup
       schema: *assistant
     - from: PrepareCleanup
       to: Cleanup
-      schema: *assistant
+      kind: message
+      schema: *assignmentWithReport
     - from: Cleanup
       to: $sink
       schema: *assistant

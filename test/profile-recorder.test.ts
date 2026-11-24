@@ -46,7 +46,7 @@ const document = () =>
           trigger: "Start~>Inner",
           graph: {
             source: { routes: { "Start~>Inner": ["$source~>Worker"] } },
-            nodes: { Worker: { trigger: "$source~>Worker" } },
+            nodes: { Worker: { trigger: "$source~>Worker", prompt: "work" } },
             edges: [
               {
                 from: "$source",
@@ -80,7 +80,6 @@ const text = (value: unknown) => {
 };
 const createAgent = async ({ node }: AgentSpec) =>
   mock({
-    prompt: node === "Worker" ? "work" : undefined,
     runs: [
       run([
         settle(assistant(node === "Worker" ? "WORKER-OUT" : "FINAL-OUT"), {

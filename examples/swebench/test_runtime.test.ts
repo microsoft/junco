@@ -85,7 +85,18 @@ test("a guarded agent sends no request to a model other than its role's", async 
   const log = join(dir, "requests.jsonl");
   writeFileSync(log, "");
   const ladder = new schedules.ModelLadder(guardedModels(decoyModels, log, "Worker", "decoy/other"), schedules.uniformLadder({ model: "decoy/m" }));
-  const document = syntax.parse(`graph:\n  nodes:\n    Worker:\n      prompt: Say hi.\n      tool_block: ${JSON.stringify(BLOCKED_DEFAULTS)}\n  edges:\n    - from: Worker\n      to: $sink\n      schema: {}\n`);
+  const document = syntax.parse(`
+graph:
+  nodes:
+    Assignment: {kind: emit, text: Say hi., spec: A greeting.}
+    Worker:
+      trigger: Assignment~>Worker
+      prompt: Follow the greeting assignment.
+      tool_block: ${JSON.stringify(BLOCKED_DEFAULTS)}
+  edges:
+    - {from: Assignment, to: Worker, kind: message, schema: {}}
+    - {from: Worker, to: $sink, schema: {}}
+`);
   const execution = await JuncoGraph.fromYaml(document, {
     cwd: dir, scheduler: () => schedules.parallel(), tracer: new tracer.DummyTracer(),
     createAgent: (spec) => syntax.createJuncoAgent(spec, ladder),
@@ -157,7 +168,7 @@ const plan = (checks: { kind: string; name: string; command: string }[]) =>
       B: { approach: "rewrite", steps: [{ target: "pkg/m.py:f", change: "rewrite the branch", check: "repro" }] },
     },
   })}\n\`\`\``;
-const CHECKS = [
+const CHECKS: cb.Check[] = [
   { kind: "reproduction", name: "repro", command: "repro" },
   { kind: "regression", name: "regress", command: "regress" },
 ];
@@ -210,6 +221,7 @@ function fake(): Fake {
           return files[role];
         },
         apply: async (role, patch) => {
+          h.log.push(`apply:${role}`);
           files[role] = patch;
           return { exit_code: 0, output: "" };
         },
@@ -234,26 +246,23 @@ function fake(): Fake {
 }
 
 function participant(id: string, script: Script, h: Fake): syntax.DeterministicNode<cb.Context> {
-  return ({ policy, edges }) => {
-    let started = false;
-    let done = false;
-    return {
-      state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
-        const view = yield [];
-        h.saved.set(`scripted/${id}.prompt`, [...edges].flatMap(([edgeId]) => [...(view.messages.get(graph.EdgeId.create(edgeId)) ?? [])]).map((payload) => (payload as { text?: string }).text ?? "").join("\n\n"));
-        started = true;
-        h.log.push(`${id}:start`);
-        for (let i = 0; i < (script.columns ?? 0); i++) yield [];
-        while (script.until !== undefined && !script.until()) yield [];
-        script.act?.(h);
-        done = true;
-        h.log.push(`${id}:done`);
-        return message(script.text ?? `${id} report`, script.stop ?? "stop");
-      }, policy),
-      // Like an agent node: available once triggered, then resumable until it returns.
-      is_available: (_view, triggered) => !done && (started || triggered),
-    };
-  };
+  return ({ policy, edges }) =>
+    new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+      const view = yield [];
+      const texts = [...edges].flatMap(([id]) => (view.messages.get(graph.EdgeId.create(id)) ?? []).flatMap((payload: unknown) =>
+        payload && typeof payload === "object" && "text" in payload && typeof payload.text === "string" ? [payload.text] : [],
+      ));
+      h.saved.set(`scripted/${id}.prompt`, texts.join("\n\n"));
+      h.log.push(`${id}:start`);
+      for (let i = 0; i < (script.columns ?? 0); i++) yield { resume: [] };
+      for (let i = 0; script.until !== undefined && !script.until(); i++) {
+        if (i === 100) throw new Error(`${id} waited 100 scheduling turns without a release`);
+        yield { resume: [] };
+      }
+      script.act?.(h);
+      h.log.push(`${id}:done`);
+      return message(script.text ?? `${id} report`, script.stop ?? "stop");
+    }, policy);
 }
 
 /** Script only root agents; every nested Planner agent keeps its real prompt and trigger. */
@@ -266,7 +275,7 @@ function scriptedDocument(source: syntax.JuncoDocument = cb.document): syntax.Ju
 }
 
 type YamlMock = MockAgent<Skill, PromptTemplate, AgentTool, TSchema, unknown>;
-/** A Planner mock that logs every request, including staged corrections. */
+/** A Planner mock that logs every request, including continuations and correction assignments. */
 class Draft extends MockAgent<Skill, PromptTemplate, AgentTool, TSchema, unknown> {
   constructor(runs: readonly MockRun[], readonly h: Fake, readonly id = "Draft") {
     super({ runs, steeringMode: "all" });
@@ -286,12 +295,16 @@ const drafts = (...runs: (string | MockRun["frames"])[]): MockRun[] =>
 const userTexts = (request: Draft["requests"][number]): string[] => request.messages
   .filter((message) => message.role === "user")
   .map(({ content }) => typeof content === "string" ? content : content.map((part) => "text" in part ? part.text : "").join(""));
-/** The user text of each Planner request after the first: the correction prompts CheckPlan staged. */
-const corrections = (agent: Draft): string[] =>
-  agent.requests.slice(1).map(({ messages }) => {
-    const last = messages.at(-1);
-    return last?.role === "user" ? (typeof last.content === "string" ? last.content : last.content.map((c) => ("text" in c ? c.text : "")).join("")) : "";
+/** Corrections delivered to this producer, from the cumulative session in its final request. */
+function corrections(agent: Draft): { attempt: number; feedback: string }[] {
+  const last = agent.requests.at(-1);
+  if (last === undefined) return [];
+  return userTexts(last).filter((text) => text.startsWith('{"id":')).map((text) => {
+    const { id, payload } = JSON.parse(text);
+    expect(id).toBe(`CheckPlan~>${agent.id}`);
+    return payload;
   });
+}
 
 async function scenario(
   overrides: Record<string, Script> = {},
@@ -317,7 +330,6 @@ async function scenario(
     cwd: tmpdir(),
     scheduler: workflow.scheduler,
     code: { ...workflow.code, ...participants, ...code(h) },
-    available: workflow.plannerAvailability,
     createAgent: async (spec) => {
       if (!spec.path.startsWith("Planner/")) throw new Error(`unexpected agent ${spec.path}`);
       const transcript = Array.isArray(runs) ? runs : runs[spec.path];
@@ -332,9 +344,12 @@ async function scenario(
     ...(recorder === undefined ? {} : { recorder }),
   });
   let report: string | undefined;
+  let plannerResult: unknown;
   let error: string | undefined;
   try {
     await execution.run();
+    const planner = execution.graph.result(graph.NodeId.create("Planner"));
+    if (planner._tag === "Some") plannerResult = planner.value;
     const terminal = execution.graph.result(execution.graph.sink.id);
     if (terminal._tag === "Some") report = syntax.finalText(terminal.value, "Finish");
   } catch (failure) {
@@ -345,7 +360,7 @@ async function scenario(
   const at = (entry: string) => h.log.indexOf(entry);
   const count = (entry: string) => h.log.filter((e) => e === entry).length;
   const draft = agents.get("Planner/Draft")!;
-  return { ...h, report, error, at, count, draft, agents, corrections: draft === undefined ? [] : corrections(draft) };
+  return { ...h, report, plannerResult, error, at, count, draft, agents, corrections: draft === undefined ? [] : corrections(draft) };
 }
 
 /** Import the real module against alternate YAML so module-load topology decisions are exercised. */
@@ -421,10 +436,13 @@ group("coordination", () => {
     expect(run.error).toBeUndefined();
     expect(run.report).toBeDefined();
     expect(run.draft.requests).toHaveLength(2);
-    expect(run.corrections[0]).toContain("Correction turn 1 of 3");
-    expect(run.corrections[0]).toContain("No regression check survived the baseline run");
-    expect(run.corrections[0]).toContain("missing-class");
-    expect(run.corrections[0]).toContain("MigrationLoaderTests");
+    expect(run.corrections).toHaveLength(1);
+    expect(userTexts(run.draft.requests[1]).at(-2)).toBe(userTexts(run.draft.requests[0])[0]);
+    expect(run.plannerResult).toBe(run.draft.history.at(-1));
+    expect(run.corrections[0].attempt).toBe(1);
+    expect(run.corrections[0].feedback).toContain("No regression check survived the baseline run");
+    expect(run.corrections[0].feedback).toContain("missing-class");
+    expect(run.corrections[0].feedback).toContain("MigrationLoaderTests");
     expect(run.at("CandidateA:start")).toBeGreaterThan(run.at("save:planning/attempt-2/acceptance.json"));
     expect(run.saved.get("acceptance.json")).toBe(run.saved.get("planning/attempt-2/acceptance.json"));
     expect(run.saved.get("plan.md")).toBe(plan(CHECKS));
@@ -435,9 +453,9 @@ group("coordination", () => {
     expect(run.error).toBeUndefined();
     expect(run.report).toBeDefined();
     expect(run.draft.requests).toHaveLength(4);
-    expect(run.corrections.map((text) => text.split(".")[0])).toEqual([1, 2, 3].map((n) => `Correction turn ${n} of 3`));
-    expect(run.corrections[0]).toContain("the Planner returned no");
-    expect(run.corrections[2]).toContain("The plan has no regression check");
+    expect(run.corrections.map(({ attempt }) => attempt)).toEqual([1, 2, 3]);
+    expect(run.corrections[0].feedback).toContain("the Planner returned no");
+    expect(run.corrections[2].feedback).toContain("The plan has no regression check");
   });
 
   test("a parsed fourth rejected plan dispatches surviving checks and reaches Finish", async () => {
@@ -451,6 +469,7 @@ group("coordination", () => {
     expect(run.error).toBeUndefined();
     expect(run.report).toContain("Final patch verified");
     expect(run.draft.requests).toHaveLength(4);
+    expect(run.plannerResult).toBe(run.draft.history.at(-1));
     expect(run.files.canonical).toBe(diff("FIX A"));
     for (const candidate of ["CandidateA", "CandidateB"]) {
       expect(run.at(`${candidate}:start`)).toBeGreaterThan(run.at("save:planning/degraded.txt"));
@@ -468,7 +487,7 @@ group("coordination", () => {
       { name: "swapped-r", reason: `did not reproduce on the baseline (exit 0, no ${cb.REPRODUCED})` },
       { name: "swapped-g", reason: "fails on the baseline (exit 1)" },
     ]);
-    expect(run.corrections[1]).toContain("ImportError: No module named pkg");
+    expect(run.corrections[1].feedback).toContain("ImportError: No module named pkg");
   });
 
   test("a malformed fourth plan still fails before any patch work", async () => {
@@ -497,10 +516,7 @@ group("coordination", () => {
     const run = await scenario({}, drafts(yielding, bad, plan([CHECKS[0], { kind: "regression", name: "slow", command: "slow" }])));
     expect(run.error).toBeUndefined();
     expect(run.draft.requests).toHaveLength(4); // yield + settle, then one request per correction
-    expect(run.corrections.filter((text) => text.startsWith("Correction turn"))).toEqual([
-      expect.stringContaining("Correction turn 1 of 3"),
-      expect.stringContaining("Correction turn 2 of 3"),
-    ]);
+    expect(run.corrections.map(({ attempt }) => attempt)).toEqual([1, 2]);
     // The identical second draft is a new draft: attempt 2, not a repeat of attempt 1.
     expect(run.saved.get("planning/attempt-2/plan.md")).toBe(bad);
     expect(run.saved.has("planning/attempt-4/plan.md")).toBe(false);
@@ -560,6 +576,10 @@ group("coordination", () => {
     expect(run.files.canonical).toBe(diff("FIX A"));
     expect(run.cancels).toEqual(["B"]);
     expect(run.count("Integrator:start")).toBe(1);
+    for (const branch of ["A", "B"]) {
+      expect(run.count(`apply:accept${branch}`)).toBe(1);
+      expect(run.count(`save:verdict-${branch}.json`)).toBe(1);
+    }
     expect(JSON.parse(run.saved.get("tournament.json") ?? "{}").winner).toBe("A");
   });
 
@@ -589,17 +609,42 @@ group("coordination", () => {
   });
 
   test("a contender still running when the gate decides is cancelled once and never validated", async () => {
-    let h: Fake | undefined;
-    const run = await scenario({
-      CandidateA: { act: (f) => { h = f; f.files.candidateA = diff("FIX A"); } },
-      CandidateB: { until: () => h?.cancels.includes("B") ?? false, stop: "aborted" },
-    });
-    expect(run.error).toBeUndefined();
-    expect(run.at("cancel:B")).toBeLessThan(run.at("CandidateB:done"));
-    expect(run.cancels).toEqual(["B"]);
-    expect(run.captures).not.toContain("candidateB");
-    expect(run.files.canonical).toBe(diff("FIX A"));
-    expect(run.count("Integrator:start")).toBe(1);
+    for (const stop of ["aborted", "stop"] as const) {
+      let h: Fake | undefined;
+      const run = await scenario({
+        CandidateA: { act: (f) => { h = f; f.files.candidateA = diff("FIX A"); } },
+        CandidateB: { until: () => h?.cancels.includes("B") ?? false, stop, act: (f) => { f.files.candidateB = diff("FIX B"); } },
+      });
+      expect(run.error).toBeUndefined();
+      expect(run.at("cancel:B")).toBeLessThan(run.at("CandidateB:done"));
+      expect(run.cancels).toEqual(["B"]);
+      expect(run.captures).not.toContain("candidateB");
+      expect(run.count("apply:acceptB")).toBe(0);
+      expect(run.log.some((entry) => entry.startsWith("run:acceptB:"))).toBe(false);
+      expect(run.saved.has("verdict-B.json")).toBe(false);
+      expect(run.files.canonical).toBe(diff("FIX A"));
+      expect(run.count("Integrator:start")).toBe(1);
+    }
+  });
+
+  test("a capture interrupted by cancellation never starts acceptance; an infrastructure failure still rejects", async () => {
+    for (const cancelled of [false, true]) {
+      const h = fake();
+      const context: cb.Context = { ...h.host, race: {} };
+      const capture = Promise.withResolvers<string>();
+      context.sandbox.capture = () => capture.promise;
+      const judging = cb.judge(context, "B", message("patch ready"), CHECKS);
+      if (cancelled) {
+        context.race.winner = "A";
+        capture.resolve(diff("FIX B"));
+        expect(await judging).toMatchObject({ valid: false, reason: "cancelled after candidate A won" });
+      } else {
+        const failure = new Error("capture failed");
+        capture.reject(failure);
+        await expect(judging).rejects.toBe(failure);
+      }
+      expect(h.log).toEqual([]);
+    }
   });
 
   test("verification may not change the deliverable", async () => {
@@ -636,19 +681,20 @@ group("dormant topology capabilities", () => {
     if (planner.kind !== "graph") throw new Error("expected Planner graph");
     const level = planner.graph;
     const promptSchema = level.edges!.find((edge) => edge.from === "$source")!.schema;
-    level.source = { routes: { "JoinEvidence~>Planner": ["$source~>Draft", "$source~>Critic"] } };
+    const correction = level.edges!.find((edge) => edge.from === "CheckPlan" && edge.to === "Draft")!;
+    level.source = { ...level.source, routes: { "JoinEvidence~>Planner": ["$source~>Draft", "$source~>Critic"] } };
     level.nodes.Draft.trigger = "$source~>Draft";
     level.nodes.Critic = {
-      trigger: { any: ["Draft->Critic", "Critic->Critic"] },
-      prompt: "Read the issue and evidence in the user message following this prompt.\n\n# Draft plan\n{{Draft->Critic}}",
+      trigger: { any: ["Draft->Critic", "CheckPlan~>Critic"] },
+      prompt: "Review the issue, evidence and draft. On a correction, return the complete plan addressing the baseline feedback.\n\n# Draft plan\n{{Draft->Critic}}",
     };
-    level.nodes.CheckPlan.trigger = "Critic->CheckPlan";
+    level.nodes.CheckPlan.trigger = "Critic~>CheckPlan";
     level.edges = [
       { from: "$source", to: "Draft", kind: "message", schema: promptSchema },
       { from: "$source", to: "Critic", kind: "message", schema: promptSchema },
-      { from: "Draft", to: "Critic", schema: {} },
-      { from: "Critic", to: "Critic", schema: {} },
-      { from: "Critic", to: "CheckPlan", schema: {} },
+      { id: "Draft->Critic", from: "Draft", to: "Critic", kind: "message", on: "return", schema: {} },
+      { ...correction, to: "Critic" },
+      { from: "Critic", to: "CheckPlan", kind: "message", on: "return", schema: {} },
       { from: "CheckPlan", to: "$sink", schema: {} },
     ];
     await withWorkflow(document, async (workflow) => {
@@ -662,8 +708,7 @@ group("dormant topology capabilities", () => {
       expect(run.draft.requests).toHaveLength(1);
       const critic = run.agents.get("Planner/Critic")!;
       expect(critic.requests).toHaveLength(2);
-      expect(corrections(critic)).toEqual([expect.stringContaining("Correction turn 1 of 3")]);
-      expect(corrections(critic)[0]).toContain("The plan has no regression check");
+      expect(corrections(critic)).toEqual([{ attempt: 1, feedback: expect.stringContaining("The plan has no regression check") }]);
       const first = userTexts(critic.requests[0]);
       expect(first).toHaveLength(2);
       expect(first[0]).toContain("initial draft based on evidence");
@@ -673,18 +718,17 @@ group("dormant topology capabilities", () => {
     });
   });
 
-  test("two value producers into CheckPlan are rejected when the pair is imported", async () => {
+  test("two return-message producers into CheckPlan are rejected when the pair is imported", async () => {
     const document = structuredClone(cb.document);
     const planner = document.graph.nodes.Planner;
     if (planner.kind !== "graph") throw new Error("expected Planner graph");
-    planner.graph.nodes.Other = { trigger: "Draft->Other", prompt: "another plan" };
-    planner.graph.nodes.CheckPlan.trigger = { any: ["Draft->CheckPlan", "Other->CheckPlan"] };
+    planner.graph.nodes.Other = { trigger: "Draft~>Other", prompt: "another plan" };
+    planner.graph.nodes.CheckPlan.trigger = { any: ["Draft~>CheckPlan", "Other~>CheckPlan"] };
     planner.graph.edges!.push(
-      { from: "Draft", to: "Other", schema: {} },
-      { from: "Other", to: "Other", schema: {} },
-      { from: "Other", to: "CheckPlan", schema: {} },
+      { from: "Draft", to: "Other", kind: "message", on: "return", schema: {} },
+      { from: "Other", to: "CheckPlan", kind: "message", on: "return", schema: {} },
     );
-    await expect(withWorkflow(document, async () => {})).rejects.toThrow("wf.yml: CheckPlan needs exactly one value in-edge whose producer has a self-edge");
+    await expect(withWorkflow(document, async () => {})).rejects.toThrow("wf.yml: CheckPlan needs one producer's return-message edge and a correction message back to that producer");
   });
 
   test("Input publishes the same issue once on both outgoing message edges", async () => {
@@ -712,21 +756,22 @@ group("dormant topology capabilities", () => {
     if (planner.kind !== "graph") throw new Error("expected Planner graph");
     const level = planner.graph;
     const promptSchema = level.edges!.find((edge) => edge.from === "$source")!.schema;
-    level.source = { routes: { "JoinEvidence~>Planner": ["$source~>DraftA", "$source~>DraftB", "$source~>Merge"] } };
+    const correction = level.edges!.find((edge) => edge.from === "CheckPlan" && edge.to === "Draft")!;
+    level.source = { ...level.source, routes: { "JoinEvidence~>Planner": ["$source~>DraftA", "$source~>DraftB", "$source~>Merge"] } };
     level.nodes = {
       DraftA: { trigger: "$source~>DraftA", prompt: "Draft a plan from the evidence in the user message following this prompt." },
       DraftB: { trigger: "$source~>DraftB", prompt: "Draft a plan from the evidence in the user message following this prompt." },
       JoinDrafts: { kind: "code", trigger: { all: ["DraftA->JoinDrafts", "DraftB->JoinDrafts"] } },
-      Merge: { trigger: { any: ["JoinDrafts~>Merge", "Merge->Merge"] }, prompt: "Merge the evidence and named draft reports in the user messages following this prompt." },
-      CheckPlan: { ...level.nodes.CheckPlan, trigger: "Merge->CheckPlan" },
+      Merge: { trigger: { any: ["JoinDrafts~>Merge", "CheckPlan~>Merge"] }, prompt: "Merge the evidence and named drafts into one plan. On a correction, return the complete plan addressing the baseline feedback." },
+      CheckPlan: { ...level.nodes.CheckPlan, trigger: "Merge~>CheckPlan" },
     };
     level.edges = [
       ...["DraftA", "DraftB", "Merge"].map((to): syntax.EdgeSpec => ({ from: "$source", to, kind: "message", schema: promptSchema })),
       { from: "DraftB", to: "JoinDrafts", schema: {} },
       { from: "DraftA", to: "JoinDrafts", schema: {} },
       { from: "JoinDrafts", to: "Merge", kind: "message", schema: promptSchema },
-      { from: "Merge", to: "Merge", schema: {} },
-      { from: "Merge", to: "CheckPlan", schema: {} },
+      { ...correction, to: "Merge" },
+      { from: "Merge", to: "CheckPlan", kind: "message", on: "return", schema: {} },
       { from: "CheckPlan", to: "$sink", schema: {} },
     ];
     await withWorkflow(document, async (workflow) => {
@@ -750,7 +795,7 @@ group("dormant topology capabilities", () => {
       expect(first[1].split(run.saved.get("evidence.md")!)).toHaveLength(2);
       // JoinDrafts emits a Task.create task, so Merge sees it rendered with its minted id and spec.
       expect(first[2]).toMatch(new RegExp(`^${RegExp.escape(run.saved.get("planning/drafts.md")!)}\\n\\nTask: \\{"taskId":"[0-9a-f-]{36}","spec":"One merged fix plan chosen from the drafts\\.","deps":\\[\\],"history":\\[\\]\\}$`));
-      expect(corrections(merge)).toEqual([expect.stringContaining("Correction turn 1 of 3")]);
+      expect(corrections(merge)).toEqual([{ attempt: 1, feedback: expect.stringContaining("The plan has no regression check") }]);
 
       const abnormal = await scenario({}, {
         "Planner/DraftA": drafts([{ step: { kind: "settled", message: message("broken draft", "error") } }]),
@@ -825,8 +870,8 @@ function nestedA(nodes: Record<string, Spec>, sandbox: Record<string, string>, e
   } as unknown as syntax.NodeSpec;
   return { ...cb, document, SANDBOX: { ...rest, ...sandbox } as Workflow["SANDBOX"], ...extra };
 }
-const shell = { trigger: "$source~>Worker", tools: ["bash"] };
-const helper = { trigger: "$source~>Helper" };
+const shell = { trigger: "$source~>Worker", prompt: "Investigate the assignment in your sandbox.", tools: ["bash"] };
+const helper = { trigger: "$source~>Helper", prompt: "Review the assignment." };
 
 test("nested pairs are checked at every depth against the runtime's permissions and sandboxes", () => {
   expect(() => checkDocument(cb)).not.toThrow();

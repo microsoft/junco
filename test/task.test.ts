@@ -21,6 +21,7 @@ import {
   type JsonValue,
   type ToolCall,
 } from "@earendil-works/pi-ai";
+import { messagesOf } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { LockPolicy, type TaskToolDetails } from "junco-tools";
 import { errorGraph } from "junco-tools/errors";
@@ -34,12 +35,14 @@ import {
   graph,
   JuncoGraph,
   schedules,
+  Task,
   TaskSchema,
   tools as toolsApi,
   tracer,
   trigger,
 } from "../src/index.ts";
 import {
+  addPromptRun,
   assistant,
   terminalPorts,
   userTexts,
@@ -240,16 +243,6 @@ const taskCall = (tasks: JsonValue[], id = "task-call") =>
 const yieldCall = (reason: string, id = "yield-call") =>
   fauxToolCall("yield", { reason }, { id });
 
-function callerNode(caller: Agent, prompt = "Start") {
-  caller.stagePrompt(prompt);
-  return {
-    id: graph.NodeId.create("caller"),
-    trigger: trigger.TriggerRule.always(),
-    policy: LockPolicy,
-    state: caller,
-  };
-}
-
 /** The caller graph's execution, and its terminal ports to `connect` to its result node. */
 function taskExecution(
   observer: tracer.DataflowTracer = quiet,
@@ -339,7 +332,7 @@ async function failingCaller(
   const { execution, ports } = taskExecution(quiet, recorder);
   const outer = execution.graph;
   closers.push(() => outer.close());
-  const id = outer.addNode(callerNode(caller));
+  const id = addPromptRun(outer, caller, "caller", "Start");
   ports.connect(outer, id);
   return { caller, outer, execution, id };
 }
@@ -447,7 +440,10 @@ describe("native tasks on a graph-driven caller", () => {
       }, LockPolicy),
     });
     const id = outer.addNode({
-      ...callerNode(caller),
+      id: graph.NodeId.create("caller"),
+      state: caller,
+      policy: LockPolicy,
+      prompt: "Start",
       trigger: trigger.TriggerRule.when(feed),
     });
     outer.addEdge(feeder, id, feed);
@@ -580,7 +576,7 @@ describe("native tasks on a graph-driven caller", () => {
     };
     const { execution, ports } = taskExecution(observer);
     const outer = execution.graph;
-    const id = outer.addNode(callerNode(caller, "Start the workers"));
+    const id = addPromptRun(outer, caller, "caller", "Start the workers");
     ports.connect(outer, id);
     closers.push(() => outer.close());
     const node = outer.getNode(id);
@@ -724,10 +720,6 @@ describe("native tasks on a graph-driven caller", () => {
     });
     closers.push(() => caller.return());
     caller.setTaskFailurePolicy({ retries: 1 });
-    caller.stagePrompt((view) => {
-      assert.equal(view.values.get(parentValue.id), 3);
-      return "Start";
-    });
     const created = trackSubagents(caller);
 
     const source = new graph.nodes.Source<N, T>(
@@ -764,6 +756,10 @@ describe("native tasks on a graph-driven caller", () => {
     });
     const callerId = outer.addNode({
       id: graph.NodeId.create("caller"),
+      prompt: (view) => {
+        assert.equal(view.values.get(parentValue.id), 3);
+        return "Start";
+      },
       trigger: trigger.TriggerRule.allOf(
         trigger.TriggerEntry.on(inbound),
         trigger.TriggerEntry.on(parentValue),
@@ -974,36 +970,28 @@ describe("native tasks on a graph-driven caller", () => {
         return upstreamValue;
       }, LockPolicy),
     });
-    const notesId = outer.addNode({
-      // Emits once the worker is running, while the caller is suspended or working.
-      trigger: trigger.TriggerRule.always(),
-      is_available: () => alphaStarted,
-      state: new Deterministic<Chat, AssistantMessage>(async function* () {
-        for (let n = 1; n <= 5; n++)
-          yield [
-            {
-              id: notesEdge.id,
-              payload: {
-                kind: "followUp",
-                text: `note-${n}`,
-                taskId: `note-${n}`,
-                spec: "",
-                deps: [],
-                history: [],
-              },
-            },
-          ];
-        return fauxAssistantMessage("notes done");
-      }, LockPolicy),
+    const notesId = outer.source.id;
+    const kickoff = Task.create({
+      kind: "prompt",
+      text: "Start the task.",
+      spec: "",
     });
-    caller.stagePrompt((view) => {
-      assert.equal(view.values.get(sourceEdge.id), upstreamValue);
-      return "Start";
-    });
+    const notes = Array.from({ length: 5 }, (_, i) => ({
+      kind: "followUp" as const,
+      text: `note-${i + 1}`,
+      taskId: `note-${i + 1}`,
+      spec: "",
+      deps: [],
+      history: [],
+    }));
     const callerId = outer.addNode({
       id: graph.NodeId.create("caller"),
       policy: LockPolicy,
-      trigger: trigger.TriggerRule.anyOf(
+      prompt: (view) => {
+        assert.equal(view.values.get(sourceEdge.id), upstreamValue);
+        return "Start";
+      },
+      trigger: trigger.TriggerRule.allOf(
         trigger.TriggerEntry.on(notesEdge),
         trigger.TriggerEntry.on(sourceEdge),
       ),
@@ -1037,6 +1025,19 @@ describe("native tasks on a graph-driven caller", () => {
     const node = outer.getNode(callerId);
     const geometry = geometryOf(outer);
 
+    outer.emit(notesId, graph.Message.create(notesEdge, kickoff));
+    for (
+      let turns = 0;
+      turns < 30 && !(alphaStarted && caller.status === "suspended");
+      turns++
+    )
+      await execution.step();
+    assert.ok(alphaStarted, "the first task started before the notes");
+    assert.equal(caller.status, "suspended");
+    for (const note of notes) {
+      outer.emit(notesId, graph.Message.create(notesEdge, note));
+      await execution.step();
+    }
     const results_ = await execution.run();
     const final = results_.get(callerId);
     assert.ok(final);
@@ -1053,16 +1054,8 @@ describe("native tasks on a graph-driven caller", () => {
       ),
       [
         "Start",
-        ...Array.from({ length: 5 }, (_, n) =>
-          renderTask({
-            kind: "followUp",
-            text: `note-${n + 1}`,
-            taskId: `note-${n + 1}`,
-            spec: "",
-            deps: [],
-            history: [],
-          }),
-        ),
+        renderTask(kickoff),
+        ...notes.map(renderTask),
       ],
     );
     const sendResults = finalContext.messages
@@ -1165,7 +1158,7 @@ describe("native tasks on a graph-driven caller", () => {
     const { execution, ports } = taskExecution();
     const outer = execution.graph;
     closers.push(() => outer.close());
-    const id = outer.addNode(callerNode(caller));
+    const id = addPromptRun(outer, caller, "caller", "Start");
     ports.connect(outer, id);
     const geometry = geometryOf(outer);
 
@@ -1257,7 +1250,7 @@ describe("native tasks on a graph-driven caller", () => {
     const { execution, ports } = taskExecution();
     const outer = execution.graph;
     closers.push(() => outer.close());
-    const id = outer.addNode(callerNode(caller));
+    const id = addPromptRun(outer, caller, "caller", "Start");
     ports.connect(outer, id);
     const geometry = geometryOf(outer);
 
@@ -1324,7 +1317,7 @@ describe("native tasks on a graph-driven caller", () => {
     const { execution, ports } = taskExecution();
     const outer = execution.graph;
     closers.push(() => outer.close());
-    const id = outer.addNode(callerNode(caller));
+    const id = addPromptRun(outer, caller, "caller", "Start");
     ports.connect(outer, id);
     const geometry = geometryOf(outer);
 
@@ -1381,7 +1374,7 @@ describe("native task lifecycle and complaints", () => {
     const { execution, ports } = taskExecution();
     const outer = execution.graph;
     closers.push(() => outer.close());
-    const id = outer.addNode(callerNode(caller));
+    const id = addPromptRun(outer, caller, "caller", "Start");
     ports.connect(outer, id);
 
     const results = await execution.run();
@@ -1416,7 +1409,7 @@ describe("native task lifecycle and complaints", () => {
     const { execution, ports } = taskExecution();
     const outer = execution.graph;
     closers.push(() => outer.close());
-    const id = outer.addNode(callerNode(caller));
+    const id = addPromptRun(outer, caller, "caller", "Start");
     ports.connect(outer, id);
     const node = outer.getNode(id);
 
@@ -1444,7 +1437,7 @@ describe("native task lifecycle and complaints", () => {
     const caller = await r.agent("caller", [new toolsApi.TaskTool()]);
     const { execution, ports } = taskExecution();
     const outer = execution.graph;
-    const id = outer.addNode(callerNode(caller));
+    const id = addPromptRun(outer, caller, "caller", "Start");
     ports.connect(outer, id);
     let closing: Promise<unknown> | undefined;
     const acquired: Agent[] = [];
@@ -1496,7 +1489,7 @@ describe("native task lifecycle and complaints", () => {
     const created = trackSubagents(caller);
     const { execution, ports } = taskExecution();
     const outer = execution.graph;
-    const id = outer.addNode(callerNode(caller));
+    const id = addPromptRun(outer, caller, "caller", "Start");
     ports.connect(outer, id);
     const node = outer.getNode(id);
     const running = execution.run();
@@ -1529,7 +1522,18 @@ describe("native task lifecycle and complaints", () => {
     const created = trackSubagents(caller);
     const round = async (prompt: string) => {
       const execution = await JuncoGraph.fromYaml(
-        `graph:\n  nodes:\n    caller:\n      prompt: ${prompt}\n  edges:\n    - from: caller\n      to: $sink\n      schema:\n        type: object\n        required: [role, content]\n`,
+        `graph:
+  nodes:
+    Assignment: { kind: emit, text: ${prompt}, spec: Complete the round. }
+    caller:
+      trigger: Assignment~>caller
+      prompt: ${prompt}
+  edges:
+    - { from: Assignment, to: caller, kind: message, schema: { type: object } }
+    - from: caller
+      to: $sink
+      schema: { type: object, required: [role, content] }
+`,
         {
           cwd: process.cwd(),
           scheduler: () => schedules.parallel(),
@@ -1592,7 +1596,7 @@ describe("native task lifecycle and complaints", () => {
     const { execution, ports } = taskExecution();
     const outer = execution.graph;
     closers.push(() => outer.close());
-    const id = outer.addNode(callerNode(caller));
+    const id = addPromptRun(outer, caller, "caller", "Start");
     ports.connect(outer, id);
 
     const results = await execution.run();
@@ -1659,7 +1663,7 @@ describe("native task lifecycle and complaints", () => {
     const { execution, ports } = taskExecution();
     const outer = execution.graph;
     closers.push(() => outer.close());
-    const id = outer.addNode(callerNode(caller));
+    const id = addPromptRun(outer, caller, "caller", "Start");
     ports.connect(outer, id);
 
     const results = await execution.run();
@@ -1774,7 +1778,7 @@ describe("native task lifecycle and complaints", () => {
     const { execution, ports } = taskExecution();
     const outer = execution.graph;
     closers.push(() => outer.close());
-    const id = outer.addNode(callerNode(caller));
+    const id = addPromptRun(outer, caller, "caller", "Start");
     ports.connect(outer, id);
 
     const results = await execution.run();
@@ -1833,8 +1837,10 @@ describe("native task lifecycle and complaints", () => {
     const outer = execution.graph;
     closers.push(() => outer.close());
     const before = toolsApi.issueLog.length;
-    const id = outer.addNode(callerNode(caller, "Start"));
+    const id = addPromptRun(outer, caller, "caller", "Start");
     ports.connect(outer, id);
+    const assignment = messagesOf(outer.observe().inputs.get(id)!);
+    assert.equal(assignment.length, 1);
     const results = await execution.run();
     assert.equal(contentText(results.get(id)!.content), "combined");
 
@@ -1844,15 +1850,15 @@ describe("native task lifecycle and complaints", () => {
     const byText = new Map(issues.map((issue) => [issue.complaint, issue]));
     assert.equal(issues.length, 4);
     assert.equal(byText.get("before launch")?.nodeId, id);
-    assert.deepEqual(byText.get("before launch")?.messages, []);
+    assert.deepEqual(byText.get("before launch")?.messages, assignment);
     // Task admission never changes the caller's node: every caller complaint names it.
     assert.equal(byText.get("after launch")?.nodeId, id);
-    assert.deepEqual(byText.get("after launch")?.messages, []);
+    assert.deepEqual(byText.get("after launch")?.messages, assignment);
     const reports = byText.get("with reports");
     assert.equal(reports?.nodeId, id);
     assert.deepEqual(
       reports?.messages,
-      [],
+      assignment,
       "reports are not business messages",
     );
     const delivered = reports?.prompt.messages.flatMap((message) =>
@@ -1914,7 +1920,7 @@ describe("native task failure policies", () => {
     const { execution, ports } = taskExecution();
     const outer = execution.graph;
     closers.push(() => outer.close());
-    const id = outer.addNode(callerNode(caller));
+    const id = addPromptRun(outer, caller, "caller", "Start");
     ports.connect(outer, id);
 
     const results = await execution.run();

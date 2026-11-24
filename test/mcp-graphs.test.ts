@@ -39,6 +39,7 @@ import { TriggerRule } from "../src/std/trigger.ts";
 import { terminalPorts } from "./deterministic-support.ts";
 import { withNativeCleanup } from "./native-support.ts";
 import {
+  addPromptOnce,
   type AgencyContext,
   NATIVE_TOOL_BLOCK,
   nativeOptions,
@@ -138,13 +139,7 @@ function single(agent: JuncoAgent, collection: ToolCollection) {
     graph,
     scheduler: schedules.parallel(),
   });
-  agent.stagePrompt("go");
-  const id = graph.addNode({
-    id: NodeId.create("member"),
-    policy: LockPolicy,
-    trigger: TriggerRule.always(),
-    state: agent,
-  });
+  const id = addPromptOnce(graph, "member", agent, "go");
   ports.connect(graph, id);
   return { context, id };
 }
@@ -198,13 +193,7 @@ test(
             scheduler: schedules.parallel(),
           });
           const forgetGraph = defer(() => graph.close());
-          rootMember.stagePrompt("go");
-          rootId = graph.addNode({
-            id: NodeId.create("root"),
-            policy: LockPolicy,
-            trigger: TriggerRule.always(),
-            state: rootMember,
-          });
+          rootId = addPromptOnce(graph, "root", rootMember, "go");
           forgetRootMember();
           nestedId = graph.addNode({
             id: NodeId.create("nested"),
@@ -434,13 +423,7 @@ test(
           });
           const callerAgent = caller;
           const forgetCaller = defer(() => callerAgent.return());
-          caller.stagePrompt("go");
-          id = graph.addNode({
-            id: NodeId.create("caller"),
-            policy: LockPolicy,
-            trigger: TriggerRule.always(),
-            state: caller,
-          });
+          id = addPromptOnce(graph, "caller", caller, "go");
           ports.connect(graph, id);
           forgetCaller();
           forgetGraph();

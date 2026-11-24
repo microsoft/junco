@@ -18,9 +18,11 @@ import {
   DummyTracer,
   Edge,
   EmitOnce,
+  FinalMessages,
   from,
   Message,
   NodeId,
+  Sink,
   StepNode,
   TriggerEntry,
   TriggerRule,
@@ -38,7 +40,7 @@ type Activation = {
   readonly messages: ReadonlyMap<EdgeIdType, readonly unknown[]> | undefined;
   readonly values: ReadonlyMap<EdgeIdType, unknown> | undefined;
   outcome?:
-    | { readonly done: false; readonly messages: readonly unknown[] }
+    | { readonly done: boolean; readonly messages: readonly unknown[] }
     | { readonly done: true; readonly value: unknown }
     | { readonly error: unknown };
 };
@@ -77,9 +79,11 @@ class RecordingTracer implements DataflowTracer {
         run.activations.push(activation);
         return {
           end(step) {
-            activation.outcome = step.done
-              ? { done: true, value: step.value }
-              : { done: false, messages: step.value.map((m) => m.payload) };
+            if (!step.done)
+              activation.outcome = { done: false, messages: step.value.map((m) => m.payload) };
+            else if (step.value instanceof FinalMessages)
+              activation.outcome = { done: true, messages: step.value.messages.map((m) => m.payload) };
+            else activation.outcome = { done: true, value: step.value };
           },
           fail(error) {
             activation.outcome = { error };
@@ -167,6 +171,50 @@ test("primes receive no view; resumes receive exactly the scheduler-sized delive
   );
   assert.equal(results.has(sink), false);
   assert.deepEqual(run!.results, new Map([[src, "src"]]));
+});
+
+test("a terminal batch is traced as completed messages, not as a result", async () => {
+  const tracer = new RecordingTracer();
+  const graph = new DataflowGraph<void, typeof NumberSchema, string, never>(
+    Width.create(1), UNBOUNDED, tracer,
+  );
+  const out = Edge.message("out", NumberSchema);
+  const src = graph.addNode({
+    state: undefined,
+    trigger: TriggerRule.always(),
+    // biome-ignore lint/correctness/useYield: the source finishes at prime.
+    async *step() { return new FinalMessages([Message.create(out, 7)]); },
+  });
+  const dst = graph.addNode(new StepNode<void, typeof NumberSchema, string>(() => [], {
+    state: undefined, trigger: TriggerRule.never(),
+  }));
+  graph.addEdge(src, dst, out);
+  await context({ graph, scheduler: parallel() }).run();
+  const [run] = tracer.runs;
+  assert.deepEqual(run!.activations.map((a) => a.outcome), [{ done: true, messages: [7] }]);
+  assert.deepEqual(graph.observe().inputs.get(dst)?.messages.get(out.id), [7]);
+  assert.equal(run!.results!.has(src), false);
+});
+
+test("a sink continuation and final batch are traced and delivered through its outbox", async () => {
+  const tracer = new RecordingTracer();
+  type Port = Sink<typeof NumberSchema, number>;
+  const graph = new DataflowGraph<Port, typeof NumberSchema, number, never>(Width.create(1), UNBOUNDED, tracer);
+  const external = Edge.message("outside", NumberSchema);
+  const sink = new Sink<typeof NumberSchema, number>(async function* () {
+    yield { resume: [Message.create(external, 4)] };
+    return new FinalMessages([Message.create(external, 5)]);
+  }, { id: NodeId.create("egress"), trigger: TriggerRule.always(), schema: NumberSchema });
+  graph.addNode(sink);
+  await context({ graph, scheduler: parallel() }).run();
+  assert.deepEqual(tracer.runs[0]?.activations.map((a) => a.outcome), [
+    { done: false, messages: [4] },
+    { done: true, messages: [5] },
+  ]);
+  const delivered: number[] = [];
+  sink.drain((message) => delivered.push(message.payload));
+  assert.deepEqual(delivered, [4, 5]);
+  assert.equal(graph.results().has(sink.id), false);
 });
 
 test("a throwing observer can neither replace a node's return nor its failure", async () => {
@@ -298,7 +346,7 @@ test("each run snapshots current topology and resumes from resolved values witho
     tracer,
   );
   const v = Edge.value("v", NumberSchema);
-  let enabled = false;
+  const release = Edge.message("release", NumberSchema);
   const seen: unknown[] = [];
   const src = graph.addNode({
     state: undefined,
@@ -310,18 +358,17 @@ test("each run snapshots current topology and resumes from resolved values witho
   });
   const dependent = graph.addNode({
     state: undefined,
-    trigger: TriggerRule.allOf(TriggerEntry.on(v)),
-    is_available: (view) => enabled && view.values.has(v.id),
+    trigger: TriggerRule.allOf(TriggerEntry.on(v), TriggerEntry.on(release)),
     step: async function* (): NodeGenerator<typeof NumberSchema, number> {
       const view = yield [];
       seen.push(view.values.get(v.id));
       return 8;
     },
   });
-  graph.addEdge(src, dependent, v);
+  graph.addEdge(src, dependent, v).addEdge(src, dependent, release);
 
   await context({ graph, scheduler: parallel() }).run();
-  enabled = true;
+  graph.emit(src, Message.create(release, 1));
   const isolated = graph.addNode(
     new StepNode<void, typeof NumberSchema, number>(() => [], {
       state: undefined,

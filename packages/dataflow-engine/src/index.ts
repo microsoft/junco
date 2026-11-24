@@ -17,7 +17,6 @@ export type { Identifiable } from "./identifiable.js";
 export type { EdgeId as EdgeIdType, NodeId as NodeIdType } from "./identity.js";
 export { EdgeId, NodeId } from "./identity.js";
 export type {
-  AvailabilityFn,
   ErrorFn,
   Lookup,
   Node,
@@ -25,10 +24,11 @@ export type {
   NodeOptions,
   NodeSpec,
   NodeStatus,
+  NodeYield,
   ParentView,
   StepFn,
 } from "./node.js";
-export { Message, messagesOf } from "./node.js";
+export { FinalMessages, Message, messagesOf } from "./node.js";
 export type { Pretty } from "./pretty.js";
 export { renderPretty } from "./pretty.js";
 export { Queue } from "./queue.js";

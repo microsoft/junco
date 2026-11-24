@@ -24,6 +24,7 @@ import {
   type VerusWorkspace,
 } from "../examples/verus/verus.ts";
 import { agent, syntax, tracer } from "../src/index.ts";
+import { userTexts } from "./deterministic-support.ts";
 import { leaf, nativeOptions, waitingTool } from "./support.ts";
 
 const TIMEOUT_MS = 10_000;
@@ -50,15 +51,7 @@ const verifyCall = (id: string) =>
     },
   );
 
-const userText = (context: Context): string =>
-  context.messages
-    .filter((message) => message.role === "user")
-    .map((message) =>
-      typeof message.content === "string"
-        ? message.content
-        : contentText(message.content),
-    )
-    .join("\n");
+const latestInput = (context: Context): string => userTexts(context.messages).at(-1)!;
 
 function rootCause(error: unknown): unknown {
   while (error instanceof DataflowNodeError) error = error.cause;
@@ -154,7 +147,7 @@ describe("Verus loop", () => {
         await leaf(
           [0, 1, 2].map((round) => (context: Context) => {
             activated.push("Verifier");
-            verifierPrompts.push(userText(context));
+            verifierPrompts.push(latestInput(context));
             return fauxAssistantMessage(
               `max.rs: translated round ${round + 1}`,
             );
@@ -188,7 +181,7 @@ describe("Verus loop", () => {
         await leaf(
           [0, 1].map((round) => (context: Context) => {
             activated.push("Cleanup");
-            cleanupPrompts.push(userText(context));
+            cleanupPrompts.push(latestInput(context));
             return fauxAssistantMessage(
               `max.rs: cleanup round ${round + 1}; preserve both lower-bound obligations.`,
             );
@@ -215,12 +208,14 @@ describe("Verus loop", () => {
       // The first output sink completes before the next round; cancellation at the second
       // Cleanup prevents that round's sink from being admitted.
       assert.deepEqual(observer.completed, [
+        "VerifierAssignment",
         "Verifier",
         "PrepareReviewer",
         "Reviewer",
         "PrepareCleanup",
         "Cleanup",
         "$sink",
+        "VerifierAssignment",
         "Verifier",
         "PrepareReviewer",
         "Reviewer",
@@ -296,6 +291,7 @@ describe("Verus loop", () => {
       assert.equal(reviewerActivations, 1);
       assert.equal(cleanupActivations, 0);
       assert.deepEqual(observer.completed, [
+        "VerifierAssignment",
         "Verifier",
         "PrepareReviewer",
         "Reviewer",
@@ -309,17 +305,25 @@ describe("Verus loop", () => {
     async () => {
       let runs = 7;
       const samples: number[] = [];
+      let assignment: string;
       await using verifier = (
-        await leaf([fauxAssistantMessage("max.rs: translation ready.")])
+        await leaf([(context: Context) => {
+          const work = JSON.parse(latestInput(context));
+          assert.equal(work.id, "VerifierAssignment~>Verifier");
+          assert.ok(work.payload.includes(workspace.spec));
+          assert.ok(work.payload.includes(workspace.outputDir));
+          assignment = work.payload;
+          return fauxAssistantMessage("max.rs: translation ready.");
+        }])
       ).agent;
       await using reviewer = (
         await leaf([
           (context: Context) => {
             assert.deepEqual(samples, [7]);
-            assert.match(
-              userText(context),
-              /Current Verifier report \(evidence\):\nmax.rs: translation ready\./,
-            );
+            const work = JSON.parse(latestInput(context));
+            assert.equal(work.id, "PrepareReviewer~>Reviewer");
+            assert.equal(work.payload.assignment, assignment);
+            assert.equal(syntax.finalText(work.payload.report, "Verifier"), "max.rs: translation ready.");
             runs++;
             return fauxAssistantMessage("max.rs: independent review ready.");
           },
@@ -329,10 +333,10 @@ describe("Verus loop", () => {
         await leaf([
           (context: Context) => {
             assert.deepEqual(samples, [7, 8]);
-            assert.match(
-              userText(context),
-              /Current Reviewer report \(evidence\):\nmax.rs: independent review ready\./,
-            );
+            const work = JSON.parse(latestInput(context));
+            assert.equal(work.id, "PrepareCleanup~>Cleanup");
+            assert.equal(work.payload.assignment, assignment);
+            assert.equal(syntax.finalText(work.payload.report, "Reviewer"), "max.rs: independent review ready.");
             return fauxAssistantMessage("max.rs: cleanup ready.");
           },
         ])
@@ -353,6 +357,9 @@ describe("Verus loop", () => {
         undefined,
         new RoleTracer(),
       );
+      await using graph = round.execution.graph;
+      assert.deepEqual([...graph.available().keys()], ["VerifierAssignment"]);
+      assert.equal(verifier.status, "idle");
       assert.deepEqual(samples, []);
       assert.equal(reviewer.status, "idle");
       assert.equal(cleanup.status, "idle");
@@ -421,12 +428,14 @@ describe("Verus loop", () => {
       assert.deepEqual(verification.observed, [0]);
       assert.equal(cleanupActivations, 1);
       assert.deepEqual(observer.completed, [
+        "VerifierAssignment",
         "Verifier",
         "PrepareReviewer",
         "Reviewer",
         "PrepareCleanup",
         "Cleanup",
         "$sink",
+        "VerifierAssignment",
         "Verifier",
         "PrepareReviewer",
         "Reviewer",

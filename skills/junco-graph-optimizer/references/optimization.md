@@ -34,9 +34,9 @@ How to prepare an existing `workflow.yml`/`workflow.ts` pair once, author topolo
 Read the pair, actual invocation (scripts, README, CI), TS build options and the standard library index before asking. Record:
 
 - Nodes, edge IDs (`edge.id ?? from + ("~>" message | "->" value) + to`), nested wrapper paths, labels (`name ?? node id`), triggers, `source.routes`, `sink.returns`, and agents that `send` on message edges.
-- For each target, record the staged instruction, value placeholders, and scheduler-delivered message edges/order separately. YAML prompt text alone is no longer the complete assignment; message content arrives by steering. Preserve all of it when freezing the helper template.
-- TS bindings: code node/edge IDs, prepared `agents` maps keyed by exact agent paths, measurement windows, terminal checks, `scheduler(label)` dispatch, ladder/limits, `available` hooks (including `schedules.ralph`), `config.code` keys, recorder/tracer/collection ownership.
-- Matching indexed building blocks (such as `workflows.ralph`, fan-in workflows and graph node bodies), their input routes, edge transports, outputs and required controller hooks. Read the definition's JSDoc before reuse; establish compatibility during preparation, then use only what the prepared runner supports.
+- For each target, record the registered instruction, interpolated value and return-message placeholders, and scheduler-delivered message edges/order separately. YAML prompt text alone is no longer the complete assignment; message content arrives by steering. Preserve all of it when freezing the helper template.
+- TS bindings: code node/edge IDs, prepared `agents` maps keyed by exact agent paths, measurement windows, terminal checks, `scheduler(label)` dispatch, ladder/limits, controller definitions (including `schedules.ralph`), `config.code` keys, recorder/tracer/collection ownership.
+- Matching indexed building blocks (such as `workflows.ralph`, fan-in workflows and graph node bodies), their input routes, edge transports, outputs and required controller registrations. Read the definition's JSDoc before reuse; establish compatibility during preparation, then use only what the prepared runner supports.
 - Existing authoritative whole-workload evaluator; for each Ralph target, an existing synchronous checker of one completed result. Do not invent either. Inspect tools/MCP/skills and repeat safety/reset requirements. Apply the Helper module's reserved-namespace collision refusal before preparation.
 
 Ask only unresolved intake, batching questions. Before measurement require all six:
@@ -76,11 +76,11 @@ Before changing the runner, search `original.yml` and `original.ts` for the text
 import { rename, readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { graph, schedules, syntax } from "junco";
+import { graph, schedules, syntax, TaskSchema } from "junco";
 import type { TArray, TSchema } from "typebox";
+import { Value } from "typebox/value";
 
 type Edges = syntax.CodeContext["edges"];
-type Available = NonNullable<syntax.BuildOptions["available"]>;
 const PLACEHOLDER = /\{\{\s*([^}]+?)\s*\}\}/g;
 
 /** Locally declared edges whose IDs start with `prefix`, in YAML declaration order. */
@@ -100,26 +100,17 @@ function delivered(
 /** A plain text prompt input, or a normally finished, non-empty assistant report; anything else throws. */
 function textOf(payload: unknown, edgeId: string): string {
   if (typeof payload === "object" && payload !== null && "kind" in payload) {
-    const { kind, text, images } = payload as Record<string, unknown>;
-    if (
-      kind !== "prompt" ||
-      typeof text !== "string" ||
-      !text.trim() ||
-      (Array.isArray(images) && images.length > 0)
-    )
+    if (!Value.Check(TaskSchema, payload) || payload.kind !== "prompt" || !payload.text.trim() || payload.images?.length)
       throw new TypeError(`${edgeId} carries an input that is not a non-empty text prompt`);
-    return text;
+    return payload.text;
   }
   return syntax.finalText(payload, edgeId);
 }
 
-/** Sends one task `Task.create({ kind: "prompt", text, spec: text })` once on `outputs` through the standard primitive, then returns. */
+/** Publish the assignment once without returning a business result. */
 function broadcast(text: string, outputs: graph.Edge<TSchema, unknown>[]) {
-  return new graph.nodes.ConstFanout<undefined, TSchema, unknown>(
-    graph.nodes.Task.create({ kind: "prompt", text, spec: text }), // the fanned-out assignment is its own completion spec
-    outputs,
-    { state: undefined, ret: undefined },
-  ).step();
+  const task = graph.nodes.Task.create({ kind: "prompt", text, spec: text });
+  return new graph.FinalMessages(outputs.map(edge => graph.Message.create(edge, task)));
 }
 
 /** `__junco_fanout`: one payload on `__junco_fanout:input`, broadcast to every `__junco_fanout:worker:*` edge. */
@@ -128,19 +119,13 @@ export const fanout: syntax.DeterministicNode = ({ node, edges, policy }) => {
   const outputs = declared(edges, "__junco_fanout:worker:");
   if (input === undefined || outputs.length === 0)
     throw new Error(`${node} needs edge "__junco_fanout:input" and "__junco_fanout:worker:*" edges`);
-  let emitting = false;
-  return {
-    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
-      const payloads = delivered(yield [], input);
-      if (payloads.length !== 1)
-        throw new Error(`${node} needs exactly one payload on "${input.id}"`);
-      const text = textOf(payloads[0], input.id);
-      emitting = true;
-      return yield* broadcast(text, outputs);
-    }, policy),
-    // Priming reads nothing; stay available through the emission's terminal-return activation.
-    is_available: (_view, triggered) => emitting || triggered,
-  };
+  return new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+    const payloads = delivered(yield [], input);
+    if (payloads.length !== 1)
+      throw new Error(`${node} needs exactly one payload on "${input.id}"`);
+    const text = textOf(payloads[0], input.id);
+    return broadcast(text, outputs);
+  }, policy);
 };
 
 /** `__junco_fanin`: `ConstFanin` over `__junco_fanin:input:*` (declaration order) onto `__junco_fanin:output`. */
@@ -154,17 +139,21 @@ export const fanin: syntax.DeterministicNode = ({ node, edges, policy }) => {
     output as graph.Edge<TArray<TSchema>, unknown>,
     { state: undefined, ret: undefined },
   );
-  return {
-    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
-      return yield* collector.step();
-    }, policy),
-    is_available: (view, triggered) => {
-      // Every candidate is a normally finished, non-empty report before the primitive keeps it.
-      for (const edge of inputs)
-        for (const payload of view.messages.get(edge.id) ?? []) syntax.finalText(payload, edge.id);
-      return collector.is_available(view, triggered);
-    },
-  };
+  return new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+    const body = collector.step();
+    try {
+      let turn = await body.next();
+      while (!turn.done) {
+        const view = yield turn.value;
+        for (const edge of inputs)
+          for (const payload of view.messages.get(edge.id) ?? []) syntax.finalText(payload, edge.id);
+        turn = await body.next(view);
+      }
+      return turn.value;
+    } finally {
+      await body.return(undefined);
+    }
+  }, policy);
 };
 
 /**
@@ -191,30 +180,27 @@ export const assignment =
       throw new Error(
         `${node}: template placeholders ${JSON.stringify(used)} must match inputs ${JSON.stringify(names)}, with an output`,
       );
-    let emitting = false;
-    return {
-      state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
-        const view = yield [];
-        const texts = new Map<string, string>();
-        for (const [index, edge] of inputs.entries()) {
-          const payloads = delivered(view, edge);
-          if (payloads.length === 0)
-            throw new Error(`${node}: required input "${names[index]}" is missing`);
-          texts.set(names[index], payloads.map((p) => textOf(p, names[index])).join("\n\n"));
-        }
-        const text = template.replace(PLACEHOLDER, (_, id: string) => texts.get(id) ?? "");
-        if (!text.trim()) throw new Error(`${node}: the rendered assignment is empty`);
-        emitting = true;
-        return yield* broadcast(text, outputs);
-      }, policy),
-      is_available: (_view, triggered) => emitting || triggered,
-    };
+    return new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+      const view = yield [];
+      const texts = new Map<string, string>();
+      for (const [index, edge] of inputs.entries()) {
+        const payloads = delivered(view, edge);
+        if (payloads.length === 0)
+          throw new Error(`${node}: required input "${names[index]}" is missing`);
+        texts.set(names[index], payloads.map((p) => textOf(p, names[index])).join("\n\n"));
+      }
+      const text = template.replace(PLACEHOLDER, (_, id: string) => texts.get(id) ?? "");
+      if (!text.trim()) throw new Error(`${node}: the rendered assignment is empty`);
+      return broadcast(text, outputs);
+    }, policy);
   };
 
 /** `config.code` plus the three reserved helpers; a same-named existing entry is a collision. */
 export function withOptimizerCode<C>(
   existing: Readonly<Record<string, syntax.DeterministicNode<C>>> | undefined,
   templates: Readonly<Record<string, string>>,
+  checks: Readonly<Record<string, schedules.RalphPredicate>>,
+  rounds?: number,
 ): Record<string, syntax.DeterministicNode<C>> {
   const added = {
     __junco_fanout: fanout,
@@ -224,7 +210,14 @@ export function withOptimizerCode<C>(
   for (const id of Object.keys(added))
     if (existing !== undefined && Object.hasOwn(existing, id))
       throw new Error(`config.code already defines reserved "${id}"`);
-  return { ...existing, ...added };
+  const code = { ...existing, ...added };
+  if (Object.keys(checks).length === 0) return code;
+  const optimized = ralphUntil(checks, rounds).code.RalphControl;
+  return { ...code, RalphControl(ctx) {
+    if (Object.hasOwn(checks, ctx.label)) return optimized(ctx);
+    if (existing?.RalphControl) return existing.RalphControl(ctx);
+    throw new Error(`no Ralph controller for graph label "${ctx.label}"`);
+  } };
 }
 
 /** `schedules.ralph` judged by the fixed authoritative check of each prepared `__junco_ralph_*` label. */
@@ -242,21 +235,6 @@ export function ralphUntil(
   });
 }
 
-/** Existing hooks on every level; on a prepared label also `added`, conjoined with an existing gate. */
-export function mergeAvailable(
-  existing: Available | undefined,
-  added: Available,
-  prepared: ReadonlySet<string>,
-): Available {
-  const merged: Record<string, Available[string]> = {};
-  for (const id of new Set([...Object.keys(existing ?? {}), ...Object.keys(added)]))
-    merged[id] = (context) => {
-      const old = existing?.[id]?.(context);
-      const extra = prepared.has(context.label) ? added[id]?.(context) : undefined;
-      return old && extra ? (view, triggered) => old(view, triggered) && extra(view, triggered) : (extra ?? old);
-    };
-  return merged;
-}
 
 /** sha256 of the parsed document with object keys sorted recursively: a topology's identity. */
 export function graphHash(document: syntax.JuncoDocument): string {
@@ -312,8 +290,8 @@ export async function writeCompletion(
 Helper contracts:
 
 - One local ID serves every nested level: `options.code` is keyed by local node ID, and each helper binds only the edges declared at its own level.
-- `__junco_fanout` and `__junco_assignment` emit through `graph.nodes.ConstFanout`; `__junco_fanin` collects through `graph.nodes.ConstFanin`. Each is wrapped in `graph.nodes.Deterministic` with `yield*`, so close/throw/return reach the primitive. Give `__junco_fanin` `trigger: { any: [...its inputs] }`; it emits the array only after every input arrived, in declaration order.
-- Missing/blank/abnormal/non-text input, a missing route or output, or a template/input mismatch throws — data is never dropped. A consumer of `__junco_fanin:output` receives the ordered array as a steered user message encoded as `JSON.stringify({ id: "__junco_fanin:output", payload: reports })`; it reads `payload`, never a tool or YAML prompt placeholder. Every agent stages its instruction before the delivered user messages. Values are not steered; YAML agent placeholders render inbound values only.
+- `__junco_fanout` and `__junco_assignment` finish with `graph.FinalMessages`. `__junco_fanin` validates each delivered view before advancing its `ConstFanin` and closes the delegated body on exit. Give `__junco_fanin` `trigger: { any: [...its inputs] }`; it emits the array only after every input arrived, in declaration order.
+- Missing/blank/abnormal/non-text input, a missing route or output, or a template/input mismatch throws — data is never dropped. A consumer of `__junco_fanin:output` receives the ordered array as a steered user message encoded as `JSON.stringify({ id: "__junco_fanin:output", payload: reports })`; it reads `payload`, never a tool or YAML prompt placeholder. Every agent stages its instruction before the delivered user messages. Values are not steered; YAML agent placeholders can also render return FIFOs instead of steering those results.
 - Only the edges are new; no tools, permissions or isolation are added.
 - `ASSIGNMENTS` is expanded by the code-node helper above, not the YAML agent prompt renderer. Keep its message-edge references: they render the task once before the helper broadcasts it. Downstream agents stage constant role instructions and receive that task through steering, without copying it into their YAML prompts.
 
@@ -351,12 +329,7 @@ let execution: Awaited<ReturnType<typeof JuncoGraph.fromYaml>> | undefined;
 try {
   execution = await JuncoGraph.fromYaml(document, {
     /* every existing option, unchanged, except: */
-    code: withOptimizerCode(/* existing config.code */ undefined, ASSIGNMENTS),
-    available: mergeAvailable(
-      /* existing available hooks */ undefined,
-      ralphUntil(RALPH_CHECKS /* , a caller-authorized cap fixed now */).available,
-      new Set(Object.keys(RALPH_CHECKS)),
-    ),
+    code: withOptimizerCode(/* existing config.code */ undefined, ASSIGNMENTS, RALPH_CHECKS /* , caller-authorized cap */),
     tracer: observer,
     ...(recorder === undefined ? {} : { recorder }),
   });
@@ -381,10 +354,10 @@ Integration rules:
 - Without `JUNCO_GRAPH_RUN_DIR` the workflow behaves exactly as before: no recorder, no receipt, helpers dormant.
 - **Recorder.** Attach it on the existing ownership path (`fromYaml`'s `recorder`; factory agents receive it through their spec). If the runner already has a recorder, integrate it or report the ownership conflict — never replace it silently. Usage mode records every request's cost, failed and aborted ones included; activation rows then omit cost. An existing model-backed scheduler must record its own request usage to the same recorder without changing decisions; if complete request accounting is impossible, report that prerequisite and make no total-cost claims.
 - **Code.** `withOptimizerCode` merges into the existing `config.code` and throws on collisions.
-- **Availability.** `mergeAvailable` keeps existing hooks on every level and adds the success-mode Ralph controller only on prepared `__junco_ralph_*` labels. If the runner already spreads a fixed-round `schedules.ralph(...)`, wrap that existing factory so it declines prepared labels (`(context) => prepared.has(context.label) ? undefined : old(context)`): its round policy stays as it is everywhere else and never caps the new loop.
+- **Ralph control.** Only a graph containing `RalphControl` executes the controller factory. Dispatch by prepared label, retaining the original controller and its limits elsewhere; reject label collisions during preparation.
 - **Checks.** `RALPH_CHECKS` entries call an existing deterministic checker or authoritative host-state probe synchronously and judge the current result, assignment and round — never a stale flag, never the model's own claim. An async-only evaluator is a prerequisite to report: a Promise is not a decision (`until` throws on one). A whole-workload metric does not validate an intermediate node.
-- **Geometry bindings.** Allow only necessary local-ID membership/order changes, graph-label dispatch entries, prepared-agent path keys, availability/code registry keys and edge/path references. Remove bindings for deleted geometry. Keep measurement windows fixed; new nodes start without samples. Reuse an existing factory for new agents; do not share one prepared agent across workers or add ownership infrastructure.
-- **Per-level policy.** Graph labels, local IDs and slash-joined wrapper paths are distinct. Every nested graph calls `scheduler(label)` separately; parent strength does not propagate to child agents. Audit each new level and explicitly give it the containing graph's effective `window`/`threads`, rather than accidentally becoming unbounded. Rebind custom readiness only if its original meaning is preserved; never drop a gate in favor of native readiness.
+- **Geometry bindings.** Allow only necessary local-ID membership/order changes, graph-label dispatch entries, prepared-agent path keys, controller/code registry keys and edge/path references. Remove bindings for deleted geometry. Keep measurement windows fixed; new nodes start without samples. Reuse an existing factory for new agents; do not share one prepared agent across workers or add ownership infrastructure.
+- **Per-level policy.** Graph labels, local IDs and slash-joined wrapper paths are distinct. Every nested graph calls `scheduler(label)` separately; parent strength does not propagate to child agents. Audit each new level and explicitly give it the containing graph's effective `window`/`threads`, rather than accidentally becoming unbounded. Preserve declarative triggers, source credits and executed controller behavior.
 - **Limits.** New contexts may reuse inherited policy with identical limits, but local ledgers add constraints, not allowance. Never divide a shared allowance among branches, multiply it, move it inward or relax it. Parent token/tool budgets cover child work; parent memory admission sees the wrapper. If wrapping evades an existing memory constraint, report the candidate inapplicable rather than inventing estimates or changing limits.
 - **Audit.** For every TS variant, list old→new bindings alongside the YAML change and verify unchanged effective model/strength/escalation, scheduling, limits, ownership and gates. Hash identity alone does not establish policy equivalence. Reference-only evaluator/terminal rekeys must still read the same authoritative value.
 - Check the prepared file without paid execution (existing typecheck or `bun build --no-bundle workflow.ts`), save immutable `prepared.ts` and its sha256, and validate the unchanged baseline. Prepare frozen `ASSIGNMENTS` entries for eligible original targets and `RALPH_CHECKS` only where an existing synchronous checker applies. Missing checker/label is a prerequisite, never an always-true fallback.
@@ -397,11 +370,11 @@ Per child run, `<sessionDir>/runs/NNNN/request.json` is exactly `{ "version": 1,
 
 Eligible target: one agent node whose task can be carried as text. The replacement is a `kind: graph` node under the **same node ID** that keeps:
 
-- every parent-facing edge (IDs, kinds, schemas), the node's `trigger`, and its terminal contract. The wrapper's result is its `sink.returns` node's normal final `AssistantMessage`; value out-edges carry it as before. A graph node also forwards that result on every outbound **message** edge automatically: if the original agent had message out-edges (it `send`s), the candidate is inapplicable.
+- every parent-facing edge (IDs, kinds, schemas), the node's `trigger`, and its terminal contract. The wrapper's result is its `sink.returns` node's normal final `AssistantMessage`; value out-edges carry it as before. A graph node also forwards that result on every ordinary outbound **message** edge automatically (return-message edges instead receive the exact settlement once): if the original agent had ordinary message out-edges (it `send`s), the candidate is inapplicable.
 - the original system prompt, tools, MCP, skills and `tool_block` on every new agent (equal or narrower, never broader).
-- the original task: each parent edge `<id>` is routed by `source.routes` to `__junco_assignment:input:<id>`. Freeze `ASSIGNMENTS[label]` as the original `prompt` text verbatim (keeping value placeholders), followed by one helper placeholder per inbound message edge in the original scheduler's delivered edge order. Each message's text is included exactly once; do not omit it merely because the YAML prompt no longer references it. A no-input target uses `trigger: always` on `__junco_assignment` and its literal prompt.
+- the original task: each parent edge `<id>` is routed by `source.routes` to `__junco_assignment:input:<id>`. Freeze `ASSIGNMENTS[label]` as the original `prompt` text verbatim (keeping value and return-message placeholders), followed by one helper placeholder per separately steered inbound message edge in the original scheduler's delivered edge order. Each message's text is included exactly once; do not omit it merely because the YAML prompt no longer references it. An always-triggered original agent is recurring, not a finite one-shot target.
 
-Inapplicable (report the reason): an `any`/partial trigger, a re-armed or multi-activation target, image/structured/raw inputs that cannot be represented by the unchanged text helper, unreferenced value inputs, message out-edges, bindings that cannot preserve the Runner integration policy, or tools a new node would need beyond the original's. Also reject a target whose scheduler withholds/reorders inputs in a way this frozen template cannot preserve, or whose semantics depend on separate user-message boundaries: the helper joins text into one assignment. Steered text message inputs are eligible only when their complete content and order are preserved by the template; never change read policy to make a candidate fit.
+Inapplicable (report the reason): an `any`/partial trigger, a re-armed or multi-activation target, image/structured/raw inputs that cannot be represented by the unchanged text helper, unreferenced value inputs, ordinary message out-edges, bindings that cannot preserve the Runner integration policy, or tools a new node would need beyond the original's. Also reject a target whose scheduler withholds/reorders inputs in a way this frozen template cannot preserve, or whose semantics depend on separate user-message boundaries: the helper joins text into one assignment. Steered text message inputs are eligible only when their complete content and order are preserved by the template; never change read policy to make a candidate fit.
 
 Labels: replacement graph `name: __junco_opt_<encodeURIComponent(originalNodePath)>`; inner Ralph `name: __junco_ralph_<encodeURIComponent(originalNodePath)>`. Reserve both in `ASSIGNMENTS`/`RALPH_CHECKS` during preparation.
 
@@ -419,6 +392,7 @@ graph:
   nodes:
     Task:
       kind: emit
+      spec: Cover the faster startup and the empty-input crash fix.
       text: Draft the release note for version 2.4.0. It must cover the faster startup and the crash fix for empty input.
     Solve:
       kind: graph
@@ -497,13 +471,13 @@ graph:
       trigger: Solve->Final
   edges:
     - { from: Task, to: Solve, kind: message, schema: *prompt }
-    - { from: Solve, to: Final, schema: *assistant }
+    - { from: Solve, to: Final, kind: message, on: return, id: "Solve->Final", schema: *assistant }
     - { from: Final, to: $sink, schema: *assistant }
 ```
 
-### A2. Ralph self-loop
+### A2. Ralph revision loop
 
-The inner graph is `syntax.parse(workflows.ralph).graph` with only `name` and `source.routes` rekeyed and the original role (`system`, tools…) set on its single `Ralph` agent; it keeps `Ralph->Ralph` and `Ralph -> $sink` unchanged. The prepared `ralphUntil` controller ends it when `RALPH_CHECKS["__junco_ralph_Solve"]` accepts a completed result; there is no implicit round cap and no reviewer inside the loop. An explicit cap is set once at preparation only if the caller authorizes it; a capped or failed loop is a failed run whose spend still counts.
+The inner graph is `syntax.parse(workflows.ralph).graph` with only `name` and `source.routes` rekeyed and the original role (`system`, tools…) set on its single `Ralph` agent; preserve `{ ...inner.source, routes }`, `Ralph.prompt`, the completion FIFO, credits and acceptance join. The prepared `ralphUntil` controller ends it when `RALPH_CHECKS["__junco_ralph_Solve"]` accepts a completed result; there is no implicit round cap and no reviewer inside the loop. An explicit cap is set once at preparation only if the caller authorizes it; a capped or failed loop is a failed run whose spend still counts.
 
 ```yaml ralph.yml
 graph:
@@ -511,10 +485,11 @@ graph:
   nodes:
     Task:
       kind: emit
+      spec: Cover the faster startup and the empty-input crash fix.
       text: Draft the release note for version 2.4.0. It must cover the faster startup and the crash fix for empty input.
     Solve:
       kind: graph
-      description: Ralph self-loop replacing the original Solve agent.
+      description: Ralph revision loop replacing the original Solve agent.
       trigger: Task~>Solve
       graph:
         name: __junco_opt_Solve
@@ -531,19 +506,41 @@ graph:
             graph:
               name: __junco_ralph_Solve
               source:
+                trigger: { any: [ingress-open, ingress-ack] }
                 routes:
                   "__junco_assignment:output": ["$source~>Ralph"]
+              sink:
+                returns: Ralph
+                trigger: { all: ["Ralph->$sink", ralph-accepted] }
               nodes:
+                IngressOpen:
+                  kind: emit
+                  text: Admit the assignment.
+                  spec: One source delivery.
+                RalphControl:
+                  kind: code
+                  trigger: { any: ["$source~>Ralph", ralph-complete] }
                 Ralph:
                   system: You are a careful release engineer.
                   description: Revises its complete answer each round; only the final round reaches $sink.
-                  trigger:
-                    any: ["$source~>Ralph", "Ralph->Ralph"]
+                  trigger: "RalphControl~>Ralph"
+                  prompt: >-
+                    On the first round, achieve the objectives in the following task messages, in order.
+                    On phase "revise", take another try at the ordered objectives, building on your last
+                    answer in this session. On phase "retry", the previous attempt ended with a provider
+                    error: continue the same round from where you left off. Focus on depth: finish
+                    objectives well rather than attempting more of them. Return the complete answer.
               edges:
-                - from: $source
-                  to: Ralph
+                - from: IngressOpen
+                  to: $source
+                  id: ingress-open
                   kind: message
-                  schema:
+                  schema: { type: object }
+                - from: $source
+                  to: RalphControl
+                  id: "$source~>Ralph"
+                  kind: message
+                  schema: &task
                     type: object
                     required: [kind, text]
                     properties:
@@ -558,8 +555,23 @@ graph:
                             type: { const: image }
                             data: { type: string }
                             mimeType: { type: string }
-                - from: Ralph
+                - from: RalphControl
                   to: Ralph
+                  kind: message
+                  schema:
+                    anyOf:
+                      - *task
+                      - type: object
+                        required: [phase, round, objectives]
+                        properties:
+                          phase: { enum: [retry, revise] }
+                          round: { type: integer, minimum: 1 }
+                          objectives: { type: array, items: { type: string } }
+                - from: Ralph
+                  to: RalphControl
+                  kind: message
+                  on: return
+                  id: ralph-complete
                   schema: &assistant
                     type: object
                     required: [role, content, stopReason]
@@ -587,6 +599,16 @@ graph:
                 - from: Ralph
                   to: $sink
                   schema: *assistant
+                - from: RalphControl
+                  to: $sink
+                  id: ralph-accepted
+                  kind: message
+                  schema: &signal { type: boolean, const: true }
+                - from: RalphControl
+                  to: $source
+                  id: ingress-ack
+                  kind: message
+                  schema: *signal
         edges:
           - { from: $source, to: __junco_assignment, kind: message, id: "__junco_assignment:input:Task~>Solve", schema: &prompt { type: object, required: [kind, text], properties: { kind: { const: prompt }, text: { type: string } } } }
           - { from: __junco_assignment, to: Ralph, kind: message, id: "__junco_assignment:output", schema: *prompt }
@@ -598,7 +620,7 @@ graph:
       trigger: Solve->Final
   edges:
     - { from: Task, to: Solve, kind: message, schema: *prompt }
-    - { from: Solve, to: Final, schema: *assistant }
+    - { from: Solve, to: Final, kind: message, on: return, id: "Solve->Final", schema: *assistant }
     - { from: Final, to: $sink, schema: *assistant }
 ```
 
@@ -612,6 +634,7 @@ graph:
   nodes:
     Task:
       kind: emit
+      spec: Cover the faster startup and the empty-input crash fix.
       text: Draft the release note for version 2.4.0. It must cover the faster startup and the crash fix for empty input.
     Solve:
       kind: graph
@@ -680,7 +703,7 @@ graph:
       trigger: Solve->Final
   edges:
     - { from: Task, to: Solve, kind: message, schema: *prompt }
-    - { from: Solve, to: Final, schema: *assistant }
+    - { from: Solve, to: Final, kind: message, on: return, id: "Solve->Final", schema: *assistant }
     - { from: Final, to: $sink, schema: *assistant }
 ```
 
@@ -698,6 +721,7 @@ graph:
   nodes:
     Task:
       kind: emit
+      spec: Cover the faster startup and the empty-input crash fix.
       text: Draft the release note for version 2.4.0. It must cover the faster startup and the crash fix for empty input.
     Solve:
       system: You are a careful release engineer.
@@ -715,12 +739,12 @@ graph:
       trigger: Relay->Final
   edges:
     - { from: Task, to: Solve, kind: message, schema: &prompt { type: object, required: [kind, text], properties: { kind: { const: prompt }, text: { type: string } } } }
-    - { from: Solve, to: Relay, schema: &assistant { type: object, required: [role, content, stopReason], properties: { role: { const: assistant }, content: { type: array }, stopReason: { type: string } } } }
-    - { from: Relay, to: Final, schema: *assistant }
+    - { from: Solve, to: Relay, kind: message, on: return, id: "Solve->Relay", schema: &assistant { type: object, required: [role, content, stopReason], properties: { role: { const: assistant }, content: { type: array }, stopReason: { type: string } } } }
+    - { from: Relay, to: Final, kind: message, on: return, id: "Relay->Final", schema: *assistant }
     - { from: Final, to: $sink, schema: *assistant }
 ```
 
-Candidate: delete `Relay` and its incident edges, reconnect the producer directly (value stays value, same schema), and rewrite every reference — `Final`'s placeholder and trigger now name `Solve->Final`:
+Candidate: delete `Relay` and its incident edges, reconnect the producer directly (return FIFO stays a return FIFO, same schema), and rewrite every reference — `Final`'s placeholder and trigger now name `Solve->Final`:
 
 ```yaml ablated.yml
 graph:
@@ -728,6 +752,7 @@ graph:
   nodes:
     Task:
       kind: emit
+      spec: Cover the faster startup and the empty-input crash fix.
       text: Draft the release note for version 2.4.0. It must cover the faster startup and the crash fix for empty input.
     Solve:
       system: You are a careful release engineer.
@@ -740,7 +765,7 @@ graph:
       trigger: Solve->Final
   edges:
     - { from: Task, to: Solve, kind: message, schema: &prompt { type: object, required: [kind, text], properties: { kind: { const: prompt }, text: { type: string } } } }
-    - { from: Solve, to: Final, schema: &assistant { type: object, required: [role, content, stopReason], properties: { role: { const: assistant }, content: { type: array }, stopReason: { type: string } } } }
+    - { from: Solve, to: Final, kind: message, on: return, id: "Solve->Final", schema: &assistant { type: object, required: [role, content, stopReason], properties: { role: { const: assistant }, content: { type: array }, stopReason: { type: string } } } }
     - { from: Final, to: $sink, schema: *assistant }
 ```
 

@@ -9,8 +9,8 @@
 #   --verdicts--> TournamentGate (code, any: first valid or least-bad applying patch) --> Apply (code)
 #   --> Integrator (Sonnet, canonical /testbed) --> Freeze (code) --> Verifier (Haiku, canonical, read-only)
 #   --> Finish (code: unchanged deliverable, final checks in a pristine sandbox) --> $sink.
-# Agents hand off only through their final answers (value edges); code nodes publish every message. (Live
-# preflight: Sonnet 5 on Copilot passes `send`'s untyped payload as a JSON string, which the edge rejects.)
+# Agents hand off only through their final answers (value or return-message edges); code nodes send the assignments.
+# Live preflight: Sonnet 5 on Copilot passes `send`'s untyped payload as a JSON string, which the edge rejects.
 # Termination: Finish returns the terminal report. After three corrections a parsed plan keeps surviving
 # checks; if both patches fail acceptance, an applying patch with the fewest failed checks reaches Integrator.
 # Malformed plans, two non-applying candidates, changed deliverables and failed final checks still fail explicitly.
@@ -163,13 +163,17 @@ graph:
           Draft:
             description: Writes the complete plan, and a complete corrected plan for each CheckPlan rejection.
             trigger:
-              any: ["$source~>Draft", "Draft->Draft"]
+              any: ["$source~>Draft", "CheckPlan~>Draft"]
             system: |
               You are the technical lead planning the fix for one GitHub issue from your team's evidence. You have
               no shell. Your plan is executed by two independent implementers and its checks are run automatically,
               exactly as written, so precision matters more than prose.
             prompt: |
-              Read the issue and joined evidence in the user message following this prompt.
+              On your first assignment, read the issue and joined evidence in the following user message.
+              On a correction assignment, `attempt` is the correction turn (1–3) and `feedback` explains why
+              the automatic baseline run rejected your last plan. Return the complete corrected plan, keeping
+              the checks that held and full behaviour-matrix coverage. Repair unsupported commands using the
+              evidence. Never weaken a check or its expected behaviour to make it pass.
 
               Write the plan as one JSON object in a single ```json fenced block, with exactly these fields:
               {
@@ -202,8 +206,8 @@ graph:
                 command that failed because a test, class, module or plugin does not exist, or because the runner
                 could not start, is not evidence about the issue: replace it with a command the evidence shows works.
               - At least one reproduction and one regression check must survive the baseline run. Otherwise you
-                receive the observed baseline results and must return a complete corrected plan; after three
-                correction turns the run fails.
+                receive the baseline results and must return a complete corrected plan. After three corrections
+                only a well-formed plan can proceed, with the checks that survived.
 
               Candidates: give A and B materially different approaches when the evidence admits more than one
               sound fix; otherwise give the same approach and let them implement it independently. Never force a
@@ -214,13 +218,13 @@ graph:
           CheckPlan:
             kind: code
             description: >-
-              Runs draft checks on the clean baseline; stages at most three corrections, then submits a parsed
-              plan with its surviving checks. A malformed fourth draft still fails.
-            trigger: Draft->CheckPlan
+              Runs draft checks on the clean baseline; requests at most three corrections, then submits a
+              parsed plan with its surviving checks. A malformed fourth draft still fails.
+            trigger: Draft~>CheckPlan
         edges:
           - {from: $source, to: Draft, kind: message, schema: &prompt {type: object, required: [kind, text], properties: {kind: {const: prompt}, text: {type: string, pattern: "\\S"}}}}
-          - {from: Draft, to: Draft, schema: {}}
-          - {from: Draft, to: CheckPlan, schema: {}}
+          - {from: Draft, to: CheckPlan, kind: message, on: return, schema: {}}
+          - {from: CheckPlan, to: Draft, kind: message, schema: {type: object, required: [attempt, feedback], properties: {attempt: {type: integer, minimum: 1, maximum: 3}, feedback: {type: string}}}}
           - {from: CheckPlan, to: $sink, schema: {}}
 
     Dispatch:
@@ -279,8 +283,8 @@ graph:
     TournamentGate:
       kind: code
       description: >-
-        Publishes the first valid verdict it consumes exactly once and cancels the losing branch; both
-        invalid is an explicit no-winner failure.
+        Publishes the first valid verdict and cancels the losing branch. With two invalid verdicts,
+        selects the applying patch with fewest failed checks if one exists; otherwise fails.
       trigger:
         any: ["ValidateA~>TournamentGate", "ValidateB~>TournamentGate"]
 

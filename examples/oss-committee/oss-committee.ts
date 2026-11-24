@@ -21,7 +21,6 @@ import { lstat, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import * as E from "fp-ts/lib/Either.js";
 import { type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 import { Task, TaskSchema, Deterministic, graph as graphApi, JuncoGraph, schedules, syntax, tracer } from "junco";
@@ -165,10 +164,9 @@ type SearchCounts = Pick<OssSearchTool, "searches" | "failures">;
 type RoundContext = {
   readonly request: string;
   readonly feedback?: string;
-  readonly members: Members;
   readonly search: SearchCounts;
   readonly failuresBefore: number;
-  architectStarted: boolean;
+  acceptedPartial: boolean;
 };
 
 const partialResearchId = graphApi.EdgeId.create("Librarian~>DesignAssignment");
@@ -177,68 +175,56 @@ const reducerResearchId = graphApi.EdgeId.create("Librarian->ReviewAssignment");
 const designId = graphApi.EdgeId.create("Architect->ReviewAssignment");
 
 /** Prepare the first assignment at execution time, without starting or replacing any member. */
-const ResearchAssignment: syntax.DeterministicNode<RoundContext> = ({ context, edges, policy }) => {
-  let published = false;
-  return {
-    state: new Deterministic<TSchema, unknown>(async function* () {
-      const { request, feedback } = context;
-      const text = `Original request:\n${request}\n\n${feedback === undefined ? "" : `Review feedback:\n${feedback}\n\n`}` +
-        (feedback === undefined
-          ? "Search public GitHub repositories using only generic technical terms, then report the available evidence and any research gaps."
-          : "Continue investigating with new search_oss lookups using only generic technical terms, then report the updated evidence and any remaining research gaps.");
-      published = true;
-      // Like a YAML emit node, publish once and park; assignments are messages, not fake reports.
-      const task = Task.create({ kind: "prompt", text, spec: "A research report citing public OSS evidence and stating its gaps." });
-      while (true) yield [graphApi.Message.create(edges.get("ResearchAssignment~>Librarian")!, task)];
-    }, policy),
-    is_available: (_view, triggered) => triggered && !published,
-  };
-};
+const ResearchAssignment: syntax.DeterministicNode<RoundContext> = ({ context, edges, policy }) =>
+  new Deterministic<TSchema, unknown>(async function* () {
+    const { request, feedback } = context;
+    const text = `Original request:\n${request}\n\n${feedback === undefined ? "" : `Review feedback:\n${feedback}\n\n`}` +
+      (feedback === undefined
+        ? "Search public GitHub repositories using only generic technical terms, then report the available evidence and any research gaps."
+        : "Continue investigating with new search_oss lookups using only generic technical terms, then report the updated evidence and any remaining research gaps.");
+    const task = Task.create({ kind: "prompt", text, spec: "A research report citing public OSS evidence and stating its gaps." });
+    return new graphApi.FinalMessages([graphApi.Message.create(edges.get("ResearchAssignment~>Librarian")!, task)]);
+  }, policy);
 
 /** Admit either exactly one partial prompt or a valid, normally completed research report. */
-const DesignAssignment: syntax.DeterministicNode<RoundContext> = ({ context, edges, policy }) => {
-  let published = false;
-  return {
-    state: new Deterministic<TSchema, unknown>(async function* () {
-      const inputs = yield [];
-      const partial = inputs.messages.get(partialResearchId);
-      let report: string;
-      if (partial !== undefined) {
-        const [snapshot, ...extra] = partial;
-        if (!Value.Check(TaskSchema, snapshot) || snapshot.kind !== "prompt" || extra.length > 0)
-          throw new Error("Librarian must send exactly one partial research prompt");
-        report = `Partial research: a GitHub lookup failed and the Librarian is paused.\n${snapshot.text}`;
-      } else {
-        if (context.search.failures() > context.failuresBefore)
-          throw new Error("Librarian must send its partial research after a failed GitHub lookup");
-        if (context.search.searches() === 0)
-          throw new Error("Librarian did not complete a valid GitHub OSS search");
-        report = syntax.finalText(inputs.values.get(researchId), "Librarian");
-      }
-      context.architectStarted = true;
-      const text = `Original request:\n${context.request}\n\n${context.feedback === undefined ? "" : `Review feedback:\n${context.feedback}\n\n`}Librarian report:\n${report}`;
-      published = true;
-      const task = Task.create({ kind: "prompt", text, spec: "A design report grounded in the request and the Librarian report." });
-      while (true) yield [graphApi.Message.create(edges.get("DesignAssignment~>Architect")!, task)];
-    }, policy),
-    is_available: (_view, triggered) => triggered && !published,
-  };
-};
+const DesignAssignment: syntax.DeterministicNode<RoundContext> = ({ context, edges, policy }) =>
+  new Deterministic<TSchema, unknown>(async function* () {
+    const inputs = yield [];
+    const partial = inputs.messages.get(partialResearchId);
+    let report: string;
+    if (partial !== undefined) {
+      const [snapshot, ...extra] = partial;
+      if (!Value.Check(TaskSchema, snapshot) || snapshot.kind !== "prompt" || extra.length > 0)
+        throw new Error("Librarian must send exactly one partial research prompt");
+      report = `Partial research: a GitHub lookup failed and the Librarian is paused.\n${snapshot.text}`;
+      context.acceptedPartial = true;
+    } else {
+      if (context.search.failures() > context.failuresBefore)
+        throw new Error("Librarian must send its partial research after a failed GitHub lookup");
+      if (context.search.searches() === 0)
+        throw new Error("Librarian did not complete a valid GitHub OSS search");
+      report = syntax.finalText(inputs.values.get(researchId), "Librarian");
+    }
+    const text = `Original request:\n${context.request}\n\n${context.feedback === undefined ? "" : `Review feedback:\n${context.feedback}\n\n`}Librarian report:\n${report}`;
+    const task = Task.create({ kind: "prompt", text, spec: "A design report grounded in the request and the Librarian report." });
+    return new graphApi.FinalMessages([graphApi.Message.create(edges.get("DesignAssignment~>Architect")!, task)]);
+  }, policy);
+
+/** Only a partial handoff leaves a Librarian waiting for the design to finish. */
+const ResearchRelease: syntax.DeterministicNode<RoundContext> = ({ context, edges, policy }) =>
+  new Deterministic<TSchema, unknown>(async function* () {
+    return new graphApi.FinalMessages(context.acceptedPartial
+      ? [graphApi.Message.create(edges.get("architect-finished")!, true)] : []);
+  }, policy);
 
 /** Only the joined, validated final reports can prepare the Reducer's assignment. */
-const ReviewAssignment: syntax.DeterministicNode<RoundContext> = ({ context, edges, policy }) => {
-  let published = false;
-  return {
-    state: new Deterministic<TSchema, unknown>(async function* () {
-      const inputs = yield [];
-      const text = `Original request:\n${context.request}\n\nLibrarian report:\n${syntax.finalText(inputs.values.get(reducerResearchId), "Librarian")}\n\nArchitect report:\n${syntax.finalText(inputs.values.get(designId), "Architect")}`;
-      published = true;
-      const task = Task.create({ kind: "prompt", text, spec: "One final recommendation reconciling the Librarian and Architect reports." });
-      while (true) yield [graphApi.Message.create(edges.get("ReviewAssignment~>Reducer")!, task)];
-    }, policy),
-    is_available: (_view, triggered) => triggered && !published,
-  };
-};
+const ReviewAssignment: syntax.DeterministicNode<RoundContext> = ({ context, edges, policy }) =>
+  new Deterministic<TSchema, unknown>(async function* () {
+    const inputs = yield [];
+    const text = `Original request:\n${context.request}\n\nLibrarian report:\n${syntax.finalText(inputs.values.get(reducerResearchId), "Librarian")}\n\nArchitect report:\n${syntax.finalText(inputs.values.get(designId), "Architect")}`;
+    const task = Task.create({ kind: "prompt", text, spec: "One final recommendation reconciling the Librarian and Architect reports." });
+    return new graphApi.FinalMessages([graphApi.Message.create(edges.get("ReviewAssignment~>Reducer")!, task)]);
+  }, policy);
 
 // ## 3. One review round
 //
@@ -257,12 +243,12 @@ export interface ReviewRound {
 export const ReviewRound = {
   async create(request: string, members: Members, search: SearchCounts, feedback?: string, observer?: tracer.DataflowTracer, ladder?: schedules.ModelLadder, recorder?: syntax.BuildOptions["recorder"]): Promise<ReviewRound> {
     const context: RoundContext = {
-      request, feedback, members, search, failuresBefore: search.failures(), architectStarted: false,
+      request, feedback, search, failuresBefore: search.failures(), acceptedPartial: false,
     };
     const execution = await JuncoGraph.fromYaml(source, {
       cwd: process.cwd(),
       scheduler: () => schedules.strength((_, id) => ({ Librarian: "med", Architect: "high", Reducer: "xhigh" } as const)[id as MemberId] ?? "med", schedules.parallel()),
-      tracer: observer, context, code: { ResearchAssignment, DesignAssignment, ReviewAssignment },
+      tracer: observer, context, code: { ResearchAssignment, DesignAssignment, ResearchRelease, ReviewAssignment },
       ...(ladder === undefined ? {} : { ladder }),
       ...(recorder === undefined ? {} : { recorder }),
       tools: {
@@ -271,16 +257,6 @@ export const ReviewRound = {
       },
       createAgent: async (spec) => members[spec.node as MemberId],
       createAgentOwnership: "caller",
-      available: {
-        Librarian: ({ graph, edges }) => (_view, triggered) => {
-          if (!triggered && graph.getNode(graphApi.NodeId.create("Librarian"))!.status !== "running") return false;
-          const partial = edges.get("Librarian~>DesignAssignment")!;
-          // Hold the paused Librarian until the Architect finishes its partial research.
-          return search.failures() <= context.failuresBefore ||
-            !((E.isLeft(partial.transport) && partial.transport.left.length > 0) || context.architectStarted) ||
-            graph.getNode(graphApi.NodeId.create("Architect"))!.status === "done";
-        },
-      },
     });
     return { execution, reducerId: graphApi.NodeId.create("Reducer") };
   },

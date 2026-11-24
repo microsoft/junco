@@ -21,6 +21,6 @@ graph:
   edges:
     - {from: Goals, to: Bun, kind: message, schema: {}}
     - {from: Goals, to: Rust, kind: message, schema: {}}
-    - {from: Bun, to: Reviewer, schema: {}}
-    - {from: Rust, to: Reviewer, schema: {}}
+    - {from: Bun, to: Reviewer, id: Bun->Reviewer, kind: message, on: return, schema: {}}
+    - {from: Rust, to: Reviewer, id: Rust->Reviewer, kind: message, on: return, schema: {}}
     - {from: Reviewer, to: $sink, schema: {}}

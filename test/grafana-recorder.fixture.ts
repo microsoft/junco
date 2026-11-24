@@ -82,6 +82,9 @@ const call = (name: string, args: ToolCall["arguments"]) =>
 const json = <T>(results: Result[], name: string): T[] =>
   results.filter((r) => r.name === name).map((r) => JSON.parse(r.text) as T);
 
+const releaseNotice = "src/a.ts edited and released";
+const isReleaseNotice = (text: string) => text.startsWith(`${releaseNotice}\n\nTask: `);
+
 const A_SCRIPT = [
   () => call("bash", { command: hold(16) }),
   () =>
@@ -103,9 +106,13 @@ const A_SCRIPT = [
     const info = json<{ children: Route[] }>(results, "info").at(-1)!;
     const route = info.children.find((child) => child.kind === "message");
     if (!route) throw new Error("A has no message route");
+    const task = JSON.parse(userMessages.A!.at(-1)!.split("\n\nTask: ").at(-1)!);
     return call("send", {
       id: route.edgeId,
-      payload: { kind: "prompt", text: "src/a.ts edited and released" },
+      payload: { kind: "prompt", text: releaseNotice },
+      task: task.taskId,
+      spec: task.spec,
+      handoff: releaseNotice,
     });
   },
   () => call("yield", { reason: "sent to B" }),
@@ -115,10 +122,9 @@ const A_SCRIPT = [
 const b = (results: Result[]) => {
   const names = results.map((r) => r.name);
   if (!names.includes("bash")) return call("bash", { command: hold(32) });
-  if (!names.includes("yield"))
-    return call("yield", { reason: "waiting for A" });
-  if (!userMessages.B!.includes("src/a.ts edited and released"))
-    return call("yield", { reason: "still waiting for A" });
+  if (!userMessages.B!.some(isReleaseNotice))
+    return call("yield", { reason: "waiting for A", waitForInput: true });
+  if (!names.includes("yield")) return call("yield", { reason: "ready to map" });
   const graphs = results.filter((r) => r.name === "code_graph");
   type List = { clusters: { cluster: { id: string } }[] };
   const clusterId = () => {
@@ -257,8 +263,7 @@ try {
     "export function ping() { return 22; }\n",
   );
   assert.equal(
-    userMessages.B!.filter((text) => text === "src/a.ts edited and released")
-      .length,
+    userMessages.B!.filter(isReleaseNotice).length,
     1,
   );
   const count = (node: string, name: string) =>

@@ -18,7 +18,7 @@ import { readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { bytes, tokens } from "dataflow-engine";
 import type { AssistantMessage, TSchema } from "@earendil-works/pi-ai";
-import { agent, graph, JuncoGraph, MockAgent, schedules, syntax, tracer } from "junco";
+import { graph, JuncoGraph, schedules, syntax, tracer } from "junco";
 import source from "./wf.yml" with { type: "text" };
 
 export const document = syntax.parse(source);
@@ -35,12 +35,13 @@ export function planProducer(document: syntax.JuncoDocument): string {
     return undefined;
   };
   const level = find(document.graph);
-  const inputs = (level?.edges ?? []).filter((wire) => wire.to === "CheckPlan" && wire.kind !== "message");
+  const wires = level?.edges ?? [];
+  const inputs = wires.filter((wire) => wire.to === "CheckPlan" && (wire.kind !== "message" || wire.on === "return"));
   if (
-    inputs.length !== 1 ||
-    !(level?.edges ?? []).some((wire) => wire.from === inputs[0].from && wire.to === inputs[0].from && wire.kind !== "message")
+    inputs.length !== 1 || inputs[0].kind !== "message" || inputs[0].on !== "return" ||
+    !wires.some((wire) => wire.from === "CheckPlan" && wire.to === inputs[0].from && wire.kind === "message" && wire.on === undefined)
   )
-    throw new Error("wf.yml: CheckPlan needs exactly one value in-edge whose producer has a self-edge");
+    throw new Error("wf.yml: CheckPlan needs one producer's return-message edge and a correction message back to that producer");
   return inputs[0].from;
 }
 
@@ -401,10 +402,13 @@ function reply(text: string): AssistantMessage {
 }
 
 /** Runs `checks` in `role` one by one, saving each full output; never throws for a failing check. */
-async function runChecks(host: Host, role: Role, checks: readonly Check[], label: string): Promise<Observed[]> {
+async function runChecks(
+  host: Host, role: Role, checks: readonly Check[], label: string,
+  run = (command: string) => host.sandbox.run(role, command, CHECK_TIMEOUT),
+): Promise<Observed[]> {
   const observed: Observed[] = [];
   for (const [index, check] of checks.entries()) {
-    const { exit_code, output } = await host.sandbox.run(role, check.command, CHECK_TIMEOUT);
+    const { exit_code, output } = await run(check.command);
     const log = host.save(`checks/${label}/${index + 1}-${check.kind}.log`, `$ ${check.command}\n${output}\n[exit ${exit_code}]\n`);
     const { kind, name, command } = check;
     observed.push({ kind, name, command, exit_code, reproduced: output.includes(REPRODUCED), log, tail: tail(output) });
@@ -493,18 +497,11 @@ const issueText = ({ repo, base_commit, problem_statement }: Problem): string =>
 export const Input: Code = ({ context, edges, policy }) => {
   const outputs = [...edges].filter(([id, wire]) => id.startsWith("Input~>") && wire.transport._tag === "Left").map(([, wire]) => wire);
   if (!outputs.length) throw new Error("wf.yml: Input needs at least one message out-edge");
-  let published = false;
-  return {
-    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* (signal) {
-      while (true) {
-        const issue = prompt(issueText(context.problem), "The lead's investigation plan assigns every worker a section.");
-        signal.throwIfAborted();
-        published = true;
-        yield outputs.map((output) => graph.Message.create(output, issue));
-      }
-    }, policy),
-    is_available: () => !published,
-  };
+  return new graph.nodes.Deterministic<TSchema, unknown>(async function* (signal) {
+    signal.throwIfAborted();
+    const issue = prompt(issueText(context.problem), "The lead's investigation plan assigns every worker a section.");
+    return new graph.FinalMessages(outputs.map((output) => graph.Message.create(output, issue)));
+  }, policy);
 };
 
 const WORKERS = ["Trace", "Reproduce", "Contracts"] as const;
@@ -529,43 +526,33 @@ function parseAssignments(answer: string): Record<Worker, string> {
 /** Sends each evidence worker the issue and only its own assignment, once. */
 export const Assign: Code = ({ context, edges, policy }) => {
   const outputs = WORKERS.map((worker) => [worker, edge(edges, `Assign~>${worker}`)] as const);
-  let published = false;
-  return {
-    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
-      const view = yield [];
-      const answer = syntax.finalText(value(view, "Lead->Assign"), "Lead");
-      context.save("assignments.md", answer);
-      const sections = parseAssignments(answer);
-      const issue = issueText(context.problem);
-      published = true;
-      yield outputs.map(([worker, output]) =>
-        graph.Message.create(output, prompt(`<issue>\n${issue}\n</issue>\n\n# Your assignment from the lead\n\n${sections[worker]}`, "An investigator report answering this assignment with evidence.")),
-      );
-    }, policy),
-    is_available: (_view, triggered) => triggered && !published,
-  };
+  return new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+    const view = yield [];
+    const answer = syntax.finalText(value(view, "Lead->Assign"), "Lead");
+    context.save("assignments.md", answer);
+    const sections = parseAssignments(answer);
+    const issue = issueText(context.problem);
+    return new graph.FinalMessages(outputs.map(([worker, output]) =>
+      graph.Message.create(output, prompt(`<issue>\n${issue}\n</issue>\n\n# Your assignment from the lead\n\n${sections[worker]}`, "An investigator report answering this assignment with evidence.")),
+    ));
+  }, policy);
 };
 
 /** A normal, non-empty final report from every evidence worker, forwarded once. */
 export const JoinEvidence: Code = ({ context, edges, policy }) => {
   const planner = edge(edges, "JoinEvidence~>Planner");
   const dispatch = edge(edges, "JoinEvidence~>Dispatch");
-  let published = false;
-  return {
-    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
-      const view = yield [];
-      const evidence = WORKERS.map((worker) => `## ${worker} report\n\n${syntax.finalText(value(view, `${worker}->JoinEvidence`), worker)}`).join(
-        "\n\n",
-      );
-      context.save("evidence.md", evidence);
-      published = true;
-      yield [
-        graph.Message.create(planner, prompt(`<issue>\n${issueText(context.problem)}\n</issue>\n\n# Evidence from the investigation team\n\n${evidence}`, "A fix plan grounded in the evidence.")),
-        graph.Message.create(dispatch, prompt(evidence, "The evidence is dispatched to the candidates.")),
-      ];
-    }, policy),
-    is_available: (_view, triggered) => triggered && !published,
-  };
+  return new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+    const view = yield [];
+    const evidence = WORKERS.map((worker) => `## ${worker} report\n\n${syntax.finalText(value(view, `${worker}->JoinEvidence`), worker)}`).join(
+      "\n\n",
+    );
+    context.save("evidence.md", evidence);
+    return new graph.FinalMessages([
+      graph.Message.create(planner, prompt(`<issue>\n${issueText(context.problem)}\n</issue>\n\n# Evidence from the investigation team\n\n${evidence}`, "A fix plan grounded in the evidence.")),
+      graph.Message.create(dispatch, prompt(evidence, "The evidence is dispatched to the candidates.")),
+    ]);
+  }, policy);
 };
 
 /** Joins independent normal drafts in edge-id order and forwards them once to the plan producer. */
@@ -574,20 +561,15 @@ export const JoinDrafts: Code = ({ context, edges, policy }) => {
   const outputs = [...edges].filter(([id, wire]) => /^JoinDrafts~>.+$/.test(id) && wire.transport._tag === "Left").map(([, wire]) => wire);
   if (inputs.length < 2) throw new Error("wf.yml: JoinDrafts needs at least two value in-edges");
   if (outputs.length !== 1) throw new Error("wf.yml: JoinDrafts needs exactly one message out-edge");
-  let published = false;
-  return {
-    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
-      const view = yield [];
-      const drafts = inputs.map((id, index) => {
-        const producer = id.slice(0, -"->JoinDrafts".length);
-        return `# Plan ${index + 1} (${producer})\n\n${syntax.finalText(value(view, id), producer)}`;
-      }).join("\n\n");
-      context.save("planning/drafts.md", drafts);
-      published = true;
-      yield [graph.Message.create(outputs[0], prompt(drafts, "One merged fix plan chosen from the drafts."))];
-    }, policy),
-    is_available: (_view, triggered) => triggered && !published,
-  };
+  return new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+    const view = yield [];
+    const drafts = inputs.map((id, index) => {
+      const producer = id.slice(0, -"->JoinDrafts".length);
+      return `# Plan ${index + 1} (${producer})\n\n${syntax.finalText(value(view, id), producer)}`;
+    }).join("\n\n");
+    context.save("planning/drafts.md", drafts);
+    return new graph.FinalMessages([graph.Message.create(outputs[0], prompt(drafts, "One merged fix plan chosen from the drafts."))]);
+  }, policy);
 };
 
 /** Planner corrections after its first draft; a fourth parsed draft keeps the surviving checks. */
@@ -658,66 +640,34 @@ async function validatePlan(host: Host, answer: string, attempt: number, signal:
   return { accepted: false, feedback, partial: { answer, plan, checks, baseline, kept, excluded } };
 }
 
-/** The plan producer's agent, the one CheckPlan stages corrections on. */
-function producerAgent(level: JuncoGraph<TSchema, unknown>): agent.JuncoAgent | MockAgent {
-  const state = level.getNode(graph.NodeId.create(PLAN_PRODUCER))?.state;
-  if (!(state instanceof agent.JuncoAgent || state instanceof MockAgent)) throw new TypeError(`Planner/${PLAN_PRODUCER} must be an agent node`);
-  return state;
-}
-
 /**
  * Validates each new producer result once, in order. Accepted: records the plan for Dispatch and returns that exact
- * result, the only one Planner's sink publishes. Rejected: stages a complete-plan correction on the idle producer;
+ * result, the only one Planner's sink publishes. Rejected: sends the observed failure to the same producer;
  * after three corrections a parsed draft degrades to its surviving checks, while malformed data still fails.
  */
-export const CheckPlan: Code = ({ context, graph: level, policy, signal }) => {
-  /** The latest producer result taken for validation, recorded before it is awaited. */
-  let checked: unknown;
-  const result = graph.EdgeId.create(`${PLAN_PRODUCER}->CheckPlan`);
-  const current = (view: graph.ParentView<TSchema, unknown>): unknown => view.values.get(result);
-  return {
-    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* (own) {
-      const stop = signal === undefined ? own : AbortSignal.any([own, signal]);
-      let view = yield [];
-      for (let attempt = 1; ; attempt++) {
-        const draft = current(view);
-        checked = draft;
-        const decision = await validatePlan(context, syntax.finalText(draft, `Planner/${PLAN_PRODUCER}`), attempt, stop);
-        if (decision.accepted) {
-          context.acceptedPlan = decision.value;
-          return draft;
-        }
-        if (attempt > MAX_PLAN_CORRECTIONS) {
-          if (decision.partial === undefined)
-            throw new Error(`plan rejected after ${MAX_PLAN_CORRECTIONS} correction turns: ${decision.feedback}`);
-          context.acceptedPlan = { ...decision.partial, degraded: decision.feedback };
-          context.save("planning/degraded.txt", decision.feedback);
-          return draft;
-        }
-        stop.throwIfAborted();
-        producerAgent(level).stagePrompt(
-          [
-            `Correction turn ${attempt} of ${MAX_PLAN_CORRECTIONS}. The automatic baseline run rejected your plan:`,
-            decision.feedback,
-            "Return the complete corrected plan as one JSON object in a single ```json block with every field. Keep the checks that held and full behaviour-matrix coverage. Repair each unsupported command from the evidence (a test path, id or runner the evidence shows works); never weaken a check or the expected behaviour to make it pass. A reproduction must exit non-zero printing `ISSUE REPRODUCED` on the baseline; a regression must exit 0 on the baseline.",
-          ].join("\n\n"),
-        );
-        view = yield [];
+export const CheckPlan: Code = ({ context, edges, policy, signal }) => {
+  const correction = edge(edges, `CheckPlan~>${PLAN_PRODUCER}`);
+  return new graph.nodes.Deterministic<TSchema, unknown>(async function* (own) {
+    const stop = signal === undefined ? own : AbortSignal.any([own, signal]);
+    let view = yield [];
+    for (let attempt = 1; ; attempt++) {
+      const draft = single(view, `${PLAN_PRODUCER}~>CheckPlan`);
+      const decision = await validatePlan(context, syntax.finalText(draft, `Planner/${PLAN_PRODUCER}`), attempt, stop);
+      if (decision.accepted) {
+        context.acceptedPlan = decision.value;
+        return draft;
       }
-    }, policy),
-    is_available: (view, triggered) => triggered && current(view) !== undefined && current(view) !== checked,
-  };
-};
-
-/**
- * The producer's self-edge rearms it after every draft, but it runs again only to resume a native yield or for a
- * correction CheckPlan staged, never while CheckPlan is still validating.
- */
-export const plannerAvailability: NonNullable<syntax.BuildOptions["available"]> = {
-  [PLAN_PRODUCER]: ({ graph: level, edges }) =>
-    edges.has(`${PLAN_PRODUCER}->${PLAN_PRODUCER}`)
-      ? (_view, triggered) => level.getNode(graph.NodeId.create(PLAN_PRODUCER))?.status === "running" || (triggered && producerAgent(level).status === "ready")
-      : undefined,
+      if (attempt > MAX_PLAN_CORRECTIONS) {
+        if (decision.partial === undefined)
+          throw new Error(`plan rejected after ${MAX_PLAN_CORRECTIONS} correction turns: ${decision.feedback}`);
+        context.acceptedPlan = { ...decision.partial, degraded: decision.feedback };
+        context.save("planning/degraded.txt", decision.feedback);
+        return draft;
+      }
+      stop.throwIfAborted();
+      view = yield [graph.Message.create(correction, { attempt, feedback: decision.feedback })];
+    }
+  }, policy);
 };
 
 /**
@@ -728,36 +678,34 @@ export const Dispatch: Code = ({ context, edges, policy }) => {
   const candidates = { A: edge(edges, "Dispatch~>CandidateA"), B: edge(edges, "Dispatch~>CandidateB") };
   const validators = { A: edge(edges, "Dispatch~>ValidateA"), B: edge(edges, "Dispatch~>ValidateB") };
   const apply = edge(edges, "Dispatch~>Apply");
-  let published = false;
-  return {
-    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
-      const view = yield [];
-      const evidence = (single(view, "JoinEvidence~>Dispatch") as { text: string }).text;
-      const answer = syntax.finalText(value(view, "Planner->Dispatch"), "Planner");
-      const accepted = context.acceptedPlan;
-      if (accepted === undefined || accepted.answer !== answer) throw new Error("Planner->Dispatch is not the plan CheckPlan accepted");
-      if ((await context.sandbox.capture("canonical")) !== "") throw new Error("canonical /testbed changed before dispatch");
-      const { plan, checks, baseline, kept, excluded } = accepted;
-      context.save("plan.md", answer);
-      context.save("acceptance.json", JSON.stringify({ checks, baseline, excluded }, null, 2));
-      const brief = briefing(context.problem, evidence, plan, kept) + (accepted.degraded === undefined ? "" :
-        `\n\n# Degraded plan\nThe automatic baseline run rejected the last draft; the checks below are the ones that survived (possibly none of one kind). Rejection:\n${accepted.degraded}`);
-      const assignment = (branch: Branch) => {
-        const { approach, steps } = plan.candidates[branch];
-        const ordered = steps.map((s, i) => `${i + 1}. ${s.target}: ${s.change}\n   Check: ${s.check}`).join("\n");
-        return `${brief}\n\n# Your assignment: candidate ${branch}\nApproach: ${approach}\n\nSteps:\n${ordered}`;
-      };
-      published = true;
-      yield [
-        graph.Message.create(candidates.A, prompt(assignment("A"), "Candidate A's patch is applied in its sandbox and passes its checks.")),
-        graph.Message.create(candidates.B, prompt(assignment("B"), "Candidate B's patch is applied in its sandbox and passes its checks.")),
-        graph.Message.create(validators.A, { checks }),
-        graph.Message.create(validators.B, { checks }),
-        graph.Message.create(apply, { brief, checks }),
-      ];
-    }, policy),
-    is_available: (_view, triggered) => triggered && !published,
-  };
+  return new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+    const view = yield [];
+    const evidenceTask = single(view, "JoinEvidence~>Dispatch");
+    if (!evidenceTask || typeof evidenceTask !== "object" || !("text" in evidenceTask) || typeof evidenceTask.text !== "string")
+      throw new Error("JoinEvidence~>Dispatch did not deliver evidence text");
+    const evidence = evidenceTask.text;
+    const answer = syntax.finalText(value(view, "Planner->Dispatch"), "Planner");
+    const accepted = context.acceptedPlan;
+    if (accepted === undefined || accepted.answer !== answer) throw new Error("Planner->Dispatch is not the plan CheckPlan accepted");
+    if ((await context.sandbox.capture("canonical")) !== "") throw new Error("canonical /testbed changed before dispatch");
+    const { plan, checks, baseline, kept, excluded } = accepted;
+    context.save("plan.md", answer);
+    context.save("acceptance.json", JSON.stringify({ checks, baseline, excluded }, null, 2));
+    const brief = briefing(context.problem, evidence, plan, kept) + (accepted.degraded === undefined ? "" :
+      `\n\n# Degraded plan\nThe automatic baseline run rejected the last draft; the checks below are the ones that survived (possibly none of one kind). Rejection:\n${accepted.degraded}`);
+    const assignment = (branch: Branch) => {
+      const { approach, steps } = plan.candidates[branch];
+      const ordered = steps.map((s, i) => `${i + 1}. ${s.target}: ${s.change}\n   Check: ${s.check}`).join("\n");
+      return `${brief}\n\n# Your assignment: candidate ${branch}\nApproach: ${approach}\n\nSteps:\n${ordered}`;
+    };
+    return new graph.FinalMessages([
+      graph.Message.create(candidates.A, prompt(assignment("A"), "Candidate A's patch is applied in its sandbox and passes its checks.")),
+      graph.Message.create(candidates.B, prompt(assignment("B"), "Candidate B's patch is applied in its sandbox and passes its checks.")),
+      graph.Message.create(validators.A, { checks }),
+      graph.Message.create(validators.B, { checks }),
+      graph.Message.create(apply, { brief, checks }),
+    ]);
+  }, policy);
 };
 
 /** A typed verdict on one contender: abnormal settlement, empty or inapplicable patch and failed checks are invalid. */
@@ -768,20 +716,34 @@ export async function judge(host: Context, branch: Branch, settled: unknown, che
   } catch (error) {
     return invalid(describe(error));
   }
+  // The gate may cancel this branch while an operation is in flight. Never start its next operation.
+  const lost = () => host.race.winner === other(branch);
+  const cancelled = Symbol();
+  const inSandbox = async <T>(operation: () => Promise<T>): Promise<T> => {
+    if (!lost()) {
+      try {
+        const result = await operation();
+        if (!lost()) return result;
+      } catch (error) {
+        if (!lost()) throw error;
+      }
+    }
+    throw cancelled;
+  };
   try {
-    const patch = await host.sandbox.capture(`candidate${branch}`);
+    const patch = await inSandbox(() => host.sandbox.capture(`candidate${branch}`));
     host.save(`candidate${branch}.patch`, patch);
     if (!patch.trim()) return invalid("empty patch: no change relative to the baseline");
-    const applied = await host.sandbox.apply(`accept${branch}`, patch);
+    const role = `accept${branch}` as const;
+    const applied = await inSandbox(() => host.sandbox.apply(role, patch));
     if (applied.exit_code !== 0) return invalid(`patch does not apply to the verified baseline: ${tail(applied.output, 1000)}`, patch);
-    const observed = await runChecks(host, `accept${branch}`, checks, `candidate${branch}`);
+    const observed = await runChecks(host, role, checks, `candidate${branch}`,
+      (command) => inSandbox(() => host.sandbox.run(role, command, CHECK_TIMEOUT)));
     const failed = observed.filter((c) => c.exit_code !== 0);
     if (failed.length) return invalid(`failed acceptance checks: ${failed.map((c) => `${c.name} (exit ${c.exit_code})`).join(", ")}`, patch, observed);
     return { branch, valid: true, reason: `all ${observed.length} acceptance checks passed`, patch, checks: observed };
   } catch (error) {
-    // Once the other branch won, this branch's sandboxes are stopped; anything else is an infrastructure fault.
-    const { winner } = host.race;
-    if (winner !== undefined && winner !== branch) return invalid(`cancelled after candidate ${winner} won: ${describe(error)}`);
+    if (error === cancelled) return invalid(`cancelled after candidate ${other(branch)} won`);
     throw error;
   }
 }
@@ -790,20 +752,17 @@ const validator =
   (branch: Branch): Code =>
   ({ context, edges, policy }) => {
     const output = edge(edges, `Validate${branch}~>TournamentGate`);
-    let published = false;
-    return {
-      state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
-        const view = yield [];
-        const { checks } = single(view, `Dispatch~>Validate${branch}`) as { checks: Check[] };
-        const verdict = await judge(context, branch, value(view, `Candidate${branch}->Validate${branch}`), checks);
-        const { patch: _patch, ...summary } = verdict;
-        context.save(`verdict-${branch}.json`, JSON.stringify(summary, null, 2));
-        published = true;
-        yield [graph.Message.create(output, verdict)];
-      }, policy),
-      // A decided tournament never validates the loser: its sandboxes are already stopped.
-      is_available: (_view, triggered) => triggered && !published && context.race.winner === undefined,
-    };
+    return new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+      const view = yield [];
+      // The gate stops the loser's sandboxes before this validator may get its turn.
+      if (context.race.winner === other(branch)) return new graph.FinalMessages([]);
+      const { checks } = single(view, `Dispatch~>Validate${branch}`) as { checks: Check[] };
+      const verdict = await judge(context, branch, value(view, `Candidate${branch}->Validate${branch}`), checks);
+      if (context.race.winner === other(branch)) return new graph.FinalMessages([]);
+      const { patch: _patch, ...summary } = verdict;
+      context.save(`verdict-${branch}.json`, JSON.stringify(summary, null, 2));
+      return new graph.FinalMessages([graph.Message.create(output, verdict)]);
+    }, policy);
   };
 export const ValidateA = validator("A");
 export const ValidateB = validator("B");
@@ -814,128 +773,114 @@ export const ValidateB = validator("B");
  */
 export const TournamentGate: Code = ({ context, edges, policy }) => {
   const output = edge(edges, "TournamentGate~>Apply");
-  let decided = false;
-  return {
-    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
-      const verdicts = new Map<Branch, Verdict>();
-      let view = yield [];
-      while (true) {
-        for (const branch of ["A", "B"] as const)
-          for (const payload of view.messages.get(graph.EdgeId.create(`Validate${branch}~>TournamentGate`)) ?? []) {
-            if (verdicts.has(branch)) throw new Error(`duplicate verdict from candidate ${branch}`);
-            verdicts.set(branch, payload as Verdict);
-          }
-        const summary = () => [...verdicts.values()].map(({ patch: _patch, ...v }) => v);
-        let chosen = [...verdicts.values()].find((v) => v.valid);
-        if (chosen === undefined && verdicts.size === 2)
-          chosen = [...verdicts.values()].filter((v) => v.checks.length > 0).sort((a, b) =>
-            a.checks.filter((c) => c.exit_code !== 0).length - b.checks.filter((c) => c.exit_code !== 0).length || a.branch.localeCompare(b.branch))[0];
-        if (chosen !== undefined) {
-          const winner = chosen.branch;
-          const degraded = chosen.valid ? undefined : chosen.reason;
-          context.race.winner = winner;
-          decided = true;
-          const cleanup = [...(await context.cancel(other(winner)))];
-          context.save("tournament.json", JSON.stringify({ winner, verdicts: summary(), cleanup, degraded }, null, 2));
-          const selection: Selection = { winner, verdicts: [...verdicts.values()], cleanup, degraded };
-          yield [graph.Message.create(output, selection)];
-          return;
+  return new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+    const verdicts = new Map<Branch, Verdict>();
+    let view = yield [];
+    while (true) {
+      for (const branch of ["A", "B"] as const)
+        for (const payload of view.messages.get(graph.EdgeId.create(`Validate${branch}~>TournamentGate`)) ?? []) {
+          if (verdicts.has(branch)) throw new Error(`duplicate verdict from candidate ${branch}`);
+          verdicts.set(branch, payload as Verdict);
         }
-        if (verdicts.size === 2) {
-          decided = true;
-          context.save("tournament.json", JSON.stringify({ winner: null, verdicts: summary(), cleanup: [] }, null, 2));
-          throw new Error(`no valid candidate: ${[...verdicts.values()].map((v) => `${v.branch}: ${v.reason}`).join("; ")}`);
-        }
-        view = yield [];
+      const summary = () => [...verdicts.values()].map(({ patch: _patch, ...v }) => v);
+      let chosen = [...verdicts.values()].find((v) => v.valid);
+      if (chosen === undefined && verdicts.size === 2)
+        chosen = [...verdicts.values()].filter((v) => v.checks.length > 0).sort((a, b) =>
+          a.checks.filter((c) => c.exit_code !== 0).length - b.checks.filter((c) => c.exit_code !== 0).length || a.branch.localeCompare(b.branch))[0];
+      if (chosen !== undefined) {
+        const winner = chosen.branch;
+        const degraded = chosen.valid ? undefined : chosen.reason;
+        context.race.winner = winner;
+        const cleanup = [...(await context.cancel(other(winner)))];
+        context.save("tournament.json", JSON.stringify({ winner, verdicts: summary(), cleanup, degraded }, null, 2));
+        const selection: Selection = { winner, verdicts: [...verdicts.values()], cleanup, degraded };
+        return new graph.FinalMessages([graph.Message.create(output, selection)]);
       }
-    }, policy),
-    is_available: (_view, triggered) => triggered && !decided,
-  };
+      if (verdicts.size === 2) {
+        context.save("tournament.json", JSON.stringify({ winner: null, verdicts: summary(), cleanup: [] }, null, 2));
+        throw new Error(`no valid candidate: ${[...verdicts.values()].map((v) => `${v.branch}: ${v.reason}`).join("; ")}`);
+      }
+      view = yield [];
+    }
+  }, policy);
 };
 
 /** Applies the selected patch to the untouched canonical /testbed and briefs the Integrator. */
 export const Apply: Code = ({ context, edges, policy }) => {
   const integrator = edges.get("Apply~>Integrator");
   const freeze = edge(edges, "Apply~>Freeze");
-  let published = false;
-  return {
-    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
-      const view = yield [];
-      const selection = single(view, "TournamentGate~>Apply") as Selection;
-      const { brief, checks } = single(view, "Dispatch~>Apply") as { brief: string; checks: Check[] };
-      const chosen = selection.verdicts.find((v) => v.branch === selection.winner);
-      if (chosen === undefined) throw new Error(`selection carries no verdict for candidate ${selection.winner}`);
-      if ((await context.sandbox.capture("canonical")) !== "") throw new Error("canonical /testbed is not at the baseline before apply");
-      const applied = await context.sandbox.apply("canonical", chosen.patch);
-      if (applied.exit_code !== 0) throw new Error(`selected patch does not apply to canonical /testbed: ${tail(applied.output, 2000)}`);
-      context.save("selected.patch", chosen.patch);
-      const loser = other(chosen.branch);
-      const rejected =
-        selection.verdicts.find((v) => v.branch === loser)?.reason ??
-        "not considered: the gate selected the first valid verdict before consuming this candidate's";
-      const summary = [
-        `Selected: candidate ${chosen.branch} (${chosen.reason}); candidate ${loser}: ${rejected}`,
-        `Cleanup: ${selection.cleanup.length ? selection.cleanup.join("; ") : "none"}`,
-      ].join("\n");
-      const body = [
-        brief,
-        `# Selected patch: candidate ${chosen.branch} (already applied to /testbed)`,
-        fence("diff", chosen.patch),
-        "# Acceptance results of the selected patch (pristine sandbox)",
-        results(chosen.checks),
-        ...(selection.degraded === undefined ? [] : ["# Selected patch failed acceptance checks", `${chosen.checks.filter((c) => c.exit_code !== 0).map((c) => `${c.name} (exit ${c.exit_code})`).join("; ")}; resolve them.`]),
-        "# Rejected candidate",
-        `Candidate ${loser}: ${rejected}`,
-      ].join("\n\n");
-      published = true;
-      yield [...(integrator === undefined ? [] : [graph.Message.create(integrator, prompt(body, "The winning patch is integrated into canonical /testbed and its checks pass."))]), graph.Message.create(freeze, { brief, checks, summary })];
-    }, policy),
-    is_available: (_view, triggered) => triggered && !published,
-  };
+  return new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+    const view = yield [];
+    const selection = single(view, "TournamentGate~>Apply") as Selection;
+    const { brief, checks } = single(view, "Dispatch~>Apply") as { brief: string; checks: Check[] };
+    const chosen = selection.verdicts.find((v) => v.branch === selection.winner);
+    if (chosen === undefined) throw new Error(`selection carries no verdict for candidate ${selection.winner}`);
+    if ((await context.sandbox.capture("canonical")) !== "") throw new Error("canonical /testbed is not at the baseline before apply");
+    const applied = await context.sandbox.apply("canonical", chosen.patch);
+    if (applied.exit_code !== 0) throw new Error(`selected patch does not apply to canonical /testbed: ${tail(applied.output, 2000)}`);
+    context.save("selected.patch", chosen.patch);
+    const loser = other(chosen.branch);
+    const rejected =
+      selection.verdicts.find((v) => v.branch === loser)?.reason ??
+      "not considered: the gate selected the first valid verdict before consuming this candidate's";
+    const summary = [
+      `Selected: candidate ${chosen.branch} (${chosen.reason}); candidate ${loser}: ${rejected}`,
+      `Cleanup: ${selection.cleanup.length ? selection.cleanup.join("; ") : "none"}`,
+    ].join("\n");
+    const body = [
+      brief,
+      `# Selected patch: candidate ${chosen.branch} (already applied to /testbed)`,
+      fence("diff", chosen.patch),
+      "# Acceptance results of the selected patch (pristine sandbox)",
+      results(chosen.checks),
+      ...(selection.degraded === undefined ? [] : ["# Selected patch failed acceptance checks", `${chosen.checks.filter((c) => c.exit_code !== 0).map((c) => `${c.name} (exit ${c.exit_code})`).join("; ")}; resolve them.`]),
+      "# Rejected candidate",
+      `Candidate ${loser}: ${rejected}`,
+    ].join("\n\n");
+    return new graph.FinalMessages([
+      ...(integrator === undefined ? [] : [graph.Message.create(integrator, prompt(body, "The winning patch is integrated into canonical /testbed and its checks pass."))]),
+      graph.Message.create(freeze, { brief, checks, summary }),
+    ]);
+  }, policy);
 };
 
 /** Captures the integrated deliverable once, before verification, so Finish can prove it unchanged. */
 export const Freeze: Code = ({ context, edges, policy }) => {
   const verifier = edges.get("Freeze~>Verifier");
   const finish = edge(edges, "Freeze~>Finish");
-  let published = false;
-  return {
-    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
-      const view = yield [];
-      const report = edges.has("Integrator->Freeze") ? syntax.finalText(value(view, "Integrator->Freeze"), "Integrator") : "(no integrator)";
-      if (edges.has("Integrator->Freeze")) context.save("integrator.md", report);
-      const { brief, checks, summary } = single(view, "Apply~>Freeze") as { brief: string; checks: Check[]; summary: string };
-      const patch = await context.sandbox.capture("canonical");
-      if (!patch.trim()) throw new Error("the Integrator left no change in canonical /testbed");
-      context.save("integrated.patch", patch);
-      published = true;
-      yield [
-        ...(verifier === undefined ? [] : [graph.Message.create(
-          verifier,
-          prompt(
-            [
-              brief,
-              "# Integrator report",
-              report,
-              "# Final diff (canonical /testbed; `git diff HEAD` shows it, the changes are staged)",
-              fence("diff", patch),
-            ].join("\n\n"),
-            "A verdict on whether the final diff fixes the issue.",
-          ),
-        )]),
-        graph.Message.create(finish, { patch, checks, summary }),
-      ];
-    }, policy),
-    is_available: (_view, triggered) => triggered && !published,
-  };
+  return new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+    const view = yield [];
+    const report = edges.has("Integrator->Freeze") ? syntax.finalText(value(view, "Integrator->Freeze"), "Integrator") : "(no integrator)";
+    if (edges.has("Integrator->Freeze")) context.save("integrator.md", report);
+    const { brief, checks, summary } = single(view, "Apply~>Freeze") as { brief: string; checks: Check[]; summary: string };
+    const patch = await context.sandbox.capture("canonical");
+    if (!patch.trim()) throw new Error("the Integrator left no change in canonical /testbed");
+    context.save("integrated.patch", patch);
+    return new graph.FinalMessages([
+      ...(verifier === undefined ? [] : [graph.Message.create(
+        verifier,
+        prompt(
+          [
+            brief,
+            "# Integrator report",
+            report,
+            "# Final diff (canonical /testbed; `git diff HEAD` shows it, the changes are staged)",
+            fence("diff", patch),
+          ].join("\n\n"),
+          "A verdict on whether the final diff fixes the issue.",
+        ),
+      )]),
+      graph.Message.create(finish, { patch, checks, summary }),
+    ]);
+  }, policy);
 };
 
 /**
  * Requires the wired Verifier's normal `VERDICT: PASS`, an unchanged deliverable and every frozen check passing
  * on the final patch in the pristine final sandbox; returns the terminal report, otherwise throws every failure.
  */
-export const Finish: Code = ({ context, edges, policy }) => ({
-  state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+export const Finish: Code = ({ context, edges, policy }) =>
+  new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
     const view = yield [];
     const verification = edges.has("Verifier->Finish") ? syntax.finalText(value(view, "Verifier->Finish"), "Verifier") : undefined;
     if (verification !== undefined) context.save("verifier.md", verification);
@@ -969,8 +914,7 @@ export const Finish: Code = ({ context, edges, policy }) => ({
         "Limitation: acceptance checks are issue-derived by the Planner; only the official evaluation decides resolution.",
       ].join("\n"),
     );
-  }, policy),
-});
+  }, policy);
 
 export const code = { Input, Assign, JoinEvidence, CheckPlan, JoinDrafts, Dispatch, ValidateA, ValidateB, TournamentGate, Apply, Freeze, Finish };
 
@@ -983,14 +927,13 @@ function unfinished(g: JuncoGraph<TSchema, unknown>): string {
   return pending.join(", ") || "none";
 }
 
-/** The runner's options; this module supplies the scheduler and code, and adds the producer's gate to `available`. */
+/** The runner's options; this module supplies the scheduler and code. */
 export type RunOptions = Omit<syntax.FromYamlOptions<Host>, "scheduler" | "code" | "context"> & { readonly context: Host };
 
-/** Builds and runs the workflow with the runner's ladder and this module's scheduler, code and producer gate; returns Finish's report. */
+/** Builds and runs the workflow with the runner's ladder and returns Finish's report. */
 export async function run(config: RunOptions): Promise<string> {
   const context: Context = { ...config.context, race: {} };
-  const available = { ...config.available, ...plannerAvailability };
-  const execution = await JuncoGraph.fromYaml<Context>(profile.withProbes(document), { ...config, scheduler, code, context, available });
+  const execution = await JuncoGraph.fromYaml<Context>(profile.withProbes(document), { ...config, scheduler, code, context });
   try {
     await execution.run({ signal: config.signal });
     const terminal = execution.graph.result(execution.graph.sink.id);

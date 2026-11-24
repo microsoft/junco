@@ -956,6 +956,34 @@ test("the Architect receives both assignments, teams receive only theirs, and pe
   ]);
 }, 20_000);
 
+test("a late peer note cannot start a second integrator run", async () => {
+  const { execution, calls } = await pair(request(), {
+    Agent1: steps(() => done("already finished")),
+    Agent2: steps(
+      () => call("yield", { reason: "still integrating" }),
+      (context) => {
+        const assignment = userTexts(context.messages).find((text) => text.includes("\n\nTask: "))!;
+        return call("send", {
+          id: "agent2-to-agent1", payload: "late peer note",
+          task: JSON.parse(assignment.split("\n\nTask: ").at(-1)!).taskId,
+          spec: "", handoff: "",
+        });
+      },
+      (context) => {
+        expect(lastResult(context.messages).isError).toBe(false);
+        return done("peer finished");
+      },
+    ),
+  });
+  await closed(execution, async () => {
+    const results = await execution.run();
+    expect(syntax.finalText(results.get(graph.NodeId.create("Agent1")), "Agent1")).toBe("already finished");
+    expect(syntax.finalText(results.get(graph.NodeId.create("Agent2")), "Agent2")).toBe("peer finished");
+    expect(calls.filter((c) => c.agent === "Agent1")).toHaveLength(1);
+    expect(execution.graph.available().size).toBe(0);
+  });
+}, 20_000);
+
 test("both leaders' own reports decide Submitted: an abnormal member report cannot hide behind the lead's sink result", async () => {
   const { execution } = await pair(request(), {
     Agent1: steps(() => done("Agent1 done")),

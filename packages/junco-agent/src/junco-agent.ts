@@ -1791,6 +1791,9 @@ export class JuncoAgent<
         toolCallId: result.toolCallId,
         toolName: result.toolName,
         reason: details.reason,
+        ...("waitForInput" in details && details.waitForInput === true
+          ? { waitForInput: true as const }
+          : {}),
       });
     }
     const reasons: AgenticYieldReason[] = [];

@@ -1181,8 +1181,17 @@ describe("candidate batch graph", () => {
     held.resolve();
     const outcomes = await running;
 
-    for (const { log } of lanes)
+    for (const { log, lane } of lanes) {
       assert.deepEqual(log.handles, ["Search1", "Search2", "Search3"]);
+      const [role, assignment] = log.proposerInput;
+      assert.equal(log.proposerInput.length, 2);
+      assert.match(role!, /submit_refactor/);
+      assert.ok(!role!.includes(lane.work.candidate.definition.id));
+      assert.ok(assignment!.includes(lane.work.candidate.definition.id));
+      assert.ok(assignment!.includes(`summary:${lane.work.rank}`));
+      for (const shard of lane.work.shards)
+        assert.ok(assignment!.includes(`${shard.name} (${shard.files.length} files)`));
+    }
     assert.equal(
       lanes.reduce((sum, { log }) => sum + log.researchers, 0),
       12,
@@ -1215,16 +1224,17 @@ describe("candidate batch graph", () => {
       const [input] = log.judgeInputs;
       assert.equal(
         input?.length,
-        1 + log.received.length,
-        "a fresh judge session sees its proposal prompt followed by its summaries",
+        2 + log.received.length,
+        "a fresh judge session sees its role prompt, one checked assignment, and its summaries",
       );
-      assert.ok(input?.[0]?.includes(own));
-      assert.ok(!input?.[0]?.includes(other));
+      assert.match(input![0]!, /judge_refactor/);
+      assert.ok(!input![0]!.includes(own));
+      const assignment = input!.slice(1).find((text) => text.startsWith("Proposer:"));
+      assert.ok(assignment && assignment.includes(own));
+      assert.ok(assignment.includes('final summary: "result recorded"'));
       assert.ok(input?.every((text) => !text.includes(other)));
-      assert.ok(
-        input?.[0]?.includes("6 projected net nonblank source lines removed"),
-      );
-      assert.ok(!input?.[0]?.includes("waiting for researchers"));
+      assert.ok(assignment.includes("6 projected net nonblank source lines removed"));
+      assert.ok(!assignment.includes("waiting for researchers"));
     }
 
     assert.deepEqual(
@@ -1282,6 +1292,7 @@ describe("candidate batch graph", () => {
     let finalized: unknown;
     let sink: unknown;
     let earlySink = false;
+    const startedJudges = new Set<string>();
     const observer: tracer.DataflowTracer = {
       startRun: (workflow) => {
         const run = inner.startRun(workflow);
@@ -1294,6 +1305,10 @@ describe("candidate batch graph", () => {
         )?.state;
         return {
           ...run,
+          startNode: (id, phase, inputs) => {
+            if (String(id).startsWith("Judge:")) startedJudges.add(String(id));
+            return run.startNode(id, phase, inputs);
+          },
           end: (results) => {
             const pending = run.end(results);
             lastProposer = results.get(graph.NodeId.create("Proposer:4"));
@@ -1325,7 +1340,7 @@ describe("candidate batch graph", () => {
     assert.equal(
       observed.length,
       1,
-      "applied exactly once despite cumulative step results",
+      "applied exactly once for the completed review",
     );
     assert.equal(observed[0]?.id, "fx/C1.ts#C1");
     assert.ok(
@@ -1333,6 +1348,7 @@ describe("candidate batch graph", () => {
       `applied before the delayed lane researched (${observed[0]!.yields} yields)`,
     );
     assert.equal(delayed.log.yields, 20);
+    assert.deepEqual([...startedJudges].sort(), ["Judge:1", "Judge:2"], "even queued summaries never admit a no-proposal judge");
     assert.deepEqual(
       outcomes.map((outcome) => outcome.status),
       ["applied", "rejected", "no-proposal", "no-proposal"],
@@ -1440,22 +1456,32 @@ describe("candidate batch graph", () => {
     assertClosed(lanes);
   }, 30_000);
 
-  for (const { name, script, message, judgeCalls } of [
+  for (const { name, script, node, message, judgeCalls } of [
     {
       name: "missing proposal",
       script: { skipProposal: true },
+      node: "ProposalDecision:1",
       message: /Proposer:1 finished without recording submit_refactor/,
       judgeCalls: 0,
     },
     {
       name: "missing verdict",
       script: { proposal: dupProposal(1), skipVerdict: true },
+      node: "FinalizeBatch",
       message: /Judge:1 finished without recording judge_refactor/,
       judgeCalls: 1,
     },
     {
       name: "empty final answer",
       script: { proposerFinal: "" },
+      node: "ProposalDecision:1",
+      message: /Proposer:1 produced an empty report/,
+      judgeCalls: 0,
+    },
+    {
+      name: "recorded proposal without a usable settlement",
+      script: { proposal: dupProposal(1), proposerFinal: " " },
+      node: "ProposalDecision:1",
       message: /Proposer:1 produced an empty report/,
       judgeCalls: 0,
     },
@@ -1477,7 +1503,7 @@ describe("candidate batch graph", () => {
         }),
         (error: unknown) =>
           error instanceof graph.DataflowNodeError &&
-          error.nodeId === graph.NodeId.create("FinalizeBatch") &&
+          error.nodeId === graph.NodeId.create(node) &&
           error.error instanceof Error &&
           message.test(error.error.message),
       );
@@ -1573,7 +1599,7 @@ describe("candidate batch graph", () => {
       ),
       (error: unknown) =>
         error instanceof graph.DataflowNodeError &&
-        error.nodeId === graph.NodeId.create("FinalizeBatch") &&
+        error.nodeId === graph.NodeId.create("ProposalDecision:1") &&
         error.error instanceof Error &&
         /Proposer:1 did not finish normally: error: proposer exploded/.test(
           error.error.message,

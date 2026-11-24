@@ -40,42 +40,39 @@ export type VerusRole = "Verifier" | "Reviewer" | "Cleanup";
 type VerusMembers = Readonly<Record<VerusRole, YamlAgent>>;
 type VerusRoundContext = {
   readonly assignment: string;
-  readonly members: VerusMembers;
   readonly verification: { runs(): number };
   reviewerBaseline?: number;
 };
 
+const VerifierAssignment: syntax.DeterministicNode<VerusRoundContext> = ({ context, edges, policy }) =>
+  new graph.nodes.Deterministic<TSchema, unknown>(async function* (signal) {
+    signal.throwIfAborted();
+    return new graph.FinalMessages([graph.Message.create(edges.get("VerifierAssignment~>Verifier")!, context.assignment)]);
+  }, policy);
+
 /** Validate the translation and sample diagnostics before the persistent Reviewer starts. */
-const PrepareReviewer: syntax.DeterministicNode<VerusRoundContext> = ({ policy, context }) => {
-  return {
-    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* (signal) {
-      const inputs = yield [];
-      signal.throwIfAborted();
-      const message = inputs.values.get(graph.EdgeId.create("Verifier->PrepareReviewer"));
-      const report = syntax.finalText(message, "Verifier");
-      context.reviewerBaseline = context.verification.runs();
-      context.members.Reviewer.stagePrompt(context.assignment + `Current Verifier report (evidence):\n${report}\n\nInspect the current output and call mcp__verus__lsp_diagnostics yourself this round. Report stronger specifications and smaller proofs, even if verification succeeds.`);
-      return message;
-    }, policy),
-  };
-};
+const PrepareReviewer: syntax.DeterministicNode<VerusRoundContext> = ({ policy, context, edges }) =>
+  new graph.nodes.Deterministic<TSchema, unknown>(async function* (signal) {
+    const inputs = yield [];
+    signal.throwIfAborted();
+    const report = inputs.values.get(graph.EdgeId.create("Verifier->PrepareReviewer"));
+    syntax.finalText(report, "Verifier");
+    context.reviewerBaseline = context.verification.runs();
+    return new graph.FinalMessages([graph.Message.create(edges.get("PrepareReviewer~>Reviewer")!, { assignment: context.assignment, report })]);
+  }, policy);
 
 /** Cleanup is admitted only after a complete review and fresh Reviewer diagnostics. */
-const PrepareCleanup: syntax.DeterministicNode<VerusRoundContext> = ({ policy, context }) => {
-  return {
-    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* (signal) {
-      const inputs = yield [];
-      signal.throwIfAborted();
-      const message = inputs.values.get(graph.EdgeId.create("Reviewer->PrepareCleanup"));
-      const report = syntax.finalText(message, "Reviewer");
-      if (context.reviewerBaseline === undefined || context.verification.runs() <= context.reviewerBaseline) {
-        throw new Error("Reviewer did not obtain Verus MCP diagnostics in this round");
-      }
-      context.members.Cleanup.stagePrompt(context.assignment + `Current Reviewer report (evidence):\n${report}\n\nSimplify real source/proofs without weakening contracts. Check edits with Verus MCP diagnostics; retain unresolved stronger-spec recommendations for the next Verifier.`);
-      return message;
-    }, policy),
-  };
-};
+const PrepareCleanup: syntax.DeterministicNode<VerusRoundContext> = ({ policy, context, edges }) =>
+  new graph.nodes.Deterministic<TSchema, unknown>(async function* (signal) {
+    const inputs = yield [];
+    signal.throwIfAborted();
+    const report = inputs.values.get(graph.EdgeId.create("Reviewer->PrepareCleanup"));
+    syntax.finalText(report, "Reviewer");
+    if (context.reviewerBaseline === undefined || context.verification.runs() <= context.reviewerBaseline) {
+      throw new Error("Reviewer did not obtain Verus MCP diagnostics in this round");
+    }
+    return new graph.FinalMessages([graph.Message.create(edges.get("PrepareCleanup~>Cleanup")!, { assignment: context.assignment, report })]);
+  }, policy);
 
 const errorCode = (error: unknown): unknown => error instanceof Error && "code" in error ? error.code : undefined;
 const inside = (root: string, path: string): boolean => path === root || path.startsWith(root + sep);
@@ -186,11 +183,10 @@ export const VerusRound = {
     feedback?: VerusFeedback, observer?: tracer.DataflowTracer, ladder?: schedules.ModelLadder,
     recorder?: syntax.BuildOptions["recorder"]): Promise<VerusRound> {
     const assignment = `Original natural-language specification:\n${workspace.spec}\n\nOriginal source (read-only): ${workspace.source}\nOutput directory: ${workspace.outputDir}\nOutput target: ${workspace.target}\nPath mapping: source-directory relative paths are preserved under output; a file maps to output/basename with only required neighboring module context materialized.\nSource-relative Rust inventory: ${JSON.stringify(workspace.rustFiles)}\nCopied Cargo manifests: ${JSON.stringify(workspace.cargoManifests)}\n\nPrevious Reviewer feedback:\n${feedback?.review ?? "First round; none."}\n\nPrevious Cleanup observations:\n${feedback?.cleanup ?? "First round; none."}\n\n`;
-    members.Verifier.stagePrompt(assignment + "Translate/repair the current output and address both feedback reports. Write actual source, then report evidence and unresolved obligations.");
-    const context: VerusRoundContext = { assignment, members, verification };
+    const context: VerusRoundContext = { assignment, verification };
     const execution = await JuncoGraph.fromYaml(source, {
       cwd: process.cwd(), scheduler: () => schedules.parallel(), tracer: observer, context,
-      code: { PrepareReviewer, PrepareCleanup },
+      code: { VerifierAssignment, PrepareReviewer, PrepareCleanup },
       ...(ladder === undefined ? {} : { ladder }),
       ...(recorder === undefined ? {} : { recorder }),
       createAgent: async (spec) => members[spec.node as VerusRole],

@@ -34,7 +34,7 @@ import {
 } from "../src/index.ts";
 import { terminalPorts } from "./deterministic-support.ts";
 import { withNativeCleanup } from "./native-support.ts";
-import { leaf, nativeOptions } from "./support.ts";
+import { addPromptOnce, leaf, nativeOptions } from "./support.ts";
 
 const flags = new Set(process.argv.slice(2));
 const stateFile = process.env.JUNCO_TUI_SMOKE_STATE;
@@ -403,7 +403,6 @@ async function tasksScenario(tui: tracer.TuiTracer, signal: AbortSignal) {
       tools: [new tools.TaskTool()],
     });
     const forgetCaller = defer(() => caller.return());
-    caller.stagePrompt("Start");
     const outerPorts = terminalPorts();
     const outer = new JuncoGraph(
       outerPorts.source,
@@ -418,12 +417,7 @@ async function tasksScenario(tui: tracer.TuiTracer, signal: AbortSignal) {
       scheduler: schedules.parallel(),
     });
     defer(() => outer.close());
-    const id = outer.addNode({
-      id: NodeId.create("caller"),
-      policy: LockPolicy,
-      trigger: TriggerRule.always(),
-      state: caller,
-    });
+    const id = addPromptOnce(outer, "caller", caller, "Start");
     forgetCaller();
     outerPorts.connect(outer, id);
     const node = outer.getNode(id);
@@ -480,28 +474,14 @@ async function agentsScenario(
         assert.notEqual(modes(), before, "first step must open lazily");
       return fauxAssistantMessage(text);
     };
-    const alpha = await leaf([response("Alpha", "alpha done")], {
-      prompt: "Alpha",
-    });
+    const alpha = await leaf([response("Alpha", "alpha done")]);
     const forgetAlpha = defer(() => alpha.agent.return());
-    const beta = await leaf([response("Beta", "beta done")], {
-      prompt: "Beta",
-    });
+    const beta = await leaf([response("Beta", "beta done")]);
     const forgetBeta = defer(() => beta.agent.return());
     const edge = Edge.value("alpha=>beta", AssistantMessageSchema);
-    const a = graph.addNode({
-      id: NodeId.create("Alpha"),
-      policy: LockPolicy,
-      trigger: TriggerRule.always(),
-      state: alpha.agent,
-    });
+    const a = addPromptOnce(graph, "Alpha", alpha.agent, "Alpha");
     forgetAlpha();
-    const b = graph.addNode({
-      id: NodeId.create("Beta"),
-      policy: LockPolicy,
-      trigger: TriggerRule.when(edge),
-      state: beta.agent,
-    });
+    const b = addPromptOnce(graph, "Beta", beta.agent, "Beta", undefined, edge);
     forgetBeta();
     graph.addEdge(a, b, edge);
     graphPorts.connect(graph, b);

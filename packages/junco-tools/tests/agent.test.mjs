@@ -419,7 +419,7 @@ test("a tools-owned yield continues in a bare Pi agent without a scheduler", {
   const capture = {};
   faux.setResponses([
     fauxAssistantMessage(
-      [fauxToolCall("yield", { reason: "review" }, { id: "standalone-yield" })],
+      [fauxToolCall("yield", { reason: "review", waitForInput: true }, { id: "standalone-yield" })],
       { stopReason: "toolUse" },
     ),
     (context) => {
@@ -439,7 +439,7 @@ test("a tools-owned yield continues in a bare Pi agent without a scheduler", {
     assert.ok(result, "the next model request never saw the yield result");
     assert.equal(result.isError, false);
     assert.equal(text(result), "review");
-    assert.equal(result.details.reason, "review");
+    assert.deepEqual(result.details, { reason: "review", waitForInput: true });
     assert.equal(assistantText(agent.state.messages.at(-1)), "continued");
     assert.equal(faux.state.callCount, 2);
   } finally {

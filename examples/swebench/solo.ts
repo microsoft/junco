@@ -65,22 +65,15 @@ function reply(text: string): AssistantMessage {
 export const Input: Code = ({ context, edges, policy }) => {
   const output = edges.get("Input~>Solo");
   if (output === undefined) throw new Error("solo.yml declares no edge Input~>Solo");
-  let published = false;
-  return {
-    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* (signal) {
-      while (true) {
-        signal.throwIfAborted();
-        published = true;
-        yield [graph.Message.create(output, prompt(issueText(context.problem), "The issue is fixed in /testbed and its tests pass."))];
-      }
-    }, policy),
-    is_available: () => !published,
-  };
+  return new graph.nodes.Deterministic<TSchema, unknown>(async function* (signal) {
+    signal.throwIfAborted();
+    return new graph.FinalMessages([graph.Message.create(output, prompt(issueText(context.problem), "The issue is fixed in /testbed and its tests pass."))]);
+  }, policy);
 };
 
 /** A useful sandbox change survives an abnormal agent stop; only the official evaluator judges resolution. */
-export const Deliver: Code = ({ context, policy }) => ({
-  state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+export const Deliver: Code = ({ context, policy }) =>
+  new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
     const inputs = yield [];
     const report = inputs.values.get(graph.EdgeId.create("Solo->Deliver")) as AssistantMessage | undefined;
     const patch = await context.sandbox.capture("candidateA");
@@ -92,8 +85,7 @@ export const Deliver: Code = ({ context, policy }) => ({
     context.save("solo.md", text || `Solo stopped: ${report?.stopReason ?? "missing result"}`);
     const files = [...patch.matchAll(/^diff --git a\/(\S+) b\//gm)].map((match) => match[1]);
     return reply(`Solo patch delivered: ${files.length} file${files.length === 1 ? "" : "s"} (${files.join(", ")}); ${path}\nLimitation: only the official evaluation decides resolution.`);
-  }, policy),
-});
+  }, policy);
 
 /** sha256 of the parsed document with object keys sorted recursively: a topology's identity. */
 function hashDocument(document: syntax.JuncoDocument): string {

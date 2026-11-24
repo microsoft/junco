@@ -3,14 +3,11 @@
 // Two live-LLM agents analyze the repository through graft MCP, alongside Junco's builtin tools.
 // mcp.yml declares their prompts and graph; this module supplies Reports, LADDER and the graft
 // server: one client and process on a shared tool collection, whose tools every agent gets.
-// Research maps the repository with `mcp__graft__graft_repo_map` and selects exactly five
-//    central, repository-owned classes, confirming each declaration.
-// 3. Dependencies runs once Research's report exists, as a value edge. Its staged prompt callback
-//    validates that report and embeds it in the dependency assignment; Dependencies then traces
-//    every one of those five classes itself with outbound all-depth
-//    `mcp__graft__graft_trace_calls`.
-// 4. The runner closes the graph (and with it both agents), the TUI, then the collection (its graft
-//    server and, last, its ShellMux), then holds the final TUI screen until dismissed.
+// Assignment sends Research one task. Research maps the repository with `mcp__graft__graft_repo_map`
+// and selects five central, repository-owned classes, confirming each declaration.
+// Dependencies consumes the completed report in its YAML prompt and traces all five classes
+// with outbound all-depth `mcp__graft__graft_trace_calls`.
+// Reports validates both results and returns Dependencies' exact report.
 //
 // Prerequisites: junco-tools' Rust toolchain and system libraries (packages/junco-tools/README.md),
 // so that `bun install --frozen-lockfile` at the root also builds the production native addon
@@ -27,17 +24,14 @@ import { problemRecorder, runCli, verifiedModels } from "../support.ts";
 import source from "./mcp.yml" with { type: "text" };
 
 /** Validate both reports before publishing the dependency report as the graph result. */
-export const Reports: syntax.DeterministicNode = ({ policy }) => {
-  return {
-    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
-      const inputs = yield [];
-      syntax.finalText(inputs.values.get(graph.EdgeId.create("Research->Reports")), "Research");
-      const result = inputs.values.get(graph.EdgeId.create("Dependencies->Reports"));
-      syntax.finalText(result, "Dependencies");
-      return result;
-    }, policy),
-  };
-};
+export const Reports: syntax.DeterministicNode = ({ policy }) =>
+  new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+    const inputs = yield [];
+    syntax.finalText(inputs.values.get(graph.EdgeId.create("Research->Reports")), "Research");
+    const result = inputs.values.get(graph.EdgeId.create("Dependencies->Reports"));
+    syntax.finalText(result, "Dependencies");
+    return result;
+  }, policy);
 
 
 // ## 1. Where the repository is

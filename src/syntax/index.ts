@@ -2,7 +2,6 @@ export {
   type AgentSpec,
   type BuildOptions,
   type CodeContext,
-  type CodeRegistration,
   createJuncoAgent,
   type DeterministicNode,
   type FromYamlOptions,

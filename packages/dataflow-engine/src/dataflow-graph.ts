@@ -15,8 +15,8 @@ import { checkPayload, type Edge } from "./edges.js";
 import { DataflowDefinitionError, DataflowNodeError } from "./errors.js";
 import type { EdgeId } from "./identity.js";
 import { NodeId } from "./identity.js";
-import type { Lookup, Message, Node, NodeSpec, ParentView } from "./node.js";
-import { snapshotView } from "./node.js";
+import type { Lookup, Message, Node, NodeSpec, NodeYield, ParentView } from "./node.js";
+import { FinalMessages, rejectLegacyAvailability, snapshotView } from "./node.js";
 import type { Pretty } from "./pretty.js";
 import type { Queue } from "./queue.js";
 import type {
@@ -25,6 +25,7 @@ import type {
   NodeSchedule,
   Schedule,
 } from "./scheduler.js";
+import { Sink, Source } from "./stdlib.js";
 import { satisfiedEdges } from "./trigger.js";
 import type { ResourceKind } from "./units.js";
 import {
@@ -46,10 +47,6 @@ function escapeMermaidLabel(value: string): string {
   );
 }
 
-/** The default availability hook: a node is available exactly when its trigger fires. */
-const whenTriggered = (_view: unknown, triggered: boolean): boolean =>
-  triggered;
-
 /**
  * The per-node state the graph owns: allocated once by {@link DataflowGraph.addNode}, mutated in
  * place, never replaced.
@@ -64,6 +61,9 @@ type NodeRuntime<N extends TSchema, T> = {
   readonly inbound: Map<EdgeId, Edge<N, T>>;
   /** Stable, non-destructive readiness view reading through to `inbound`'s edges. */
   readonly probe: ParentView<N, T>;
+  continuation: boolean;
+  readonly repeatOnReturn: boolean;
+  readonly source?: Source<N, T>;
 };
 
 /**
@@ -139,6 +139,8 @@ const viewOf = <N extends TSchema, T>(
   },
   values,
 });
+
+const emptyView = viewOf<never, never>(undefined, new Map<EdgeId, never>());
 
 /** Cancellation for one scoped evaluation, including planning and concrete execution. */
 export type DataflowRunOptions = {
@@ -219,6 +221,11 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
    * @throws {DataflowDefinitionError} on an explicit duplicate id.
    */
   addNode(spec: NodeSpec<S, N, T>): NodeId {
+    return this.registerNode(spec, false);
+  }
+
+  protected registerNode(spec: NodeSpec<S, N, T>, repeatOnReturn: boolean): NodeId {
+    rejectLegacyAvailability(spec);
     let id: NodeId;
     if (spec.id === undefined) {
       id = NodeId.create(String(this.#nextNodeIndex++));
@@ -235,7 +242,15 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
     }
 
     const inbound = new Map<EdgeId, Edge<N, T>>();
-    this.#runtime.set(id, { inbound, probe: probeOf<N, T>(inbound) });
+    this.#runtime.set(id, {
+      inbound,
+      probe: probeOf<N, T>(inbound),
+      continuation: false,
+      repeatOnReturn,
+      ...(spec.state instanceof Source && spec.step === spec.state.step
+        ? { source: spec.state }
+        : {}),
+    });
 
     const node: Node<S, N, T> = {
       id,
@@ -244,7 +259,6 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
       trigger: spec.trigger,
       step: spec.step,
       generator: undefined,
-      is_available: spec.is_available ?? whenTriggered,
       ...(spec.description === undefined
         ? {}
         : { description: spec.description }),
@@ -273,6 +287,20 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
       throw new DataflowDefinitionError(
         `Dataflow edge references missing node: ${missingId}`,
       );
+    }
+    if (edge.onReturn && E.isRight(edge.transport))
+      throw new DataflowDefinitionError(`Return notifications require a message edge: "${edge.id}"`);
+    const ingress = this.#runtimeOf(to).source;
+    if (ingress && (from === to || edge.onReturn || E.isRight(edge.transport) ||
+        !ingress.trigger.rule.some((credit) => credit === edge.id)))
+      throw new DataflowDefinitionError(
+        `Graph source inbound edge "${edge.id}" must be an ordinary message credit from another node named in the source trigger`,
+      );
+    if (this.#runtimeOf(from).source) {
+      if (E.isRight(edge.transport))
+        throw new DataflowDefinitionError("Graph source cannot produce value edges");
+      if (edge.onReturn)
+        throw new DataflowDefinitionError(`Node "${from}" cannot produce return messages`);
     }
 
     for (const link of this.#graph.getLinks(from) ?? []) {
@@ -446,9 +474,8 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
    * Admit the next window's candidates. Non-destructive: the queues are untouched, so the scheduler
    * sees each node's inbound state live and decides for itself how much of it to read.
    *
-   * The graph is the sole admission boundary: a `done` node is skipped, every other node's trigger
-   * is evaluated once — validating every rule edge even when the hook will say no — and only then is
-   * its availability hook told whether that trigger fired. Only admitted nodes reach a scheduler.
+   * Validate every declared edge even on continuation-only turns. Only a firing trigger or a
+   * continuation admits a node; an ingress port additionally requires a detached delivery.
    *
    * Iteration order is ngraph node-insertion order, which keeps deterministic schedulers
    * deterministic.
@@ -465,11 +492,12 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
         trigger.kind === "all"
           ? satisfied.length === trigger.rule.length
           : satisfied.length > 0;
-      if (!node.is_available(runtime.probe, triggered)) return;
+      if ((!triggered && !runtime.continuation) || (runtime.source && !runtime.source.peek())) return;
       available.set(node.id, {
         view: runtime.probe,
         trigger,
         satisfied,
+        continuationOnly: runtime.continuation && !triggered,
         status: node.status,
       });
     });
@@ -617,7 +645,7 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
     for (let w = 0; w < turns; w++) {
       signal?.throwIfAborted();
       const live = this.#available();
-      const column: NodeSchedule[] = [];
+      const column: (NodeSchedule & { continuationOnly: boolean })[] = [];
       for (const lane of schedule) {
         const entry = lane[w];
         if (entry === undefined) continue;
@@ -627,7 +655,21 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
           availability.status === "running"
             ? (options?.resolveInputs?.(entry, availability) ?? entry.inputs)
             : entry.inputs;
-        column.push({ id: entry.id, inputs });
+        if (
+          availability.status === "running" &&
+          availability.trigger.rule.length > 0 &&
+          this.#runtimeOf(entry.id).source
+        ) {
+          const readsCredit = (id: EdgeId) => (inputs.get(id) ?? "none") !== "none";
+          const valid = availability.trigger.kind === "all"
+            ? availability.satisfied.every(readsCredit)
+            : availability.satisfied.some(readsCredit);
+          if (!valid)
+            throw new DataflowDefinitionError(
+              `Source "${entry.id}" must read the credits required by its trigger`,
+            );
+        }
+        column.push({ id: entry.id, inputs, continuationOnly: availability.continuationOnly });
       }
       for (const { id, inputs } of column) this.#assertInputs(id, inputs);
       if (column.length === 0) continue;
@@ -646,6 +688,7 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
             () =>
               this.#runNode(
                 entry,
+                entry.continuationOnly,
                 execution,
                 signal,
                 options?.measureRuntime ? report : undefined,
@@ -786,6 +829,7 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
    */
   async #runNode(
     { id, inputs }: NodeSchedule,
+    continuationOnly: boolean,
     execution: DataflowRunTrace<N, T> | undefined,
     signal: AbortSignal | undefined,
     reportRuntime: ((kind: ResourceKind, value: number) => void) | undefined,
@@ -804,7 +848,7 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
     this.#version++;
 
     try {
-      let step: IteratorResult<Message<N>[], T>;
+      let step: IteratorResult<NodeYield<N>, T | FinalMessages<N>>;
       if (node.status === "ready") {
         if (execution !== undefined)
           activation = this.#observe(() =>
@@ -824,7 +868,7 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
           );
         }
         // Synchronous before this branch's first `await`, so concurrent lanes consume in lane order.
-        const view = viewOf<N, T>(
+        const view = continuationOnly ? emptyView : viewOf<N, T>(
           this.#consume(runtime, inputs),
           runtime.probe.values,
         );
@@ -839,15 +883,27 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
         inBody = false;
       }
 
+      const finished = activation;
       if (step.done === true) {
         node.status = "done";
-        this.#recordReturn(node, step.value);
+        runtime.continuation = false;
+        if (step.value instanceof FinalMessages) {
+          this.#publish(node, step.value.messages);
+        } else {
+          this.#recordReturn(node, step.value);
+          if (runtime.repeatOnReturn) this.#rearm(node);
+        }
+        const terminal = step;
+        if (finished !== undefined) this.#settle(() => finished.end(terminal));
       } else {
-        for (const message of step.value) this.emit(id, message);
+        const yielded = step.value;
+        const messages = Array.isArray(yielded) ? yielded : yielded.resume;
+        this.#publish(node, messages);
+        runtime.continuation = !Array.isArray(yielded);
+        if (finished !== undefined) this.#settle(() => finished.end({ done: false, value: messages }));
       }
-      const finished = activation;
-      if (finished !== undefined) this.#settle(() => finished.end(step));
     } catch (cause) {
+      runtime.continuation = false;
       node.status = "done";
       const failed = activation;
       if (failed !== undefined) this.#settle(() => failed.fail(cause));
@@ -876,6 +932,15 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
       this.#version++;
       if (started !== undefined)
         reportRuntime?.("runtime", Math.round(performance.now() - started));
+    }
+  }
+
+  /** Port batches leave through the acknowledged outbox, never through sender-local graph edges. */
+  #publish(node: Node<S, N, T>, messages: readonly Message<N>[]): void {
+    if (node.state instanceof Sink && node.step === node.state.step) {
+      for (const message of messages) node.state.send(message);
+    } else {
+      for (const message of messages) this.emit(node.id, message);
     }
   }
 
@@ -917,6 +982,10 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
           `Node ${fromId} emitted a message on value edge "${edgeId}"`,
         );
       }
+      if (edge.onReturn)
+        throw new DataflowDefinitionError(
+          `Node ${fromId} cannot emit on return-message edge "${edgeId}"`,
+        );
       const { schema } = edge;
       if (!Type.IsSchema(schema))
         throw new DataflowDefinitionError(
@@ -936,8 +1005,8 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
   }
 
   /**
-   * Record `nodeId`'s return value and fan it into every outbound value edge; a self-edge re-arms
-   * it. Every outbound value edge's schema is checked first, so a rejected value publishes nothing.
+   * Validate all destinations before storing the result, resolving value cells or publishing to
+   * return-message queues. A value self-edge re-arms the producer.
    * Each delivery is then reported to that edge's `probe`, if any.
    *
    * @throws {DataflowDefinitionError} when the value fails an outbound value edge's schema.
@@ -946,20 +1015,25 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
     const nodeId = node.id;
     const links = this.#graph.getLinks(nodeId) ?? [];
     for (const link of links) {
-      if (link.fromId !== nodeId || E.isLeft(link.data.transport)) continue;
+      if (link.fromId !== nodeId || (E.isLeft(link.data.transport) && !link.data.onReturn)) continue;
       checkPayload(
         link.data.schema,
         value,
-        `Invalid payload for value edge "${link.data.id}"`,
+        `Invalid payload for ${link.data.onReturn ? "return-message" : "value"} edge "${link.data.id}"`,
       );
     }
     this.#results.set(nodeId, value);
     for (const link of links) {
       if (link.fromId !== nodeId) continue;
       const edge = link.data;
-      if (E.isLeft(edge.transport)) continue; // message edge
-      edge.transport = E.right(O.some(value));
-      if (link.toId === nodeId) this.#rearm(node);
+      if (E.isLeft(edge.transport)) {
+        if (!edge.onReturn) continue;
+        // This FIFO's schema admitted the product in the validation pass.
+        edge.transport.left.push(value as Static<N>);
+      } else {
+        edge.transport = E.right(O.some(value));
+        if (link.toId === nodeId) this.#rearm(node);
+      }
       const probe = edge.probe;
       if (probe !== undefined) this.#observe(() => probe(value));
     }
@@ -968,6 +1042,7 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
   /** A delivery on a node's own feedback edge after it returned starts another run of the node. */
   #rearm(node: Node<S, N, T>): void {
     if (node.status !== "done") return;
+    this.#runtimeOf(node.id).continuation = false;
     node.status = "ready";
     node.generator = undefined;
   }

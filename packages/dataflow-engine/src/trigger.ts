@@ -12,9 +12,7 @@ export type TriggerKind = "all" | "any";
  * A node's readiness predicate: WHICH inbound edges must be carrying something. Never how much of
  * it to take — that is the scheduler's decision, carried in `MessageSchedule` (`scheduler.ts`).
  *
- * An entry is satisfied by a single queued message, or by a resolved value cell. A node that must
- * wait for a deeper backlog than that says so in its own `is_available` hook, which is handed the
- * live queues.
+ * An entry is satisfied by a single queued message, or by a resolved value cell.
  *
  * `rule` is in call order — an `"any"` rule fires on the FIRST satisfied entry — and holds no
  * duplicate, so `rule.length` is the number of distinct edges `"all"` must see satisfied.
@@ -171,7 +169,7 @@ export const fires = <N extends TSchema, T>(
 
 /**
  * Whether `trigger` fires right now against `nodeId`'s inbound edges. An empty rule is `true` for
- * `"all"` (how a source with no inbound edges stays permanently available) and `false` for `"any"`.
+ * `"all"` and `false` for `"any"`.
  *
  * Deliberately does NOT short-circuit: `isSatisfied` doubles as the wiring check, so bailing early
  * on a decided outcome would stop a later entry's unknown-edge reference from throwing.

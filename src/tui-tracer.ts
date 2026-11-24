@@ -9,6 +9,7 @@ import {
   type DataflowStepTrace,
   type DataflowTracer,
   DummyTracer,
+  FinalMessages,
   type Node,
 } from "dataflow-engine";
 import type { JuncoAgent } from "junco-agent";
@@ -593,7 +594,7 @@ export class TuiTracer implements DataflowTracer {
         });
         const settle = (
           result:
-            | { step: IteratorResult<readonly Message<N>[], T> }
+            | { step: IteratorResult<readonly Message<N>[], T | FinalMessages<N>> }
             | { error: unknown },
         ): void => {
           if (settled || this.#closed) return;
@@ -609,6 +610,11 @@ export class TuiTracer implements DataflowTracer {
                 nodeKey: key,
                 text: `run ${run} error ${formatTuiPayload(result.error)}`,
                 tone: "error",
+              });
+            } else if (result.step.done && result.step.value instanceof FinalMessages) {
+              this.#record({
+                nodeKey: key,
+                text: `run ${run} final ${formatTuiPayload({ messages: result.step.value.messages })}`,
               });
             } else if (key !== undefined && this.#metadata.get(key)?.agent) {
               if (result.step.done === true) {

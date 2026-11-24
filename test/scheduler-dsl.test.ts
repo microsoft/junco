@@ -8,23 +8,24 @@ import type { SchedulerRequest } from "junco-scheduler/agent";
 import { LockPolicy } from "junco-tools";
 import type { AgencyNodeMetadata } from "../src/node-policy.ts";
 import { resultText, terminalPorts } from "./deterministic-support.ts";
-import { agencyGraph, leaf, runAvailable, type Script } from "./support.ts";
+import {
+  addPromptOnce,
+  agencyGraph,
+  leaf,
+  runAvailable,
+  type Script,
+} from "./support.ts";
 
 const MEMBER = NodeId.create("0");
 
 async function singleMember(script: Script, reply = "member done") {
-  const member = await leaf([fauxAssistantMessage(reply)], { prompt: "work" });
+  const member = await leaf([fauxAssistantMessage(reply)]);
   const ports = terminalPorts();
   const fixture = await agencyGraph(ports.source, ports.sink, script, {
     prompt: "schedule it",
   });
   const graph = fixture.context.graph;
-  const id = graph.addNode({
-    description: "the member",
-    trigger: TriggerRule.always(),
-    policy: LockPolicy,
-    state: member.agent,
-  });
+  const id = addPromptOnce(graph, MEMBER, member.agent, "work", "the member");
   ports.connect(graph, id);
   return { ...fixture, member };
 }
@@ -51,12 +52,8 @@ test("a repeated ID in an oracle wave runs once and retains the exact sink resul
 });
 
 test("speculative unavailable IDs are filtered and reconsidered from a fresh decision", async () => {
-  const producer = await leaf([fauxAssistantMessage("produced")], {
-    prompt: "produce",
-  });
-  const consumer = await leaf([fauxAssistantMessage("consumed")], {
-    prompt: "consume",
-  });
+  const producer = await leaf([fauxAssistantMessage("produced")]);
+  const consumer = await leaf([fauxAssistantMessage("consumed")]);
   const ports = terminalPorts();
   const requests: SchedulerRequest<AgencyNodeMetadata>[] = [];
   const { context } = await agencyGraph(ports.source, ports.sink, (request) => {
@@ -65,20 +62,10 @@ test("speculative unavailable IDs are filtered and reconsidered from a fresh dec
   });
   const graph = context.graph;
   const edge = Edge.value("producer->consumer", AssistantMessageSchema);
-  const p = graph.addNode({
-    id: NodeId.create("producer"),
-    description: "producer",
-    trigger: TriggerRule.always(),
-    policy: LockPolicy,
-    state: producer.agent,
-  });
-  const c = graph.addNode({
-    id: NodeId.create("consumer"),
-    description: "consumer",
-    trigger: TriggerRule.when(edge),
-    policy: LockPolicy,
-    state: consumer.agent,
-  });
+  const p = addPromptOnce(graph, "producer", producer.agent, "produce", "producer");
+  const c = addPromptOnce(
+    graph, "consumer", consumer.agent, "consume", "consumer", edge,
+  );
   graph.addEdge(p, c, edge);
   ports.connect(graph, c);
   try {
@@ -101,12 +88,8 @@ test("speculative unavailable IDs are filtered and reconsidered from a fresh dec
 });
 
 test("a node added between decisions is described with fresh typed metadata", async () => {
-  const first = await leaf([fauxAssistantMessage("first done")], {
-    prompt: "first",
-  });
-  const late = await leaf([fauxAssistantMessage("late done")], {
-    prompt: "late",
-  });
+  const first = await leaf([fauxAssistantMessage("first done")]);
+  const late = await leaf([fauxAssistantMessage("late done")]);
   const ports = terminalPorts();
   const requests: SchedulerRequest<AgencyNodeMetadata>[] = [];
   const { context } = await agencyGraph(ports.source, ports.sink, (request) => {
@@ -114,21 +97,12 @@ test("a node added between decisions is described with fresh typed metadata", as
     return runAvailable(request);
   });
   const graph = context.graph;
-  const firstId = graph.addNode({
-    description: "first member",
-    trigger: TriggerRule.always(),
-    policy: LockPolicy,
-    state: first.agent,
-  });
+  const firstId = addPromptOnce(
+    graph, MEMBER, first.agent, "first", "first member",
+  );
   ports.connect(graph, firstId);
   await context.step();
-  const lateId = graph.addNode({
-    id: NodeId.create("late"),
-    description: "late member",
-    trigger: TriggerRule.always(),
-    policy: LockPolicy,
-    state: late.agent,
-  });
+  const lateId = addPromptOnce(graph, "late", late.agent, "late", "late member");
   try {
     await context.run();
     const request = requests.find((entry) =>
@@ -138,7 +112,7 @@ test("a node added between decisions is described with fresh typed metadata", as
       request?.nodes.find(({ id }) => id === lateId)?.description,
       "late member",
     );
-    assert.equal(new Map(request?.context).get(lateId)?.agentStatus, "ready");
+    assert.equal(new Map(request?.context).get(lateId)?.agentStatus, "idle");
     assert.deepEqual(
       [resultText(graph, MEMBER), resultText(graph, lateId)],
       ["first done", "late done"],
@@ -155,26 +129,20 @@ test("a nested context publishes its sink result after all child decisions", asy
   const graph = parent.context.graph;
   const edge = Edge.value("child->consumer", AssistantMessageSchema);
   let childRequestsAtDelivery: number | undefined;
-  const consumer = await leaf(
-    [
-      () => {
-        childRequestsAtDelivery = child.faux.state.callCount;
-        return fauxAssistantMessage("consumed");
-      },
-    ],
-    { prompt: "consume" },
-  );
+  const consumer = await leaf([
+    () => {
+      childRequestsAtDelivery = child.faux.state.callCount;
+      return fauxAssistantMessage("consumed");
+    },
+  ]);
   const nested = graph.addNode({
     description: "child",
     trigger: TriggerRule.always(),
     state: child.context,
   });
-  const c = graph.addNode({
-    description: "consumer",
-    trigger: TriggerRule.when(edge),
-    policy: LockPolicy,
-    state: consumer.agent,
-  });
+  const c = addPromptOnce(
+    graph, "consumer", consumer.agent, "consume", "consumer", edge,
+  );
   graph.addEdge(nested, c, edge);
   ports.connect(graph, c);
   try {
@@ -224,7 +192,8 @@ test("a quiescent nested graph without its sink result fails before dependent wo
   const blocked = await leaf([fauxAssistantMessage("must remain blocked")]);
   const terminal = child.context.graph.addNode({
     description: "blocked terminal",
-    trigger: TriggerRule.always(),
+    prompt: "Wait for work",
+    trigger: TriggerRule.never(),
     policy: LockPolicy,
     state: blocked.agent,
   });

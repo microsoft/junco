@@ -1,7 +1,7 @@
 import type { TSchema } from "typebox";
 import type { DataflowGraph } from "./dataflow-graph.js";
 import type { NodeId } from "./identity.js";
-import type { Message, ParentView } from "./node.js";
+import type { FinalMessages, Message, ParentView } from "./node.js";
 
 /**
  * Pluggable execution observer. {@link DataflowGraph.evaluate} calls `startRun` once around the
@@ -45,8 +45,8 @@ export type DataflowRunTrace<N extends TSchema, T> = {
 
 /** Observer for one generator activation. */
 export type DataflowStepTrace<N extends TSchema, T> = {
-  /** The activation yielded (after routing) or returned (after value-edge propagation). */
-  end(step: IteratorResult<readonly Message<N>[], T>): void | Promise<void>;
+  /** Called after routing: yields expose the published batch, terminal publications retain their marker. */
+  end(step: IteratorResult<readonly Message<N>[], T | FinalMessages<N>>): void | Promise<void>;
   /** The generator threw, or its yield could not be routed; `error` is the raw cause. */
   fail(error: unknown): void | Promise<void>;
 };

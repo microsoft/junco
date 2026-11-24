@@ -20,7 +20,7 @@ import {
   ToolCollection,
 } from "junco-tools";
 import { policyContext, terminalPorts } from "./deterministic-support.ts";
-import { flushMacrotasks, nativeOptions } from "./support.ts";
+import { addPromptOnce, flushMacrotasks, nativeOptions } from "./support.ts";
 
 // Real Marsh policy through junco-tools' test addon: a CopyTree fixture filesystem with the sandbox
 // always on. Build it once in packages/junco-tools with `bun run build:native:test`. Imported
@@ -238,18 +238,13 @@ test(
             graph.addNode({
               id,
               policy: EmptyPolicy,
+              prompt: "go",
               trigger: TriggerRule.always(),
               state: agent,
             }),
           TypeError,
         );
-        agent.stagePrompt("go");
-        graph.addNode({
-          id,
-          policy: LockPolicy,
-          trigger: TriggerRule.always(),
-          state: agent,
-        });
+        addPromptOnce(graph, id, agent, "go");
         ports.connect(graph, id);
         const result = await graphContext.run();
         assert.equal(contentText(result.get(id)!.content), "registered");

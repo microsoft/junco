@@ -11,6 +11,7 @@ import {
   EmitOnce,
   from,
   Message,
+  messageInputs,
   type MessageSchedule,
   NodeId,
   type NodeIdType,
@@ -858,8 +859,7 @@ test("context validates malformed, duplicate, unavailable and unowned decisions 
     graph.addNode({
       id: id("dormant"),
       state: undefined,
-      trigger: TriggerRule.always(),
-      is_available: () => false,
+      trigger: TriggerRule.never(),
       step: actor(ran),
     });
     const version = graph.observe().version;
@@ -1032,8 +1032,7 @@ test("allOf waits for the atomic join and observations/planning do not consume i
   const source = graph.addNode({
     id: id("source"),
     state: undefined,
-    trigger: TriggerRule.always(),
-    is_available: () => false,
+    trigger: TriggerRule.never(),
     step: async function* () {
       return "source";
     },
@@ -1069,6 +1068,69 @@ test("allOf waits for the atomic join and observations/planning do not consume i
   assert.deepEqual(captured[0]!.inputs.get(sink)!.messages.get(a.id), [1]);
   assert.deepEqual(captured[0]!.inputs.get(sink)!.messages.get(b.id), [2]);
   assert.deepEqual(selections(captured[1]!), [["sink"]]);
+});
+
+test("continuation-only joins bypass input planning and retry a policy that requests queued work", async () => {
+  const graph: Graph = new DataflowGraph(Width.create(1), UNBOUNDED);
+  const source = graph.addNode({
+    id: id("source"),
+    state: undefined,
+    trigger: TriggerRule.always(),
+    step: async function* () {
+      return "held";
+    },
+  });
+  const a = Edge.message<typeof NumberSchema, string>("a", NumberSchema);
+  const b = Edge.message<typeof NumberSchema, string>("b", NumberSchema);
+  const value = Edge.value("held", StringSchema);
+  const sink = graph.addNode({
+    id: id("sink"),
+    state: undefined,
+    trigger: TriggerRule.allOf(TriggerEntry.on(a), TriggerEntry.on(b)),
+    step: async function* () {
+      const joined = yield [];
+      assert.deepEqual([...from(joined, a), ...from(joined, b)], [1, 2]);
+      assert.equal(joined.values.get(value.id), "held");
+      const resumed = yield { resume: [] };
+      assert.deepEqual([...resumed.messages.keys()], []);
+      assert.deepEqual([...resumed.values.keys()], []);
+      yield [];
+      return "unexpected";
+    },
+  });
+  graph.addEdge(source, sink, a);
+  graph.addEdge(source, sink, b);
+  graph.addEdge(source, sink, value);
+  let retry = false;
+  const execution = context({
+    graph,
+    readInputs: (_node, candidate) => {
+      assert.equal(candidate.continuationOnly, false);
+      return messageInputs(candidate);
+    },
+    scheduler: (view) => {
+      const selected = select(view, [...view.available]);
+      if (view.inputs.get(sink)?.messages.get(a.id)?.[0] === 3) {
+        assert.deepEqual(plannedReads(view, sink), []);
+        assert.equal(view.inputs.get(sink)?.values.get(value.id), "held");
+        if (!view.lastError)
+          return { selected: [{ ...selected[0]!, readEdges: [a.id] }] };
+        assert.match(view.lastError.message, /continuation-only/);
+        retry = true;
+      }
+      return { selected };
+    },
+  });
+  await execution.step(); // Resolve the non-triggering value.
+  graph.emit(source, Message.create(a, 1));
+  graph.emit(source, Message.create(b, 2));
+  await execution.step(); // Prime.
+  await execution.step(); // Consume the join and request a continuation.
+  graph.emit(source, Message.create(a, 3));
+  await execution.step();
+  assert.equal(retry, true);
+  assert.equal(graph.available().has(sink), false);
+  assert.deepEqual(graph.observe().inputs.get(sink)?.messages.get(a.id), [3]);
 });
 
 test("invalid read decisions reject the entire column before primes or queue consumption", async () => {
@@ -1204,49 +1266,20 @@ for (const mutation of ["addNode", "emit"] as const) {
   });
 }
 
-test("live availability and mutation inside read lowering also invalidate a decision", async () => {
-  for (const loweringMutation of [false, true]) {
-    const gate = Promise.withResolvers<void>();
-    const entered = Promise.withResolvers<void>();
-    let available = true;
-    let mutate = loweringMutation;
-    const ran: string[] = [];
-    const graph: Graph = new DataflowGraph(Width.create(1), UNBOUNDED);
-    graph.addNode({
-      id: id("a"),
-      state: undefined,
-      trigger: TriggerRule.always(),
-      is_available: () => available,
-      step: actor(ran),
-    });
-    const execution = context({
-      graph,
-      scheduler: async (view) => {
-        entered.resolve();
-        await gate.promise;
-        return { selected: select(view, ids(["a"])) };
-      },
-      readInputs: () => {
-        if (mutate) {
-          mutate = false;
-          graph.addNode({
-            state: undefined,
-            trigger: TriggerRule.always(),
-            step: actor(ran),
-          });
-        }
-        return new Map();
-      },
-    });
-    const version = graph.observe().version;
-    const rejected = assert.rejects(execution.step(), DataflowDefinitionError);
-    await entered.promise;
-    if (!loweringMutation) available = false;
-    gate.resolve();
-    await rejected;
-    assert.deepEqual(ran, []);
-    if (!loweringMutation) assert.equal(graph.observe().version, version);
-  }
+test("mutation during read planning invalidates the decision before activation", async () => {
+  const ran: string[] = [];
+  const graph: Graph = new DataflowGraph(Width.create(1), UNBOUNDED);
+  graph.addNode({ id: id("a"), state: undefined, trigger: TriggerRule.always(), step: actor(ran) });
+  const execution = context({
+    graph,
+    scheduler: (view) => ({ selected: select(view, ids(["a"])) }),
+    readInputs: () => {
+      graph.addNode({ state: undefined, trigger: TriggerRule.always(), step: actor(ran) });
+      return new Map();
+    },
+  });
+  await assert.rejects(execution.step(), DataflowDefinitionError);
+  assert.deepEqual(ran, []);
 });
 
 test("fresh external metadata is detached independently of native version and failed history", async () => {

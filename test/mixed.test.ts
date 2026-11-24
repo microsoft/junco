@@ -48,9 +48,10 @@ function goalsTaskId(rendered: string): string {
   return taskId;
 }
 
-/** Records every raw message Reviewer is activated with on the nested graph's `Ralph~>Reviewer`. */
+/** Records the raw nested result before validation and its delivery to Reviewer. */
 class ReviewerInbox extends DummyTracer {
   readonly received: unknown[] = [];
+  readonly validated: unknown[] = [];
 
   override startRun<S, N extends TSchema, T, EH>(
     graph: DataflowGraph<S, N, T, EH>,
@@ -59,9 +60,11 @@ class ReviewerInbox extends DummyTracer {
     return {
       ...run,
       startNode: (id, phase, inputs) => {
+        if (String(id) === "ValidateDraft")
+          this.validated.push(...(inputs?.messages.get(EdgeId.create("Ralph~>Reviewer")) ?? []));
         if (String(id) === "Reviewer")
           this.received.push(
-            ...(inputs?.messages.get(EdgeId.create("Ralph~>Reviewer")) ?? []),
+            ...(inputs?.messages.get(EdgeId.create("ValidateDraft~>Reviewer")) ?? []),
           );
         return run.startNode(id, phase, inputs);
       },
@@ -110,14 +113,14 @@ async function mixedWorkflow(
           assert.equal(texts.length, 2);
           assert.equal(
             texts[0],
-            "Achieve the objectives in the user message(s) that follow this one, in order. Do your best and focus on depth (finish objectives well), not width (finish many objectives). Return the complete answer.",
+            "On the first round, achieve the objectives in the following task messages, in order. On phase \"revise\", take another try at the ordered objectives, building on your last answer in this session. On phase \"retry\", the previous attempt ended with a provider error: continue the same round from where you left off. Focus on depth: finish objectives well rather than attempting more of them. Return the complete answer.",
           );
           goalsTaskId(texts[1]!);
         }
         if (role === "Reviewer") {
           assert.equal(texts.length, 2);
           const delivered = JSON.parse(texts[1]!);
-          assert.equal(delivered.id, "Ralph~>Reviewer");
+          assert.equal(delivered.id, "ValidateDraft~>Reviewer");
           assert.ok(Value.Check(AssistantMessageSchema, delivered.payload));
           assert.equal(contentText(delivered.payload.content), "draft-2");
         }
@@ -199,7 +202,8 @@ async function stepUntil(
   },
   done: () => boolean,
 ) {
-  while (!done()) {
+  for (let turns = 0; !done(); turns++) {
+    assert.ok(turns < 100, "Graph did not reach the expected request");
     if (execution.graph.available().size === 0)
       throw new Error("Graph stalled before the expected request");
     await execution.step();
@@ -231,11 +235,14 @@ test("Ralph runs two full-assignment rounds and only its final draft is reviewed
     // The nested graph's sink forwards Ralph's raw final assistant result, not a prompt wrapper.
     assert.equal(inbox.received.length, 1);
     const [draft] = inbox.received;
+    assert.equal(draft, inbox.validated[0]);
     assert.ok(Value.Check(AssistantMessageSchema, draft));
     assert.equal(contentText(draft.content), "draft-2");
     assert.equal(prompts.Ralph.length, 2);
     const taskId = goalsTaskId(prompts.Ralph[0]!);
-    assert.ok(prompts.Ralph[1]!.includes(goalsPrompt));
+    assert.deepEqual(JSON.parse(prompts.Ralph[1]!), {
+      id: "RalphControl~>Ralph", payload: { phase: "revise", round: 2, objectives: [goalsPrompt] },
+    });
     assert.equal(prompts.Direct.length, 1);
     // Goals broadcasts one task: both competitors receive the same id.
     assert.equal(goalsTaskId(prompts.Direct[0]!), taskId);
@@ -266,17 +273,12 @@ test("a failed second Ralph round forwards its raw abnormal draft, which the Rev
     () => assert.fail("graph should reject"),
     (error: unknown) => error,
   );
-  assert.ok(failure instanceof Error);
-  assert.match(
-    failure.message,
-    /Ralph~>Reviewer did not finish normally: error/,
-  );
+  assert.ok(failure instanceof DataflowNodeError);
+  assert.equal(failure.nodeId, NodeId.create("ValidateDraft"));
+  assert.match(String(failure.cause), /Ralph~>Reviewer did not finish normally: error/);
   assert.equal(prompts.Ralph.length, 2);
-  const [draft] =
-    graph
-      .observe()
-      .inputs.get(reviewerId)
-      ?.messages.get(EdgeId.create("Ralph~>Reviewer")) ?? [];
+  const [draft] = flow.inbox.validated;
+  assert.equal(flow.inbox.received.length, 0);
   assert.ok(Value.Check(AssistantMessageSchema, draft));
   assert.equal(draft.stopReason, "error");
   assert.ok(O.isNone(graph.result(reviewerId)));

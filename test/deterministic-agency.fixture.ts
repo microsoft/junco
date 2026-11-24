@@ -96,7 +96,7 @@ export async function runDeterministicFixture(
       ),
       fauxAssistantMessage("seed"),
     ],
-    { prompt: "produce", tools: [new tools.SendTool()] },
+    { tools: [new tools.SendTool()] },
   );
 
   let consumerUserTexts: string[] = [];
@@ -108,12 +108,6 @@ export async function runDeterministicFixture(
     },
   ]);
   await worker.agent.setSteeringMode("all");
-  worker.agent.stagePrompt((view) => {
-    const result = view.values.get(value.id);
-    assert.ok(Value.Check(AssistantMessageSchema, result));
-    upstream = textOf(result);
-    return `upstream: ${upstream}`;
-  });
 
   const ports = terminalPorts();
   const graphContext = policyContext(ports.source, ports.sink, strategy);
@@ -121,13 +115,20 @@ export async function runDeterministicFixture(
   const p = graph.addNode({
     id: NodeId.create("producer"),
     state: producer.agent,
+    prompt: "produce",
     description: "produces the seed",
     policy: tools.LockPolicy,
-    trigger: TriggerRule.always(),
+    trigger: TriggerRule.when(seed),
   });
   const w = graph.addNode({
     id: NodeId.create("worker"),
     state: worker.agent,
+    prompt: (view) => {
+      const result = view.values.get(value.id);
+      assert.ok(Value.Check(AssistantMessageSchema, result));
+      upstream = textOf(result);
+      return `upstream: ${upstream}`;
+    },
     policy: tools.LockPolicy,
     description: "works from the seed",
     trigger: TriggerRule.allOf(
@@ -265,10 +266,12 @@ export async function runNumericMessagingFixture(): Promise<NumericMessagingSumm
       graph: {
         sink: { returns: "Consumer" },
         nodes: {
+          Start: { kind: "emit", text: "Send seven.", spec: "One numeric delivery." },
           Producer: { prompt: "Send the number seven on your route." },
           Consumer: { prompt: "Receive your numbers." },
         },
         edges: [
+          { from: "Start", to: "Producer", kind: "message", schema: { type: "object" } },
           {
             from: "Producer",
             to: "Consumer",
@@ -363,8 +366,8 @@ export type NumericNestingSummary = {
  */
 export async function runNumericNestingFixture(): Promise<NumericNestingSummary> {
   const received: number[] = [];
-  const Terminal: syntax.DeterministicNode = ({ policy }) => ({
-    state: new Deterministic<TSchema, unknown>(async function* () {
+  const Terminal: syntax.DeterministicNode = ({ policy }) =>
+    new Deterministic<TSchema, unknown>(async function* () {
       const view = yield [];
       for (const payload of view.messages.get(
         EdgeId.create("Child~>Terminal"),
@@ -374,8 +377,7 @@ export async function runNumericNestingFixture(): Promise<NumericNestingSummary>
         received.push(payload);
       }
       return received.at(-1);
-    }, policy),
-  });
+    }, policy);
   const execution = await JuncoGraph.fromYaml(
     yamlInput({
       graph: {

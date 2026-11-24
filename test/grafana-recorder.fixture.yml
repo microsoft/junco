@@ -11,15 +11,26 @@ graph:
               sink:
                 returns: B
               nodes:
+                Start:
+                  kind: emit
+                  text: Measure resource use while editing src/a.ts and mapping its code graph.
+                  spec: The edit is released and the updated code graph is mapped.
                 A:
-                  trigger: always
                   prompt: Allocate, edit src/a.ts, release it, and notify B.
                   tools: [bash, ast_edit, release]
                 B:
-                  trigger: always
+                  trigger: { any: ["Start~>B", "A~>B"] }
                   prompt: Allocate, wait for A, then map the code graph.
                   tools: [bash, code_graph]
               edges:
+                - from: Start
+                  to: A
+                  kind: message
+                  schema: &assignment
+                    type: object
+                    required: [kind, text]
+                    properties: { kind: { const: prompt }, text: { type: string } }
+                - { from: Start, to: B, kind: message, schema: *assignment }
                 - from: A
                   to: B
                   kind: message

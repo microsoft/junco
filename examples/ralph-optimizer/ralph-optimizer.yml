@@ -3,13 +3,22 @@
 graph:
   name: RalphOptimizer
   source:
+    trigger: { any: [ingress-open, ingress-ack] }
     routes:
       assignment: ["$source~>Ralph"]
+  sink:
+    returns: Ralph
+    trigger: { all: ["Ralph->$sink", ralph-accepted] }
   nodes:
+    IngressOpen:
+      kind: emit
+      text: Admit the assignment.
+      spec: One source delivery.
+    RalphControl:
+      kind: code
+      trigger: { any: ["$source~>Ralph", ralph-complete] }
     Ralph:
       description: Edits sort.c each round; the runner keeps a round only when every test passes and the sort got faster.
-      trigger:
-        any: ["$source~>Ralph", "Ralph->Ralph"]
       tools: [read, edit, bash]
       system: |
         You optimize the C function `sort` in the sort.c named in the assignment. Rules:
@@ -18,11 +27,24 @@ graph:
         - Start every round by reading sort.c: a round whose tests failed or that was slower than the best so far was reverted to the last accepted version before you were resumed.
         - After editing, compile and run with the exact command from the assignment; `./sort` prints `PASS <ms>` on success or `FAIL ...` on a wrong result.
         - Finish the round with a short report: what you changed and the `PASS` time you measured. Never claim a speedup you did not measure.
+      trigger: "RalphControl~>Ralph"
+      prompt: >-
+        On the first round, achieve the objectives in the following task messages, in order.
+        On phase "revise", take another try at the ordered objectives, building on your last
+        answer in this session. On phase "retry", the previous attempt ended with a provider
+        error: continue the same round from where you left off. Focus on depth: finish
+        objectives well rather than attempting more of them. Return the complete answer.
   edges:
-    - from: $source
-      to: Ralph
+    - from: IngressOpen
+      to: $source
+      id: ingress-open
       kind: message
-      schema:
+      schema: { type: object }
+    - from: $source
+      to: RalphControl
+      id: "$source~>Ralph"
+      kind: message
+      schema: &task
         type: object
         required: [kind, text]
         properties:
@@ -37,8 +59,23 @@ graph:
                 type: { const: image }
                 data: { type: string }
                 mimeType: { type: string }
-    - from: Ralph
+    - from: RalphControl
       to: Ralph
+      kind: message
+      schema:
+        anyOf:
+          - *task
+          - type: object
+            required: [phase, round, objectives]
+            properties:
+              phase: { enum: [retry, revise] }
+              round: { type: integer, minimum: 1 }
+              objectives: { type: array, items: { type: string } }
+    - from: Ralph
+      to: RalphControl
+      kind: message
+      on: return
+      id: ralph-complete
       schema: &assistant
         type: object
         required: [role, content, stopReason]
@@ -66,3 +103,13 @@ graph:
     - from: Ralph
       to: $sink
       schema: *assistant
+    - from: RalphControl
+      to: $sink
+      id: ralph-accepted
+      kind: message
+      schema: &signal { type: boolean, const: true }
+    - from: RalphControl
+      to: $source
+      id: ingress-ack
+      kind: message
+      schema: *signal

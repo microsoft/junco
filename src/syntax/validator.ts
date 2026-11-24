@@ -303,28 +303,45 @@ function checkSchema(root: unknown, path: string, fail: Fail): void {
   for (const at of positions.keys()) progress(at);
 }
 
-/** `/graph`, nested `/nodes/<id>/graph` levels, then `/edges/<index>`. */
-const EDGE =
-  /^\/graph((?:\/nodes\/(?:[^/~]|~[01])*\/graph)*)\/edges\/(?:0|[1-9]\d*)$/;
-/** Whether `at` points at an edge of a graph `value` declares, not of an unused node-union branch. */
-function declaredEdge(value: unknown, at: string): boolean {
-  const levels = EDGE.exec(at)?.[1];
-  if (levels === undefined) return false;
-  let wrapper = "/graph";
-  for (const [, id] of levels.matchAll(/\/nodes\/([^/]*)\/graph/g)) {
-    wrapper += `/nodes/${id}`;
-    const node = Schema.Pointer.Get(value, wrapper);
-    if (
-      typeof node !== "object" ||
-      node === null ||
-      Array.isArray(node) ||
-      !("kind" in node) ||
-      node.kind !== "graph"
-    )
-      return false;
-    wrapper += "/graph";
+const mapping = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** TypeBox caps union errors; a wrapper's unused variants can hide a nested field's diagnostic. */
+function checkGraphFields(spec: unknown, path: string, fail: Fail): void {
+  if (!mapping(spec)) return;
+  if (Array.isArray(spec.edges))
+    for (const [i, edge] of spec.edges.entries()) {
+      if (!mapping(edge)) continue;
+      const at = `${path}/edges/${i}/schema`;
+      if (!("schema" in edge))
+        fail(
+          at,
+          "edge requires a schema mapping",
+          "add schema: {} for an unconstrained payload, or a JSON Schema Draft 2020-12 mapping",
+          "edge-schema",
+        );
+      if (!mapping(edge.schema))
+        fail(
+          at,
+          "edge schema must be a mapping",
+          "replace this value with schema: {} or a JSON Schema Draft 2020-12 mapping",
+          "edge-schema",
+        );
+    }
+  if (!mapping(spec.nodes)) return;
+  for (const [id, node] of Object.entries(spec.nodes)) {
+    if (!mapping(node)) continue;
+    const at = `${path}/nodes/${pointer(id)}`;
+    if (node.kind === "graph") checkGraphFields(node.graph, `${at}/graph`, fail);
+    else if ((node.kind === undefined || node.kind === "agent") &&
+      (typeof node.prompt !== "string" || !node.prompt.trim()))
+      fail(
+        `${at}/prompt`,
+        "agent requires a nonblank prompt",
+        "set prompt to the instruction to execute when the trigger fires",
+        "document",
+      );
   }
-  return true;
 }
 
 const reject: Fail = (path, message, help, code, { cause } = {}) => {
@@ -335,33 +352,11 @@ const reject: Fail = (path, message, help, code, { cause } = {}) => {
 function validate(value: unknown, fail: Fail = reject): JuncoDocument {
   acyclic(value, "", new Set(), fail);
   if (!Value.Check(JuncoDocumentSchema, value)) {
-    const errors = Value.Errors(JuncoDocumentSchema, value);
-    for (const error of errors) {
-      const at = error.instancePath;
-      if (
-        error.keyword === "required" &&
-        error.params.requiredProperties.includes("schema") &&
-        declaredEdge(value, at)
-      )
-        fail(
-          `${at}/schema`,
-          "edge requires a schema mapping",
-          "add schema: {} for an unconstrained payload, or a JSON Schema Draft 2020-12 mapping",
-          "edge-schema",
-        );
-      if (
-        error.keyword === "type" &&
-        [error.params.type].flat().includes("object") &&
-        at.endsWith("/schema") &&
-        declaredEdge(value, at.slice(0, -"/schema".length))
-      )
-        fail(
-          at,
-          "edge schema must be a mapping",
-          "replace this value with schema: {} or a JSON Schema Draft 2020-12 mapping",
-          "edge-schema",
-        );
-    }
+    if (mapping(value)) checkGraphFields(value.graph, "/graph", fail);
+    // A missing prompt in an unused agent branch isn't an error for the declared kind.
+    const errors = Value.Errors(JuncoDocumentSchema, value).filter(
+      (e) => !(e.keyword === "required" && e.params.requiredProperties.includes("prompt")),
+    );
     failTypeBox(errors, "", "document", fail);
   }
   const doc = value as JuncoDocument;
@@ -436,11 +431,14 @@ function validate(value: unknown, fail: Fail = reject): JuncoDocument {
           );
       }
       const id = edgeId(edge);
-      if (edge.to === "$source")
+      if (
+        edge.to === "$source" &&
+        (edge.from === "$source" || edge.kind !== "message" || edge.on === "return")
+      )
         fail(
           `${at}/to`,
-          "Graph source cannot have inbound edges",
-          "send the edge to a declared node or $sink",
+          "Graph source credits must be ordinary messages from another node",
+          "use an ordinary message edge from a declared node and name it in source.trigger",
           "port",
         );
       if (edge.from === "$sink")
@@ -462,12 +460,33 @@ function validate(value: unknown, fail: Fail = reject): JuncoDocument {
         ["to", "$sink"],
       ] as const) {
         const node = edge[end];
-        if (node !== port && !Object.hasOwn(spec.nodes, node))
+        if (node !== port && node !== "$source" && !Object.hasOwn(spec.nodes, node))
           fail(
             `${at}/${end}`,
             `edge "${id}" references unknown node "${node}"`,
             `declare "${node}" under ${path}/nodes, or use ${port} or one of: ${list(Object.keys(spec.nodes))}`,
             "reference",
+          );
+      }
+      if (edge.on === "return") {
+        if (edge.kind !== "message")
+          fail(
+            `${at}/on`,
+            "on: return requires kind: message",
+            "set kind: message or remove on: return",
+            "document",
+          );
+        const producer = spec.nodes[edge.from];
+        if (
+          edge.from === "$source" ||
+          producer?.kind === "emit" ||
+          (producer?.kind === "graph" && producer.graph.sink?.stream === true)
+        )
+          fail(
+            `${at}/on`,
+            `Node "${edge.from}" does not return a value`,
+            "remove on: return to receive explicit messages",
+            "port",
           );
       }
       const first = declared.get(id);
@@ -481,7 +500,7 @@ function validate(value: unknown, fail: Fail = reject): JuncoDocument {
       declared.set(id, at);
     }
     // Declared nodes and $sink, plus $source only when wired; both maps keep that order.
-    const wired = edges.some((e) => e.from === "$source");
+    const wired = edges.some((e) => e.from === "$source" || e.to === "$source");
     const ids = [
       ...(wired ? ["$source"] : []),
       ...Object.keys(spec.nodes),
@@ -493,7 +512,7 @@ function validate(value: unknown, fail: Fail = reject): JuncoDocument {
       incoming.get(edge.to)?.push(edge);
       outgoing.get(edge.from)?.push(edge);
     }
-    const canStart = new Set<string>(wired ? ["$source"] : []);
+    const canStart = new Set<string>();
     const pendingInputs = new Map<string, number>();
     const watched = new Set<string>();
     function checkTrigger(id: string, at: string, trigger?: TriggerSpec): void {
@@ -517,14 +536,23 @@ function validate(value: unknown, fail: Fail = reject): JuncoDocument {
               : `add an edge with id "${e}" into "${id}", or remove the trigger`,
             "trigger",
           );
-      // emit always starts; explicit never (including any: []) parks without seeding consumers.
-      if (spec.nodes[id]?.kind === "emit" || (all && entries.length === 0))
-        canStart.add(id);
+      if (id === "$source")
+        for (const e of inbound)
+          if (!entries.includes(e))
+            fail(
+              declared.get(e)!,
+              `Source credit "${e}" is not named in source.trigger`,
+              "add the credit to source.trigger or remove the edge",
+              "trigger",
+            );
+      if (all && entries.length === 0) canStart.add(id);
       else if (entries.length > 0) {
         pendingInputs.set(id, all ? entries.length : 1);
         for (const e of entries) watched.add(e);
       }
     }
+    if (wired || spec.source?.trigger !== undefined)
+      checkTrigger("$source", `${path}/source/trigger`, spec.source?.trigger ?? "always");
     const predecessors = [
       ...new Set((incoming.get("$sink") ?? []).map((e) => e.from)),
     ];
@@ -572,7 +600,7 @@ function validate(value: unknown, fail: Fail = reject): JuncoDocument {
           `set sink.returns to the node whose result the graph returns: ${list(predecessors)}`,
           "sink-result",
         );
-      // $source and emit nodes never complete, so they can never supply the graph's result.
+      // Neither source deliveries nor one-shot emit publications produce a result.
       const result = returns ?? predecessors[0] ?? "";
       if (result === "$source" || spec.nodes[result]?.kind === "emit")
         fail(
@@ -619,7 +647,7 @@ function validate(value: unknown, fail: Fail = reject): JuncoDocument {
         const known = inboundIds.length
           ? `reference one of its inbound edges: ${list(inboundIds)}`
           : `add an edge into "${id}" first`;
-        for (const [, e] of (node.prompt ?? "").matchAll(PLACEHOLDER))
+        for (const [, e] of node.prompt.matchAll(PLACEHOLDER))
           if (!inboundIds.includes(e ?? ""))
             fail(
               `${nodePath}/prompt`,
@@ -768,8 +796,10 @@ function validate(value: unknown, fail: Fail = reject): JuncoDocument {
     const [first] = blocked;
     if (first !== undefined) {
       const sink = first === "$sink";
-      const at = sink ? (spec.sink ? `${path}/sink` : path) : nodeAt(blocked);
-      const trigger = sink ? spec.sink?.trigger : spec.nodes[first]?.trigger;
+      const at = first === "$source" ? `${path}/source`
+        : sink ? (spec.sink ? `${path}/sink` : path) : nodeAt(blocked);
+      const trigger = first === "$source" ? spec.source?.trigger
+        : sink ? spec.sink?.trigger : spec.nodes[first]?.trigger;
       fail(
         trigger === undefined ? at : `${at}/trigger`,
         `Cannot start under the declared triggers: ${list(blocked)}`,

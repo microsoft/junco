@@ -90,6 +90,9 @@ graph:
       tools: *native
       tool_block: [task]
       trigger: { all: [team1-spec-impl, Architect->Implementer1, Tester1->Implementer1] }
+    Inbox1:
+      kind: code
+      trigger: { any: [team1-spec-agent, agent2-to-agent1] }
     Agent1:
       description: Team 1 reviewer/integrator; independent spec audit, combined checks with the peer, final report.
       system: *common
@@ -117,7 +120,7 @@ graph:
         PEER_TESTS: <cmd> exit=<n> | not-run
       tools: *native
       tool_block: [task]
-      trigger: { all: [team1-spec-agent, Architect->Agent1, Implementer1->Agent1] }
+      trigger: { all: [Inbox1~>Agent1, Architect->Agent1, Implementer1->Agent1] }
     Tester2:
       description: Turns Team 2's spec into failing acceptance tests and an interface contract.
       system: *common
@@ -169,6 +172,9 @@ graph:
       tools: *native
       tool_block: [task]
       trigger: { all: [team2-spec-impl, Architect->Implementer2, Tester2->Implementer2] }
+    Inbox2:
+      kind: code
+      trigger: { any: [team2-spec-agent, agent1-to-agent2] }
     Agent2:
       description: Team 2 reviewer/integrator; independent spec audit, combined checks with the peer, final report.
       system: *common
@@ -196,12 +202,12 @@ graph:
         PEER_TESTS: <cmd> exit=<n> | not-run
       tools: *native
       tool_block: [task]
-      trigger: { all: [team2-spec-agent, Architect->Agent2, Implementer2->Agent2] }
+      trigger: { all: [Inbox2~>Agent2, Architect->Agent2, Implementer2->Agent2] }
   edges:
     - { from: $source, to: Architect, kind: message, id: arch-specs, schema: &prompt { type: object, required: [kind, text], properties: { kind: { const: prompt }, text: { type: string, pattern: '\S' } } } }
     - { from: $source, to: Tester1, kind: message, id: team1-spec, schema: *prompt }
     - { from: $source, to: Implementer1, kind: message, id: team1-spec-impl, schema: *prompt }
-    - { from: $source, to: Agent1, kind: message, id: team1-spec-agent, schema: *prompt }
+    - { from: $source, to: Inbox1, kind: message, id: team1-spec-agent, schema: *prompt }
     - { from: Architect, to: Tester1, schema: {{ params.assistant_schema }} }
     - { from: Architect, to: Implementer1, schema: {{ params.assistant_schema }} }
     - { from: Architect, to: Agent1, schema: {{ params.assistant_schema }} }
@@ -209,13 +215,15 @@ graph:
     - { from: Implementer1, to: Agent1, schema: {{ params.assistant_schema }} }
     - { from: $source, to: Tester2, kind: message, id: team2-spec, schema: *prompt }
     - { from: $source, to: Implementer2, kind: message, id: team2-spec-impl, schema: *prompt }
-    - { from: $source, to: Agent2, kind: message, id: team2-spec-agent, schema: *prompt }
+    - { from: $source, to: Inbox2, kind: message, id: team2-spec-agent, schema: *prompt }
     - { from: Architect, to: Tester2, schema: {{ params.assistant_schema }} }
     - { from: Architect, to: Implementer2, schema: {{ params.assistant_schema }} }
     - { from: Architect, to: Agent2, schema: {{ params.assistant_schema }} }
     - { from: Tester2, to: Implementer2, schema: {{ params.assistant_schema }} }
     - { from: Implementer2, to: Agent2, schema: {{ params.assistant_schema }} }
-    - { from: Agent1, to: Agent2, kind: message, id: agent1-to-agent2, schema: &peer { type: string, minLength: 1 } }
-    - { from: Agent2, to: Agent1, kind: message, id: agent2-to-agent1, schema: *peer }
+    - { from: Agent1, to: Inbox2, kind: message, id: agent1-to-agent2, schema: &peer { type: string, minLength: 1 } }
+    - { from: Agent2, to: Inbox1, kind: message, id: agent2-to-agent1, schema: *peer }
+    - { from: Inbox1, to: Agent1, kind: message, schema: { anyOf: [*prompt, *peer] } }
+    - { from: Inbox2, to: Agent2, kind: message, schema: { anyOf: [*prompt, *peer] } }
     - { from: Agent1, to: $sink, kind: value, id: agent1-result, schema: {{ params.assistant_schema }} }
     - { from: Agent2, to: $sink, kind: value, id: agent2-result, schema: {{ params.assistant_schema }} }

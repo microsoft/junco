@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { syntax } from "junco";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
@@ -10,6 +11,9 @@ const repo = fileURLToPath(new URL("../../../", import.meta.url));
 const reference = await readFile(new URL("../references/optimization.md", import.meta.url), "utf8");
 const fences = [...reference.matchAll(/^```ts measure\.ts\r?\n([\s\S]*?)^```\s*$/gm)];
 assert.equal(fences.length, 1, "expected one shipped measure.ts fence");
+const recipes = [...reference.matchAll(/^```yaml (\S+\.yml)\r?\n([\s\S]*?)^```\s*$/gm)];
+assert.equal(recipes.length, 5);
+for (const [, sourceName, yaml] of recipes) syntax.parse(yaml, { sourceName });
 const session = await mkdtemp(join(tmpdir(), "junco-measure-check-"));
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 

@@ -122,6 +122,10 @@ test("reminder to Bob is granted and sent", async () => {
       throw new Error("expected quarantined user request");
     assert.ok(contentText(request.content).includes("bob.wilson@example.com"));
     assert.ok(contentText(request.content).includes("have_enough_information"));
+    assert.equal(mocks.get("PLLM")!.requests.length, 1);
+    assert.equal(mocks.get("QLLM")!.requests.length, 1);
+    const plannerInput = mocks.get("PLLM")!.requests[0]!.messages.at(-1)!;
+    assert.ok(plannerInput.role === "user" && contentText(plannerInput.content).startsWith(`${BOB_QUERY}\n\nTask: `));
     for (const request of mocks.get("PLLM")!.requests)
       for (const message of request.messages)
         assert.ok(!JSON.stringify(message).includes("bob.wilson@example.com"));

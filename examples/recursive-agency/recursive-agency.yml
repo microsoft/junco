@@ -1,7 +1,10 @@
 graph:
   name: root
   nodes:
-    Start: { kind: code, trigger: always }
+    Start:
+      kind: emit
+      text: Produce your branch's report.
+      spec: A nonempty report from each leaf.
     "0":
       kind: graph
       trigger: Start->0
@@ -9,21 +12,30 @@ graph:
       graph:
         name: child
         source:
-          routes: { "Start->0": [] }
+          routes: { "Start->0": ["$source~>0"] }
         nodes:
           "0":
             kind: graph
-            trigger: always
+            trigger: "$source~>0"
             description: child member 0
             graph:
               name: grandchild
+              source:
+                routes: { "$source~>0": ["$source~>0"] }
               nodes:
                 "0":
                   system: leaf
-                  prompt: Do your part.
+                  prompt: Complete the assignment in the following user message.
                   description: grandchild member 0
-                  trigger: always
+                  trigger: "$source~>0"
               edges:
+                - from: $source
+                  to: "0"
+                  kind: message
+                  schema: &assignment
+                    type: object
+                    required: [kind, text]
+                    properties: { kind: { const: prompt }, text: { type: string } }
                 - from: "0"
                   to: $sink
                   schema: &assistant
@@ -51,20 +63,21 @@ graph:
                       stopReason: { enum: [pending, stop, length, toolUse, error, aborted, deferred] }
                       errorMessage: { type: string }
         edges:
+          - { from: $source, to: "0", kind: message, schema: *assignment }
           - from: "0"
             to: $sink
             schema: *assistant
     "1":
       system: leaf
-      prompt: Do your part.
+      prompt: Complete the assignment in the following user message.
       description: root member 1
       trigger: Start->1
     Join:
       kind: code
       description: Validates both root branches and retains the child's exact result.
   edges:
-    - { from: Start, to: "0", schema: { type: "null" } }
-    - { from: Start, to: "1", schema: { type: "null" } }
+    - { from: Start, to: "0", id: Start->0, kind: message, schema: *assignment }
+    - { from: Start, to: "1", id: Start->1, kind: message, schema: *assignment }
     - from: "0"
       to: Join
       schema: *assistant

@@ -46,7 +46,7 @@ export type FrontendEventBody =
       graph: number;
       run: number;
       node: string;
-      outcome: "yield";
+      outcome: "yield" | "final";
       messages: { edge: string; payload: unknown }[];
     }
   | {

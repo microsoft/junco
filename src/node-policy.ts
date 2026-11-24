@@ -15,6 +15,7 @@ import type {
 } from "dataflow-engine";
 import {
   DataflowDefinitionError,
+  holdsUsageFailure,
   messageInputs,
   triggerInputs,
 } from "dataflow-engine";
@@ -128,8 +129,8 @@ export async function applyModel(
 export type NodePolicy = {
   /** The prompt agent a prompt-agent body drives. */
   readonly agent?: AnyJuncoAgent | AnyMockAgent;
-  /** Resolved value edges already delivered to the body, with the value delivered; a re-resolved edge is fresh again. */
-  readonly seenValues?: Map<EdgeId, unknown>;
+  /** Return FIFOs interpolated by this registration's compiled YAML prompt. */
+  promptReturnEdges?: ReadonlySet<string>;
   /** A nested-graph body that parks instead of returning; only message edges may touch it. */
   readonly persistent?: true;
   /**
@@ -152,6 +153,24 @@ export type AgencyNodeMetadata = Readonly<
 
 /** Keyed by the generated body, so node state itself stays the original instance. */
 export const nodePolicies = new WeakMap<object, NodePolicy>();
+
+// A controller cannot replay a consumed settlement. Keep even a thrown undefined for later drives.
+const controllerFailures = new WeakMap<object, { readonly cause: unknown }>();
+
+export function latchControllerFailure(graph: { readonly signal: AbortSignal }, cause: unknown): never {
+  if (graph.signal.aborted || cause instanceof DataflowDefinitionError || holdsUsageFailure(cause))
+    throw cause;
+  const failure = controllerFailures.get(graph) ?? { cause };
+  controllerFailures.set(graph, failure);
+  throw failure.cause;
+}
+
+export function rethrowControllerFailure(graph: object, parent?: object): void {
+  const failure = controllerFailures.get(graph);
+  if (failure === undefined) return;
+  if (parent && !controllerFailures.has(parent)) controllerFailures.set(parent, failure);
+  throw failure.cause;
+}
 
 /**
  * What one node registration in a {@link JuncoGraph} binds: its graph's tracer, signal and routes,
@@ -222,10 +241,7 @@ export function unseenValues<T>(
 
 /**
  * The reads of one occurrence of the node whose body is `step`. An `all-messages` body reads every
- * nonempty message queue. Otherwise an `all` trigger reads every rule edge, or nothing until the
- * conjunction holds — an already delivered result still counts. An `any` trigger reads its first
- * satisfied edge that is not an already delivered result, so a permanent result never starves a
- * newer message.
+ * nonempty message queue. Other nodes use the trigger's default plan, including ordered `any`.
  */
 export function nodeInputs<N extends TSchema, T>(
   step: object | undefined,
@@ -233,14 +249,7 @@ export function nodeInputs<N extends TSchema, T>(
 ): InputSchedule {
   const policy = step === undefined ? undefined : nodePolicies.get(step);
   if (policy?.inputMode === "all-messages") return messageInputs(candidate);
-  if (candidate.trigger.kind === "all") return triggerInputs(candidate);
-  const seen = policy?.seenValues;
-  const first = candidate.satisfied.find(
-    (edgeId) =>
-      !seen?.has(edgeId) ||
-      seen.get(edgeId) !== candidate.view.values.get(edgeId),
-  );
-  return first === undefined ? new Map() : new Map([[first, "all"]]);
+  return triggerInputs(candidate);
 }
 
 /** Pair a passive agency graph with policy, sidecar metadata and agency input semantics. */

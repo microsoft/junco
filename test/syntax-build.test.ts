@@ -47,6 +47,7 @@ import type { JuncoDocument } from "../src/syntax/schema.ts";
 import {
   assistant,
   requestTexts,
+  pause,
   run,
   settle,
   userTexts,
@@ -106,9 +107,8 @@ type YamlAgent = agent.JuncoAgent<
   TSchema,
   unknown
 >;
-const mock = (text: string, prompt?: string): YamlMock =>
+const mock = (text: string): YamlMock =>
   new MockAgent({
-    prompt,
     steeringMode: "all",
     runs: [run([{ ...settle(assistant(text)), drain: ["steer"] }])],
   });
@@ -122,7 +122,7 @@ const document = () =>
           trigger: "Start~>Inner",
           graph: {
             source: { routes: { "Start~>Inner": ["$source~>Worker"] } },
-            nodes: { Worker: { trigger: "$source~>Worker" } },
+            nodes: { Worker: { prompt: "work", trigger: "$source~>Worker" } },
             edges: [
               {
                 from: "$source",
@@ -141,7 +141,7 @@ const document = () =>
       },
       edges: [
         { from: "Start", to: "Inner", kind: "message", schema: prompt },
-        { from: "Inner", to: "Final", schema: reply },
+        { from: "Inner", to: "Final", id: "Inner->Final", kind: "message", on: "return", schema: reply },
         { from: "Final", to: "$sink", schema: reply },
       ],
     },
@@ -199,7 +199,7 @@ test("ModelLadder rejects rungs outside the runtime's catalog", async () => {
 });
 
 test("decision strength switches each selected agent's model and thinking", async () => {
-  const worker = mock("WORKER-OUT", "work");
+  const worker = mock("WORKER-OUT");
   const final = mock("FINAL-OUT");
   const { models } = await fauxRuntime(
     [],
@@ -249,10 +249,12 @@ test("decision strength switches each selected agent's model and thinking", asyn
 test("fromYaml substitutes text params and runs the workflow", async () => {
   const source = `graph:
   nodes:
+    Start: { kind: emit, text: begin, spec: done }
     A:
       description: "{{ params.greeting }}"
       prompt: work
   edges:
+    - { from: Start, to: A, kind: message, schema: { type: object } }
     - from: A
       to: $sink
       schema: { type: object, required: [role], properties: { role: { const: assistant } } }
@@ -269,7 +271,7 @@ test("fromYaml substitutes text params and runs the workflow", async () => {
       "hi",
     );
     await execution.run();
-    assert.deepEqual(lastPrompts(instance), ["work"]);
+    assert.equal(requestTexts(instance.requests)[0]?.[0], "work");
     assert.equal(resultText(execution.graph), "done");
   } finally {
     await execution.graph.close();
@@ -280,7 +282,7 @@ test("fromYaml accepts a parsed document and runs nested agents", async () => {
   const execution = await JuncoGraph.fromYaml(document(), {
     ...options(),
     createAgent: async (spec) =>
-      mock(spec.node, spec.node === "Worker" ? "work" : undefined),
+      mock(spec.node),
   });
   try {
     await execution.run();
@@ -332,11 +334,11 @@ test("fromYaml rejects an invalid document before creating any agent", async () 
   let created = 0;
   for (const [source, code] of [
     [
-      "graph:\n  nodes: { A: {} }\n  edges: [{ from: A, to: $sink }]\n",
+      "graph:\n  nodes: { A: { prompt: work } }\n  edges: [{ from: A, to: $sink }]\n",
       "edge-schema",
     ],
     [
-      "graph:\n  nodes: { A: {} }\n  edges: [{ from: A, to: Nope, schema: {} }]\n",
+      "graph:\n  nodes: { A: { prompt: work } }\n  edges: [{ from: A, to: Nope, schema: {} }]\n",
       "reference",
     ],
   ])
@@ -353,7 +355,23 @@ test("fromYaml rejects an invalid document before creating any agent", async () 
   assert.equal(created, 0);
 });
 
-type AvailabilityFactory = NonNullable<BuildOptions["available"]>[string];
+for (const instruction of [undefined, " \t "])
+test(`nested agent rejects ${instruction === undefined ? "missing" : "blank"} prompt before acquisition`, async () => {
+  const child = {
+    nodes: { A: { system: "Not a prompt", prompt: instruction } },
+    edges: [{ from: "A", to: "$sink", schema: reply }],
+  };
+  const source = JSON.stringify({ graph: {
+    nodes: { Child: { kind: "graph", graph: child } },
+    edges: [{ from: "Child", to: "$sink", schema: reply }],
+  } });
+  await assert.rejects(JuncoGraph.fromYaml(source, {
+    ...options(),
+    createAgent: async () => assert.fail("acquired an agent with an invalid prompt"),
+  }), (error) => error instanceof ValidationError &&
+    error.path === "/graph/nodes/Child/graph/nodes/A/prompt");
+});
+
 const lastPrompts = (instance: YamlMock) =>
   requestTexts(instance.requests).map((texts) => texts.at(-1));
 /** Reads a settled result's text, failing the test when `id` has none. */
@@ -366,12 +384,6 @@ function resultText(
   assert.ok(Value.Check(agent.AssistantMessageSchema, result.value));
   return contentText(result.value.content);
 }
-const resumable =
-  (id: string, allowed: (triggered: boolean) => boolean): AvailabilityFactory =>
-  ({ graph: g }) =>
-  (_view, triggered) =>
-    allowed(triggered) ||
-    g.getNode(graph.NodeId.create(id))?.status === "running";
 const enqueuePrompts = (
   execution: Awaited<ReturnType<typeof build>>,
   id: string,
@@ -451,7 +463,7 @@ test("named aliases replace builtin definitions and execute without builtin disp
   });
   const doc = parse({
     graph: {
-      nodes: { A: { tools: ["custom"] } },
+      nodes: { A: { prompt: "work", tools: ["custom"] } },
       edges: [{ from: "A", to: "$sink", schema: reply }],
     },
   });
@@ -465,7 +477,7 @@ test("named aliases replace builtin definitions and execute without builtin disp
   );
   const shadow = parse({
     graph: {
-      nodes: { A: { tools: ["shadow"] } },
+      nodes: { A: { prompt: "work", tools: ["shadow"] } },
       edges: [{ from: "A", to: "$sink", schema: reply }],
     },
   });
@@ -506,7 +518,7 @@ test("named aliases replace builtin definitions and execute without builtin disp
   }
   const duplicateDoc = parse({
     graph: {
-      nodes: { A: { tools: ["first", "second"] } },
+      nodes: { A: { prompt: "work", tools: ["first", "second"] } },
       edges: [{ from: "A", to: "$sink", schema: reply }],
     },
   });
@@ -538,7 +550,7 @@ test("tool blocks filter helpers and reject literal or resolved-name conflicts",
           kind: "graph",
           graph: {
             nodes: {
-              Worker: { tools: ["shell"], tool_block: ["bash"] },
+              Worker: { prompt: "work", tools: ["shell"], tool_block: ["bash"] },
             },
             edges: [{ from: "Worker", to: "$sink", schema: reply }],
           },
@@ -557,7 +569,7 @@ test("tool blocks filter helpers and reject literal or resolved-name conflicts",
 
   const direct = {
     graph: {
-      nodes: { A: { tools: ["same"], tool_block: ["same"] } },
+      nodes: { A: { prompt: "work", tools: ["same"], tool_block: ["same"] } },
     },
   } as JuncoDocument;
   await assert.rejects(
@@ -567,7 +579,7 @@ test("tool blocks filter helpers and reject literal or resolved-name conflicts",
 
   const disjoint = parse({
     graph: {
-      nodes: { A: { tool_block: ["task", "send"] } },
+      nodes: { A: { prompt: "work", tool_block: ["task", "send"] } },
       edges: [{ from: "A", to: "$sink", schema: reply }],
     },
   });
@@ -602,8 +614,8 @@ test("skills are loaded once, advertised and reject nonexistent registry paths",
       skills: { guide: "guide/SKILL.md" },
       graph: {
         nodes: {
-          A: { system: "Base", skills: ["guide"] },
-          B: { skills: ["guide"] },
+          A: { prompt: "work", system: "Base", skills: ["guide"] },
+          B: { prompt: "work", skills: ["guide"] },
         },
         edges: [
           { from: "A", to: "B", schema: reply },
@@ -634,23 +646,23 @@ test("resolution walks declarations depth-first and retains graph labels", async
     graph: {
       name: "root-label",
       nodes: {
-        First: {},
+        First: { prompt: "work" },
         Child: {
           kind: "graph",
           graph: {
             name: "child-label",
             source: { routes: { "First->Child": [] } },
             nodes: {
-              Before: {},
+              Before: { prompt: "work" },
               Grandchild: {
                 kind: "graph",
                 graph: {
                   source: { routes: { "Before->Grandchild": [] } },
-                  nodes: { Deep: {} },
+                  nodes: { Deep: { prompt: "work" } },
                   edges: [{ from: "Deep", to: "$sink", schema: reply }],
                 },
               },
-              After: {},
+              After: { prompt: "work" },
             },
             sink: { returns: "After" },
             edges: [
@@ -660,7 +672,7 @@ test("resolution walks declarations depth-first and retains graph labels", async
             ],
           },
         },
-        Last: {},
+        Last: { prompt: "work" },
       },
       edges: [
         { from: "First", to: "Child", schema: reply },
@@ -683,7 +695,7 @@ test("resolution walks declarations depth-first and retains graph labels", async
   const unnamed = await resolveAgents(
     parse({
       graph: {
-        nodes: { A: {} },
+        nodes: { A: { prompt: "work" } },
         edges: [{ from: "A", to: "$sink", schema: reply }],
       },
     }),
@@ -710,8 +722,8 @@ test("explicit tools beat collection tools, fill gaps, and keep per-agent helper
       parse({
         graph: {
           nodes: {
-            A: { tools: ["shared", "fallback"] },
-            B: { tools: ["shared"] },
+            A: { prompt: "work", tools: ["shared", "fallback"] },
+            B: { prompt: "work", tools: ["shared"] },
           },
           edges: [
             { from: "A", to: "B", schema: reply },
@@ -755,7 +767,7 @@ test("explicit tools beat collection tools, fill gaps, and keep per-agent helper
       resolveAgents(
         parse({
           graph: {
-            nodes: { Unknown: { tools: ["missing"] } },
+            nodes: { Unknown: { prompt: "work", tools: ["missing"] } },
             edges: [{ from: "Unknown", to: "$sink", schema: reply }],
           },
         }),
@@ -788,8 +800,8 @@ test("skills retain content, resolve same-directory symlinks and cache repeated 
         skills: { guide: "guide/SKILL.md", alias: "guide/alias.md" },
         graph: {
           nodes: {
-            A: { skills: ["guide", "alias"] },
-            B: { skills: ["alias", "guide"] },
+            A: { prompt: "work", skills: ["guide", "alias"] },
+            B: { prompt: "work", skills: ["alias", "guide"] },
           },
           edges: [
             { from: "A", to: "B", schema: reply },
@@ -848,7 +860,7 @@ for (const row of [
           parse({
             skills: { invalid: `${row.name}/${row.file}` },
             graph: {
-              nodes: { A: { skills: ["invalid"] } },
+              nodes: { A: { prompt: "work", skills: ["invalid"] } },
               edges: [{ from: "A", to: "$sink", schema: reply }],
             },
           }),
@@ -880,7 +892,7 @@ test("nested message ingress and final egress stage the factory agent prompt", a
   const execution = await build(document(), {
     ...options(),
     createAgent: async (spec) =>
-      spec.node === "Worker" ? mock("WORKER-OUT", "work") : final,
+      spec.node === "Worker" ? mock("WORKER-OUT") : final,
   });
   try {
     await execution.run();
@@ -891,66 +903,63 @@ test("nested message ingress and final egress stage the factory agent prompt", a
   }
 });
 
-test("availability can prevent final activation", async () => {
-  const execution = await build(document(), {
-    ...options(),
-    createAgent: async (spec) =>
-      mock(spec.node, spec.node === "Worker" ? "work" : undefined),
-    available: { Final: () => () => false },
-  });
+for (const target of ["A", "$sink"])
+test(`legacy availability on ${target} is rejected before any request and closes a transferred agent once`, async () => {
+  const { models, faux } = await fauxRuntime([]);
+  const { collection, events } = countedCollection();
+  const instance: YamlAgent = await agent.JuncoAgent.create({ provider: "faux", model: "faux-1", models, tools: [], collection });
   try {
-    await execution.run();
-    assert.equal(
-      execution.graph.result(graph.NodeId.create("Final"))._tag,
-      "None",
-    );
+    const config = {
+      ...options(),
+      agents: { A: instance },
+      available: { [target]: () => assert.fail("legacy hook invoked") },
+    };
+    await assert.rejects(build(roundDoc("work"), config), (error) =>
+      error instanceof graph.DataflowDefinitionError && /trigger/.test(error.message));
+    assert.equal(faux.state.callCount, 0);
+    assert.deepEqual(events, ["bind-close:1"]);
   } finally {
-    await execution.graph.close();
+    await instance.return();
+    await collection.close();
   }
 });
 
-for (const decline of [false, true])
-  test(`sink availability ${decline ? "can decline a graph level" : "gates publication after work completes"}`, async () => {
-    let allowed = false;
-    const execution = await build(document(), {
-      ...options(),
-      createAgent: async (spec) =>
-        mock(spec.node, spec.node === "Worker" ? "work" : undefined),
-      available: {
-        $sink: ({ edges }) =>
-          decline || !edges.has("Final->$sink")
-            ? undefined
-            : (_view, triggered) => allowed && triggered,
-      },
+test("a prepared agent with a staged prompt fails on admission before a request", async () => {
+  const { models, faux } = await fauxRuntime([]);
+  const { collection } = countedCollection();
+  const instance: YamlAgent = await agent.JuncoAgent.create({
+    provider: "faux", model: "faux-1", models, tools: [], collection,
+    prompt: "Caller-staged instruction",
+  });
+  try {
+    const execution = await build(roundDoc("YAML instruction"), {
+      ...options(), agents: { A: instance },
     });
     try {
-      await execution.run();
-      assert.equal(
-        resultText(execution.graph, graph.NodeId.create("Final")),
-        "Final",
-      );
-      if (!decline) {
-        assert.equal(
-          execution.graph.result(execution.graph.sink.id)._tag,
-          "None",
-        );
-        allowed = true;
-        await execution.run();
-      }
-      assert.equal(resultText(execution.graph), "Final");
+      await assert.rejects(execution.run(), (error) => {
+        const cause = error instanceof graph.DataflowNodeError ? error.error : error;
+        return typeof cause === "object" && cause !== null &&
+          "code" in cause && cause.code === "busy";
+      });
+      assert.equal(faux.state.callCount, 0);
     } finally {
       await execution.graph.close();
     }
-  });
+  } finally {
+    await collection.close();
+  }
+});
 
 const ralphDoc = () => parse(workflows.ralph);
-const FIRST_ROUND =
-  "Achieve the objectives in the user message(s) that follow this one, in order. Do your best and focus on depth (finish objectives well), not width (finish many objectives). Return the complete answer.";
-const RETRY =
-  "Your previous attempt in this round ended with a provider error, not because the work was finished. Continue the same round: carry on with the objectives, in order, building on what you already did. Return the complete answer.";
-const revision = `Take another try at achieving some of these objectives, in order, building on your previous answer (your last message above):\n\nassignment\n\nDo your best and focus on depth (finish objectives well), not width (finish many objectives). Return the complete revised answer.`;
+const ralphAgent = ralphDoc().graph.nodes.Ralph;
+assert.ok(ralphAgent && "prompt" in ralphAgent);
+const workMessage = (
+  phase: "revise" | "retry",
+  round: number,
+  objectives = ["assignment"],
+) => JSON.stringify({ id: "RalphControl~>Ralph", payload: { phase, round, objectives } });
 
-test("a value self-loop runs Ralph once per round and publishes only the last", async () => {
+test("Ralph runs its YAML prompt once per round and publishes only the last", async () => {
   const instance: YamlMock = new MockAgent({
     runs: ["draft-1", "draft-2", "draft-3"].map((text) =>
       run([{ ...settle(assistant(text)), drain: ["steer"] }]),
@@ -973,13 +982,15 @@ test("a value self-loop runs Ralph once per round and publishes only the last", 
     await execution.run();
     assert.deepEqual(lastPrompts(instance), [
       asTask("assignment", "Ralph#1"),
-      revision,
-      revision,
+      workMessage("revise", 2),
+      workMessage("revise", 3),
     ]);
     assert.deepEqual(requestTexts(instance.requests)[0], [
-      FIRST_ROUND,
+      ralphAgent.prompt,
       asTask("assignment", "Ralph#1"),
     ]);
+    for (const texts of requestTexts(instance.requests))
+      assert.equal(texts.at(-2), ralphAgent.prompt);
     assert.equal(
       resultText(execution.graph, graph.NodeId.create("Ralph")),
       "draft-3",
@@ -1018,7 +1029,7 @@ test("default rounds is two and a staged round survives graph steps", async () =
     await execution.run();
     assert.deepEqual(lastPrompts(instance), [
       asTask("assignment", "Ralph#1"),
-      revision,
+      workMessage("revise", 2),
     ]);
     assert.equal(resultText(execution.graph), "draft-2");
   } finally {
@@ -1061,7 +1072,7 @@ for (const [name, draft, error] of [
       );
       assert.deepEqual(lastPrompts(instance), [
         asTask("assignment", "Ralph#1"),
-        revision,
+        workMessage("revise", 2),
       ]);
     } finally {
       await execution.graph.close();
@@ -1159,14 +1170,13 @@ test("several prompts on the assignment route are ordered objectives in every ro
       },
     );
     await execution.run();
-    const listed = "1. first goal\n\n2. second goal";
     assert.deepEqual(requestTexts(instance.requests)[0], [
-      FIRST_ROUND,
+      ralphAgent.prompt,
       asTask("first goal", "Ralph#1"),
       asTask("second goal", "Ralph#2"),
     ]);
     assert.deepEqual(lastPrompts(instance).slice(1), [
-      `Take another try at achieving some of these objectives, in order, building on your previous answer (your last message above):\n\n${listed}\n\nDo your best and focus on depth (finish objectives well), not width (finish many objectives). Return the complete revised answer.`,
+      workMessage("revise", 2, ["first goal", "second goal"]),
     ]);
     assert.deepEqual(judged, [
       ["first goal", "second goal"],
@@ -1203,8 +1213,8 @@ test("a provider-error result re-runs the round up to retries times", async () =
     await execution.run();
     assert.deepEqual(lastPrompts(instance), [
       asTask("assignment", "Ralph#1"),
-      RETRY,
-      revision,
+      workMessage("retry", 1),
+      workMessage("revise", 2),
     ]);
     assert.equal(resultText(execution.graph), "draft-2");
     assert.equal(execution.graph.available().size, 0);
@@ -1213,7 +1223,7 @@ test("a provider-error result re-runs the round up to retries times", async () =
   }
 });
 
-test("exhausted retries keep the error as the round's result", async () => {
+test("an exhausted provider error cannot start a normal revision", async () => {
   const instance: YamlMock = new MockAgent({
     runs: [
       assistant("refused", "error"),
@@ -1238,6 +1248,33 @@ test("exhausted retries keep the error as the round's result", async () => {
     await assert.rejects(execution.run(), {
       message: /did not finish normally: error/,
     });
+  } finally {
+    await execution.graph.close();
+  }
+});
+
+test("a fixed final round publishes its raw provider error after exhausting retries", async () => {
+  const failure = assistant("refused", "error");
+  const instance: YamlMock = new MockAgent({
+    runs: [failure, failure].map((product) =>
+      run([{ ...settle(product), drain: ["steer"] }]),
+    ),
+  });
+  const execution = await build(ralphDoc(), {
+    ...options(),
+    createAgent: async () => instance,
+    ...schedules.ralph({ rounds: 1, retries: 1 }),
+  });
+  try {
+    enqueuePrompts(execution, "assignment", {
+      kind: "prompt", text: "assignment", taskId: "Ralph#1", spec: "", deps: [], history: [],
+    });
+    const results = await execution.run();
+    assert.equal(results.get(execution.graph.sink.id), failure);
+    assert.deepEqual(lastPrompts(instance), [
+      asTask("assignment", "Ralph#1"),
+      workMessage("retry", 1),
+    ]);
   } finally {
     await execution.graph.close();
   }
@@ -1337,13 +1374,46 @@ test("until runs uncapped rounds and publishes only the accepted draft", async (
     assert.deepEqual(calls, [1, 2, 3].map(ralphCall));
     assert.deepEqual(lastPrompts(instance), [
       asTask("assignment", "Ralph#1"),
-      revision,
-      revision,
+      workMessage("revise", 2),
+      workMessage("revise", 3),
     ]);
     assert.equal(resultText(execution.graph), "draft-3");
     assert.equal(execution.graph.available().size, 0);
     await execution.run();
     assert.equal(calls.length, 3);
+  } finally {
+    await execution.graph.close();
+  }
+});
+
+test("Ralph judges identical settlements separately before admitting a queued second assignment", async () => {
+  const draft = assistant("same");
+  let decisions = 0;
+  const { execution, instance, calls } = await untilRalph(
+    [draft, draft],
+    () => ++decisions === 2,
+  );
+  const second: Task = {
+    kind: "prompt", text: "too late", taskId: "Ralph#2", spec: "", deps: [], history: [],
+  };
+  try {
+    enqueuePrompts(execution, "assignment", second);
+    for (let i = 0; instance.requests.length < 2 && i < 100; i++)
+      await execution.step();
+    assert.equal(instance.requests.length, 2);
+    assert.equal(decisions, 1);
+    assert.equal(
+      execution.graph.source.peek()?.messages.get(graph.EdgeId.create("assignment"))?.[0],
+      second,
+    );
+    execution.graph.available();
+    execution.graph.available();
+    assert.equal(decisions, 1);
+    await assert.rejects(execution.run(), /Ralph accepts only one assignment batch/);
+    assert.deepEqual(calls.map(({ round, text }) => [round, text]), [
+      [1, "same"], [2, "same"],
+    ]);
+    assert.equal(instance.requests.length, 2);
   } finally {
     await execution.graph.close();
   }
@@ -1451,6 +1521,7 @@ for (const [name, decide, expected] of [
     try {
       const error = await rejection(execution.run());
       assert.ok(expected(error));
+      assert.doesNotThrow(() => execution.graph.available());
       assert.equal(await rejection(execution.run()), error);
       assert.equal(calls.length, 1);
       assert.equal(instance.requests.length, 1);
@@ -1466,7 +1537,7 @@ test("nested Ralph levels sharing one controller succeed independently", async (
     return {
       ...inner,
       name,
-      source: { routes: { [`$source~>${name}`]: ["$source~>Ralph"] } },
+      source: { ...inner.source, routes: { [`$source~>${name}`]: ["$source~>Ralph"] } },
     };
   };
   const drafts = (name: string) =>
@@ -1496,8 +1567,9 @@ test("nested Ralph levels sharing one controller succeed independently", async (
         edges: [
           { from: "$source", to: "Left", kind: "message", schema: prompt },
           { from: "$source", to: "Right", kind: "message", schema: prompt },
-          { from: "Left", to: "Final", schema: reply },
-          { from: "Right", to: "Final", schema: reply },
+          ...["Left", "Right"].map((from) => ({
+            from, to: "Final", id: `${from}->Final`, kind: "message", on: "return", schema: reply,
+          })),
           { from: "Final", to: "$sink", schema: reply },
         ],
       },
@@ -1552,7 +1624,7 @@ test("same-named sibling and deep wrappers bind agents and strengths by unique p
             graph: inner,
           },
         }
-      : { Worker: { trigger: "$source~>Worker" } },
+      : { Worker: { trigger: "$source~>Worker", prompt: "work" } },
     edges: [
       {
         from: "$source",
@@ -1572,7 +1644,7 @@ test("same-named sibling and deep wrappers bind agents and strengths by unique p
   const agents = new Map<string, YamlMock>(
     Object.keys(rungs).map((path) => [
       path,
-      mock(`report:${path}`, path === "Final" ? undefined : "work"),
+      mock(`report:${path}`),
     ]),
   );
   const levels: [string, string][] = [];
@@ -1611,7 +1683,7 @@ test("same-named sibling and deep wrappers bind agents and strengths by unique p
               kind: "message" as const,
               schema: prompt,
             },
-            { from: id, to: "Final", schema: reply },
+            { from: id, to: "Final", id: `${id}->Final`, kind: "message", on: "return", schema: reply },
           ]),
           { from: "Final", to: "$sink", schema: reply },
         ],
@@ -1679,7 +1751,7 @@ test("same-named sibling and deep wrappers bind agents and strengths by unique p
 
 test("a nested Ralph level is driven while the outer sink is untouched", async () => {
   const inner = ralphDoc().graph;
-  inner.source = { routes: { "$source~>Wrapper": ["$source~>Ralph"] } };
+  inner.source = { ...inner.source, routes: { "$source~>Wrapper": ["$source~>Ralph"] } };
   const instance: YamlMock = new MockAgent({
     runs: ["draft-1", "draft-2"].map((text) =>
       run([{ ...settle(assistant(text)), drain: ["steer"] }]),
@@ -1696,7 +1768,7 @@ test("a nested Ralph level is driven while the outer sink is untouched", async (
         },
         edges: [
           { from: "$source", to: "Wrapper", kind: "message", schema: prompt },
-          { from: "Wrapper", to: "Final", schema: reply },
+          { from: "Wrapper", to: "Final", id: "Wrapper->Final", kind: "message", on: "return", schema: reply },
           { from: "Final", to: "$sink", schema: reply },
         ],
       },
@@ -1719,7 +1791,7 @@ test("a nested Ralph level is driven while the outer sink is untouched", async (
     await execution.run();
     assert.deepEqual(lastPrompts(instance), [
       asTask("assignment", "Ralph#1"),
-      revision,
+      workMessage("revise", 2),
     ]);
     assert.deepEqual(lastPrompts(final), ["draft-2"]);
     assert.equal(resultText(execution.graph), "final reply");
@@ -1748,7 +1820,7 @@ test("message-edge prompt placeholders fail before a model request", async () =>
         { ...options(), createAgent: async () => instance },
       ),
       new graph.DataflowDefinitionError(
-        'junco-syntax: prompt placeholder {{Start~>Reader}} of node "Reader" names message edge "Start~>Reader"; delivered messages are steered into the agent as user messages, placeholders render value edges',
+        'junco-syntax: prompt placeholder {{Start~>Reader}} of node "Reader" names message edge "Start~>Reader"; placeholders require a value or on: return edge',
       ),
     );
     assert.deepEqual(instance.requests, []);
@@ -1757,31 +1829,79 @@ test("message-edge prompt placeholders fail before a model request", async () =>
   }
 });
 
-test("value templates normalize final text", async () => {
-  const doc = parse({
-    graph: {
+async function stepUntil(execution: { step(): Promise<unknown> }, reached: () => boolean) {
+  for (let n = 0; n < 64 && !reached(); n++) await execution.step();
+  assert.ok(reached(), "expected graph state within 64 decisions");
+}
+
+for (const sameProduct of [false, true])
+  test(`always stages the YAML prompt once per settlement (identical products: ${sameProduct})`, async () => {
+    const first = assistant("first");
+    const second = sameProduct ? first : assistant("second");
+    const instance: YamlMock = new MockAgent({
+      runs: [run([pause([]), settle(first)]), run([settle(second)])],
+    });
+    const execution = await JuncoGraph.fromYaml(`graph:
+  nodes:
+    A:
+      prompt: Generate a new unit test
+      trigger: always
+  sink: { stream: true, trigger: never }
+  edges:
+    - { from: A, to: $sink, kind: message, on: return, schema: {type: object} }
+`, { ...options(), createAgent: async () => instance });
+    const id = graph.NodeId.create("A");
+    const staged = () => instance.calls.filter(call => call.method === "stagePrompt").length;
+    const queued = () => execution.graph.observe().inputs.get(execution.graph.sink.id)?.messages.get(graph.EdgeId.create("A~>$sink")) ?? [];
+    try {
+      for (let i = 0; i < 3; i++) assert.ok(execution.graph.available().has(id));
+      assert.equal(staged(), 0);
+      await stepUntil(execution, () => instance.requests.length === 1);
+      assert.equal(staged(), 1);
+      assert.equal(queued().length, 0);
+      await stepUntil(execution, () => queued().length === 2);
+      assert.equal(queued()[0], first);
+      assert.equal(queued()[1], second);
+      assert.equal(O.toUndefined(execution.graph.result(id)), second);
+      assert.equal(staged(), 2);
+      assert.deepEqual(requestTexts(instance.requests).at(-1), ["Generate a new unit test", "Generate a new unit test"]);
+      assert.ok(execution.graph.available().has(id));
+    } finally {
+      await execution.graph.close();
+    }
+  });
+
+for (const transport of ["value", "return"] as const)
+  test(`one upstream settlement drives a ${transport} template`, async () => {
+    const repeated = transport === "value";
+    const first = assistant("one"), second = assistant("two");
+    const a = mock("  answer  ");
+    const b: YamlMock = new MockAgent({ runs: [run([settle(first)]), run([settle(second)])] });
+    const execution = await build(parse({ graph: {
       nodes: {
-        A: { prompt: "start" },
-        B: { prompt: "value={{ A->B }}", trigger: "A->B" },
+        Start: { kind: "emit", text: "Provide an answer", spec: "done" },
+        A: { prompt: "Answer the assignment." },
+        B: { prompt: "value={{report}}", trigger: "report" },
       },
       edges: [
-        { from: "A", to: "B", schema: reply },
+        { from: "Start", to: "A", kind: "message", schema: prompt },
+        { from: "A", to: "B", id: "report", schema: reply, ...(repeated ? {} : {kind: "message", on: "return"}) },
         { from: "B", to: "$sink", schema: reply },
       ],
-    },
+    }}), { ...options(), createAgent: async ({ node }) => node === "A" ? a : b });
+    const id = graph.NodeId.create("B");
+    try {
+      await stepUntil(execution, () => O.toUndefined(execution.graph.result(id)) === first);
+      if (repeated) await stepUntil(execution, () => O.toUndefined(execution.graph.result(id)) === second);
+      else { await execution.run(); await execution.run(); }
+      assert.deepEqual(lastPrompts(b), repeated ? ["value=answer", "value=answer"] : ["value=answer"]);
+      assert.deepEqual(requestTexts(b.requests)[0], ["value=answer"]);
+      assert.equal(a.requests.length, 1);
+      assert.equal(execution.graph.available().has(id), repeated);
+    } finally {
+      await execution.graph.close();
+    }
   });
-  const b = mock("done");
-  const execution = await build(doc, {
-    ...options(),
-    createAgent: async (spec) => (spec.node === "A" ? mock("  answer  ") : b),
-  });
-  try {
-    await execution.run();
-    assert.deepEqual(lastPrompts(b), ["value=answer"]);
-  } finally {
-    await execution.graph.close();
-  }
-});
 
 for (const trigger of [
   undefined,
@@ -1790,43 +1910,42 @@ for (const trigger of [
   "never",
 ] as const)
   test(`scheduled consumer readiness ${JSON.stringify(trigger)}`, async () => {
-    let rightAllowed = false;
-    const consumer = mock("joined");
+    const consumer: YamlMock = new MockAgent({ runs: [run([settle(assistant("early"))]), run([settle(assistant("late"))])] });
     const execution = await build(
       parse({
         graph: {
           sink: trigger === "never" ? { trigger } : undefined,
+          source: { routes: { left: ["seed-left"], right: ["seed-right"] } },
           nodes: {
-            Start: { kind: "code", trigger: "always" },
             Left: { prompt: "left" },
             Right: { prompt: "right" },
             Consumer: { trigger, prompt: "{{left}}/{{right}}" },
           },
           edges: [
-            { from: "Start", to: "Left", schema: { type: "null" } },
-            { from: "Start", to: "Right", schema: { type: "null" } },
-            { from: "Left", to: "Consumer", id: "left", schema: reply },
-            { from: "Right", to: "Consumer", id: "right", schema: reply },
+            { from: "$source", to: "Left", id: "seed-left", kind: "message", schema: prompt },
+            { from: "$source", to: "Right", id: "seed-right", kind: "message", schema: prompt },
+            { from: "Left", to: "Consumer", id: "left", kind: "message", on: "return", schema: reply },
+            { from: "Right", to: "Consumer", id: "right", kind: "message", on: "return", schema: reply },
             { from: "Consumer", to: "$sink", schema: reply },
           ],
         },
       }),
       {
         ...options(),
-        code: { Start: Constant(null) },
         createAgent: async (spec) =>
           spec.node === "Consumer" ? consumer : mock(spec.node),
-        available: { Right: resumable("Right", () => rightAllowed) },
       },
     );
     try {
+      enqueuePrompts(execution, "left", { kind: "prompt", text: "go", taskId: "seed", spec: "", deps: [], history: [] });
       await execution.run();
       const early = typeof trigger === "object" && "any" in trigger;
       assert.equal(consumer.requests.length, early ? 1 : 0);
       if (early) assert.deepEqual(lastPrompts(consumer), ["Left/"]);
-      rightAllowed = true;
+      enqueuePrompts(execution, "right", { kind: "prompt", text: "go", taskId: "seed", spec: "", deps: [], history: [] });
       await execution.run();
-      assert.equal(consumer.requests.length, trigger === "never" ? 0 : 1);
+      assert.equal(consumer.requests.length, trigger === "never" ? 0 : early ? 2 : 1);
+      if (early) assert.deepEqual(lastPrompts(consumer), ["Left/", "/Right"]);
       if (!early && trigger !== "never")
         assert.deepEqual(lastPrompts(consumer), ["Left/Right"]);
     } finally {
@@ -1835,7 +1954,6 @@ for (const trigger of [
   });
 
 test("source fan-out preserves queued payloads and sink waits for both value results", async () => {
-  const allowed = new Set<string>();
   const agents = new Map([
     ["Left", mock("LEFT")],
     ["Right", mock("RIGHT")],
@@ -1867,12 +1985,7 @@ test("source fan-out preserves queued payloads and sink waits for both value res
     {
       ...options(),
       createAgent: async (spec) => agents.get(spec.node)!,
-      available: Object.fromEntries(
-        ["Left", "Right"].map((id) => [
-          id,
-          resumable(id, () => allowed.has(id)),
-        ]),
-      ),
+      scheduler: () => schedules.roundRobin(),
     },
   );
   try {
@@ -1888,7 +2001,7 @@ test("source fan-out preserves queued payloads and sink waits for both value res
       ],
     };
     enqueuePrompts(execution, "seed", payload);
-    await execution.run();
+    await stepUntil(execution, () => execution.graph.available().has(graph.NodeId.create("Left")));
     const observation = execution.graph.observe();
     assert.equal(
       [...observation.nodes.values()].filter(
@@ -1925,8 +2038,7 @@ test("source fan-out preserves queued payloads and sink waits for both value res
       );
       assert.equal(agents.get(id)!.requests.length, 0);
     }
-    allowed.add("Left");
-    await execution.run();
+    await stepUntil(execution, () => O.isSome(execution.graph.result(graph.NodeId.create("Left"))));
     assert.equal(
       execution.graph.result(graph.NodeId.create("Left"))._tag,
       "Some",
@@ -1936,7 +2048,6 @@ test("source fan-out preserves queued payloads and sink waits for both value res
       "None",
     );
     assert.equal(execution.graph.result(execution.graph.sink.id)._tag, "None");
-    allowed.add("Right");
     await execution.run();
     for (const [, instance] of agents)
       assert.deepEqual(lastPrompts(instance), [asTask("seed text", "T1")]);
@@ -1985,7 +2096,7 @@ test("recursive graphs have fresh local ports and publish one final to messages 
     ...options(),
     createAgent: async (spec) =>
       spec.node === "Worker"
-        ? mock(spec.graph === "sibling" ? "SIBLING" : "CHILD", "work")
+        ? mock(spec.graph === "sibling" ? "SIBLING" : "CHILD")
         : spec.node === "Fan"
           ? fan
           : final,
@@ -2143,7 +2254,7 @@ test("early sink identifies the selected predecessor that has not returned", asy
     parse({
       graph: {
         sink: { trigger: "always" },
-        nodes: { A: { trigger: "never" } },
+        nodes: { A: { prompt: "work", trigger: "never" } },
         edges: [{ from: "A", to: "$sink", schema: reply }],
       },
     }),
@@ -2170,10 +2281,12 @@ for (const text of ["", "   ", "bad-stop"])
       parse({
         graph: {
           nodes: {
+            Start: { kind: "emit", text: "Begin the task.", spec: "done" },
             A: { prompt: "go" },
             B: { prompt: "{{report}}" },
           },
           edges: [
+            { from: "Start", to: "A", kind: "message", schema: prompt },
             { from: "A", to: "B", id: "report", schema: reply },
             { from: "B", to: "$sink", schema: reply },
           ],
@@ -2202,7 +2315,9 @@ for (const text of ["", "   ", "bad-stop"])
     }
   });
 
-test("repeated value placeholders preserve order and optional emptiness without duplicating messages", async () => {
+for (const transport of ["value", "return"] as const)
+test(`repeated ${transport} placeholders preserve order and optional emptiness without duplicating messages`, async () => {
+  const edgeKind = transport === "return" ? { kind: "message", on: "return" } as const : {};
   const consumer = mock("done");
   const execution = await build(
     parse({
@@ -2210,7 +2325,7 @@ test("repeated value placeholders preserve order and optional emptiness without 
         source: { routes: { seed: ["m", "seed-a", "seed-optional"] } },
         nodes: {
           A: { prompt: "go" },
-          Optional: { trigger: "never" },
+          Optional: { prompt: "work", trigger: "never" },
           B: {
             trigger: { all: ["v", "m"] },
             prompt: "{{v}}|{{v}}|{{optional}}",
@@ -2238,12 +2353,13 @@ test("repeated value placeholders preserve order and optional emptiness without 
             id: "seed-optional",
             schema: prompt,
           },
-          { from: "A", to: "B", id: "v", schema: reply },
+          { from: "A", to: "B", id: "v", schema: reply, ...edgeKind },
           {
             from: "Optional",
             to: "B",
             id: "optional",
             schema: reply,
+            ...edgeKind,
           },
           { from: "B", to: "$sink", schema: reply },
         ],
@@ -2335,7 +2451,7 @@ test("explicit widths serialize real activations and nested work uses the shared
     ...options(),
     tracer: observer,
     createAgent: async (spec) =>
-      mock(spec.node, spec.node === "Worker" ? "work" : undefined),
+      mock(spec.node),
   });
   try {
     await execution.run();
@@ -2398,12 +2514,13 @@ test("default build uses real offline agents and releases only borrowed collecti
     parse({
       graph: {
         nodes: {
+          Start: { kind: "emit", text: "Begin the task.", spec: "done" },
           A: {
             system: "fixture system",
             prompt: "offline task",
           },
         },
-        edges: [{ from: "A", to: "$sink", schema: reply }],
+        edges: [{ from: "Start", to: "A", kind: "message", schema: prompt }, { from: "A", to: "$sink", schema: reply }],
       },
     }),
     {
@@ -2440,7 +2557,7 @@ test("pre-aborted build preserves its reason without acquiring agents or graph l
       build(
         parse({
           graph: {
-            nodes: { A: {} },
+            nodes: { A: { prompt: "work" } },
             edges: [{ from: "A", to: "$sink", schema: reply }],
           },
         }),
@@ -2492,13 +2609,14 @@ for (const row of [
         skills: { guide: "guide/SKILL.md", hidden: "hidden/SKILL.md" },
         graph: {
           nodes: {
+            Start: { kind: "emit", text: "Begin the task.", spec: "done" },
             A: {
               prompt: "Execute the resource fixture.",
               ...(row.system === undefined ? {} : { system: row.system }),
               ...(row.skill === undefined ? {} : { skills: [row.skill] }),
             },
           },
-          edges: [{ from: "A", to: "$sink", schema: reply }],
+          edges: [{ from: "Start", to: "A", kind: "message", schema: prompt }, { from: "A", to: "$sink", schema: reply }],
         },
       });
       let requests = 0;
@@ -2537,9 +2655,9 @@ for (const row of [
             }
             assert.ok(!system.includes("Hidden resource fixture description."));
             assert.ok(!system.includes("<name>hidden</name>"));
-            assert.deepEqual(userTexts(context.messages), [
+            assert.equal(userTexts(context.messages)[0],
               "Execute the resource fixture.",
-            ]);
+            );
           };
           return fauxAssistantMessage(`completed ${row.name}`);
         },
@@ -2610,7 +2728,7 @@ test("builtin info exposes routes without receiver contracts", async () => {
       const text = contentText(result.content);
       assert.equal(result.isError, false);
       assert.deepEqual(JSON.parse(text), {
-        parents: [],
+        parents: [{ id: "Start", edgeId: "Start~>Sender", kind: "message" }],
         children: [{ id: "Receiver", edgeId: "handoff", kind: "message" }],
       });
       inspected = true;
@@ -2625,14 +2743,17 @@ test("builtin info exposes routes without receiver contracts", async () => {
         graph: {
           sink: { trigger: "never" },
           nodes: {
+            Start: { kind: "emit", text: "Begin the task.", spec: "done" },
             Sender: {
               prompt: "Inspect the receiver's routes using info.",
             },
             Receiver: {
               trigger: "never",
+              prompt: "Receive the handoff.",
             },
           },
           edges: [
+            { from: "Start", to: "Sender", kind: "message", schema: prompt },
             {
               from: "Sender",
               to: "Receiver",
@@ -2690,8 +2811,8 @@ for (const nested of [false, true])
       );
       const successful = {
         nodes: {
-          A: {},
-          B: {},
+          A: { prompt: "work" },
+          B: { prompt: "work" },
         },
         edges: [
           { from: "A", to: "B", schema: reply },
@@ -2703,7 +2824,7 @@ for (const nested of [false, true])
           ? {
               nodes: {
                 Child: { kind: "graph", graph: successful },
-                Missing: {},
+                Missing: { kind: "code" },
               },
               edges: [
                 { from: "Child", to: "Missing", schema: reply },
@@ -2714,7 +2835,7 @@ for (const nested of [false, true])
               ...successful,
               nodes: {
                 ...successful.nodes,
-                Missing: {},
+                Missing: { kind: "code" },
               },
               edges: [
                 { from: "A", to: "B", schema: reply },
@@ -2729,7 +2850,7 @@ for (const nested of [false, true])
             ...options(),
             collection,
             ladder: new schedules.ModelLadder(models, fauxLadder),
-            available: {
+            code: {
               Missing: () => {
                 throw primary;
               },
@@ -2788,21 +2909,33 @@ const codeOptions = (log: string[]) => ({
   context: { log },
   code: { Emitter },
 });
-for (const hooked of [false, true])
-  test(`code node registers its configured definition${hooked ? " over an availability hook" : ""}`, async () => {
-    const log: string[] = [];
-    const execution = await build(codeDocument(), {
-      ...codeOptions(log),
-      ...(hooked ? { available: { Emitter: () => () => false } } : {}),
-    });
-    try {
-      assert.deepEqual(log, ["Codes/Emitter"]);
-      await execution.run();
-      assert.equal(resultText(execution.graph), "Codes/Emitter");
-    } finally {
-      await execution.graph.close();
-    }
-  });
+test("code node registers its configured definition", async () => {
+  const log: string[] = [];
+  const execution = await build(codeDocument(), codeOptions(log));
+  try {
+    assert.deepEqual(log, ["Codes/Emitter"]);
+    await execution.run();
+    assert.equal(resultText(execution.graph), "Codes/Emitter");
+  } finally {
+    await execution.graph.close();
+  }
+});
+
+test("code factory returning a legacy registration is rejected by node name", async () => {
+  const state = new Deterministic<TSchema, unknown>(async function* () {
+    yield [];
+    return null;
+  }, tools.EmptyPolicy);
+  const legacy = () => ({ state });
+  await assert.rejects(
+    build(codeDocument(), {
+      ...codeOptions([]),
+      code: { Emitter: legacy as unknown as DeterministicNode },
+    }),
+    (error) => error instanceof graph.DataflowDefinitionError && /Emitter/.test(error.message),
+  );
+  assert.ok(state.signal.aborted, "unregistered deterministic state must be released");
+});
 
 test("nested code nodes resolve their configured definition by local node id", async () => {
   const log: string[] = [];
@@ -2855,7 +2988,7 @@ test("fromYaml collects only requested measurements, separately at each graph le
         return { selected: schedules.select(snapshot, snapshot.available) };
       },
       createAgent: async ({ node }) =>
-        node === "Worker" ? mock("leaf", "work") : mock("done"),
+        node === "Worker" ? mock("leaf") : mock("done"),
     });
     try {
       await execution.run();
@@ -2938,7 +3071,6 @@ test("prepared agents use node paths, skip factory configuration and belong to t
     models,
     tools: [],
     collection,
-    prompt: "work",
   });
   const final: YamlAgent = await agent.JuncoAgent.create({
     provider: "faux",
@@ -3003,9 +3135,9 @@ for (const boundary of [
     const doc = parse({
       graph: {
         nodes: {
-          A: {},
+          A: { prompt: "work" },
           ...(boundary === "missing" || boundary === "duplicate"
-            ? { B: {} }
+            ? { B: { prompt: "work" } }
             : boundary === "code definition"
               ? { Missing: { kind: "code" } }
               : {}),
@@ -3084,7 +3216,9 @@ for (const [label, nested, failing] of [
   for (const cleanupFails of [false, true])
     test(`prepared rollback closes every agent and ${label}${cleanupFails ? " despite cleanup failure" : ""}`, async () => {
       const { models } = await fauxRuntime([]);
-      const primary = new Error("prepared registration sentinel");
+      // Valid document reference, invalid compiled prompt: fail inside construction, not parse.
+      const invalid = "{{plain-message}}";
+      const failingEdge = { id: "plain-message", kind: "message" };
       const cleanup = new Error("prepared cleanup sentinel");
       const { collection, events, active } = countedCollection(
         cleanupFails ? { binding: 2, error: cleanup } : undefined,
@@ -3101,30 +3235,29 @@ for (const [label, nested, failing] of [
           }),
         );
       const child = {
-        nodes: { A: {}, B: {} },
+        nodes: { A: { prompt: "work" }, B: { prompt: failing === "B" ? invalid : "work" } },
         edges: [
-          { from: "A", to: "B", schema: reply },
+          { from: "A", to: "B", schema: reply, ...(failing === "B" ? failingEdge : {}) },
           { from: "B", to: "$sink", schema: reply },
         ],
       };
-      const graphs: graph.JuncoGraph<TSchema, unknown>[] = [];
       try {
         await assert.rejects(
           build(
             parse({
               graph: nested
                 ? {
-                    nodes: { Child: { kind: "graph", graph: child }, Last: {} },
+                    nodes: { Child: { kind: "graph", graph: child }, Last: { prompt: failing === "Last" ? invalid : "work" } },
                     edges: [
-                      { from: "Child", to: "Last", schema: reply },
+                      { from: "Child", to: "Last", schema: reply, ...(failing === "Last" ? failingEdge : {}) },
                       { from: "Last", to: "$sink", schema: reply },
                     ],
                   }
                 : {
                     ...child,
-                    nodes: { ...child.nodes, Last: {} },
+                    nodes: { ...child.nodes, Last: { prompt: "work" } },
                     edges: [
-                      { from: "A", to: "B", schema: reply },
+                      ...child.edges.slice(0, 1),
                       { from: "B", to: "Last", schema: reply },
                       { from: "Last", to: "$sink", schema: reply },
                     ],
@@ -3138,22 +3271,13 @@ for (const [label, nested, failing] of [
                 [nested ? "Child/B" : "B"]: members[1]!,
                 Last: members[2]!,
               },
-              available: {
-                $sink: ({ graph: g }) => {
-                  graphs.push(g);
-                  return undefined;
-                },
-                [failing]: () => {
-                  throw primary;
-                },
-              },
             },
           ),
           (error) => {
-            if (!cleanupFails) assert.equal(error, primary);
+            if (!cleanupFails) assert.match(String(error), /names message edge "plain-message"/);
             else {
               assert.ok(error instanceof AggregateError);
-              assert.equal(error.errors[0], primary);
+              assert.match(String(error.errors[0]), /names message edge "plain-message"/);
               assert.ok(
                 error.errors
                   .slice(1)
@@ -3168,8 +3292,6 @@ for (const [label, nested, failing] of [
             return true;
           },
         );
-        assert.equal(graphs.length, nested ? 2 : 1);
-        assert.ok(graphs.every((g) => g.signal.aborted));
         assert.deepEqual(
           events.filter((event) => event.startsWith("bind-close:")),
           ["bind-close:3", "bind-close:2", "bind-close:1"],
@@ -3197,7 +3319,7 @@ test("createAgent instances remain caller-owned when construction fails", async 
       build(
         parse({
           graph: {
-            nodes: { A: {}, B: {} },
+            nodes: { A: { prompt: "work" }, B: { prompt: "work" } },
             edges: [
               { from: "A", to: "B", schema: reply },
               { from: "B", to: "$sink", schema: reply },
@@ -3206,11 +3328,9 @@ test("createAgent instances remain caller-owned when construction fails", async 
         }),
         {
           ...options(),
-          createAgent: async () => instance,
-          available: {
-            B: () => {
-              throw primary;
-            },
+          createAgent: async ({ node }) => {
+            if (node === "B") throw primary;
+            return instance;
           },
         },
       ),
@@ -3235,11 +3355,11 @@ function countDisposals(instance: YamlMock): { count: number } {
 }
 const aborts = (instance: YamlMock) =>
   instance.calls.filter(({ method }) => method === "abort").length;
-const roundDoc = (prompt: string) =>
+const roundDoc = (instruction: string) =>
   parse({
     graph: {
-      nodes: { A: { prompt } },
-      edges: [{ from: "A", to: "$sink", schema: reply }],
+      nodes: { Start: { kind: "emit", text: "Begin the task.", spec: "done" }, A: { prompt: instruction } },
+      edges: [{ from: "Start", to: "A", kind: "message", schema: prompt }, { from: "A", to: "$sink", schema: reply }],
     },
   });
 
@@ -3267,7 +3387,7 @@ test("caller-owned factory agents survive each round's graph close and close onc
       assert.equal(disposals.count, 0);
       assert.notEqual(instance.status, "closed");
     }
-    assert.deepEqual(lastPrompts(instance), ["round 1", "round 2"]);
+    assert.deepEqual(requestTexts(instance.requests).map((texts) => texts.filter((text) => text.startsWith("round ")).at(-1)), ["round 1", "round 2"]);
   } finally {
     await instance.return();
   }
@@ -3317,6 +3437,7 @@ for (const nested of [false, true])
       trigger: trigger.TriggerRule.always(),
       policy: tools.LockPolicy,
       state: instance,
+      prompt: "work",
     });
     await execution.graph.close();
     assert.equal(disposals.count, 1);
@@ -3333,7 +3454,7 @@ test("createAgentOwnership requires createAgent", async () => {
   );
 });
 
-for (const boundary of ["factory", "code", "availability"] as const)
+for (const boundary of ["factory", "code"] as const)
   for (const ownership of [undefined, "caller"] as const)
     for (const cleanupFails of [false, true])
       test(`a later ${boundary} failure rolls back ${ownership ?? "default"}-ownership leases and deterministic state without disposing earlier factory agents${cleanupFails ? ", cleanup failure after the primary" : ""}`, async () => {
@@ -3357,7 +3478,7 @@ for (const boundary of ["factory", "code", "availability"] as const)
             close().then(() => {
               if (cleanupFails) throw cleanup;
             });
-          return { state: deterministic };
+          return deterministic;
         };
         try {
           await assert.rejects(
@@ -3369,7 +3490,7 @@ for (const boundary of ["factory", "code", "availability"] as const)
                       kind: "graph",
                       graph: {
                         nodes: {
-                          A: {},
+                          A: { prompt: "work" },
                           Code: { kind: "code", trigger: "always" },
                         },
                         edges: [
@@ -3381,7 +3502,7 @@ for (const boundary of ["factory", "code", "availability"] as const)
                     Last:
                       boundary === "code"
                         ? { kind: "code", trigger: "always" }
-                        : {},
+                        : { prompt: "work" },
                   },
                   edges: [
                     { from: "Child", to: "Last", schema: reply },
@@ -3403,15 +3524,6 @@ for (const boundary of ["factory", "code", "availability"] as const)
                   return earlier;
                 },
                 ...(ownership ? { createAgentOwnership: ownership } : {}),
-                ...(boundary === "availability"
-                  ? {
-                      available: {
-                        Last: () => {
-                          throw primary;
-                        },
-                      },
-                    }
-                  : {}),
               },
             ),
             (error) => {
@@ -3568,15 +3680,9 @@ const streamingDocument = () => {
 };
 
 test("streaming sinks deliver every batch without a terminal result", async () => {
-  let open = true;
   const execution = await codeBuild(
     streamingDocument(),
     { Echo: Relay("$source~>Echo", "Echo~>$sink") },
-    {
-      available: {
-        $source: ({ label }) => (label === "graph" ? () => open : undefined),
-      },
-    },
   );
   const root = execution.graph;
   const enqueue = (...payloads: object[]) =>
@@ -3617,14 +3723,9 @@ test("streaming sinks deliver every batch without a terminal result", async () =
       assert.ok(O.isNone(g.result(id)));
     assert.equal(child.status, "running");
 
-    open = false;
     enqueue(d);
     enqueue(a);
-    const pending = root.source.peek();
-    await execution.run();
-    assert.deepEqual(drain(), []);
-    assert.equal(root.source.peek(), pending);
-    open = true;
+    assert.ok(root.source.peek());
     await execution.run();
     assert.deepEqual(drain(), [d, a]);
     assert.equal(root.source.peek(), undefined);
@@ -3871,7 +3972,7 @@ test("an agent sends a number through its edge schema", async () => {
           Tail: { kind: "code" },
         },
         edges: [
-          { from: "Seven", to: "Worker", schema: number, probe: true },
+          { from: "Seven", to: "Worker", id: "Seven->Worker", kind: "message", on: "return", schema: number, probe: true },
           {
             from: "Worker",
             to: "Tail",

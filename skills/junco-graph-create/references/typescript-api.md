@@ -70,29 +70,23 @@ export type Lookup<K, V> = {
   keys(): Iterable<K>;
 };
 
-export type ParentView<N, T> = {
-  readonly messages: Lookup<EdgeId, readonly N[]>;
+export type ParentView<N extends TSchema, T> = {
+  readonly messages: Lookup<EdgeId, readonly Static<N>[]>;
   readonly values: Lookup<EdgeId, T>;
 };
 
 export type NodeGenerator<N, T> = AsyncGenerator<
-  Message<N>[],
-  T,
+  Message<N>[] | { readonly resume: Message<N>[] },
+  T | FinalMessages<N>,
   ParentView<N, T>
 >;
 
 export type StepFn<S, N, T> = (this: Node<S, N, T>) => NodeGenerator<N, T>;
 
-export type AvailabilityFn<N, T> = (
-  view: ParentView<N, T>,
-  triggered: boolean,
-) => boolean;
-
 export type NodeOptions<N, T> = {
   readonly id?: NodeId;
   readonly description?: string;
   readonly trigger: TriggerRule<N, T>;
-  readonly is_available?: AvailabilityFn<N, T>;
 };
 
 export type NodeSpec<S, N, T> = NodeOptions<N, T> & {
@@ -130,12 +124,13 @@ export const Width = {
 export const UNBOUNDED: Width = Number.POSITIVE_INFINITY as Width;
 
 export const Edge = {
-  message: <N, T>(id: string): Edge<N, T> =>
-  value: <N, T>(id: string): Edge<N, T> =>
+  message: <N extends TSchema, T = never>(id: string, schema: N): Edge<N, T> =>
+  returned: <N extends TSchema>(id: string, schema: N): Edge<N, Static<N>> =>
+  value: <V extends TSchema>(id: string, schema: V): Edge<never, Static<V>> =>
 };
 
 export const Message = {
-  create: <N, T>(edge: Edge<N, T>, payload: N): Message<N> =>
+  create: <N extends TSchema, T>(edge: Edge<N, T>, payload: Static<N>): Message<N> =>
 };
 export const from = <N, T>(
   view: ParentView<N, T>,
@@ -177,7 +172,7 @@ export class JuncoGraph<N = Task, T = AssistantMessage, EH = never>
 
   static map<S, L, N = Task, T = AssistantMessage>(
     skeleton: Pick<Graph<S, L>, "forEachNode" | "forEachLink" | "getLinks">,
-    f: (state: S) => Agentic<N, T> | AgenticNode<N, T>,
+    f: (state: S) => Deterministic<N, T> | AgenticNode<N, T>,
     options: {
       readonly source: Source<N, T>;
       readonly sink: Sink<N, T>;
@@ -204,9 +199,9 @@ Construction rules:
 
 - **Choose by native state.** `graph.DataflowGraph<S,N,T,EH>` holds ordinary states (e.g. `undefined`); `graph.JuncoGraph` holds agents, nested native graphs, `Deterministic` coroutines and Source/Sink states, never contexts or policies. Never cast plain state into `Agentic`.
 - **`graph.nodes.Agentic` is the graph-state union**, not the cooperative agent interface `agent.Agentic`.
-- **Edges.** Message edges queue emitted `N`; value edges retain the source's latest returned `T`, replacing the previous value on each return. Agency delivery freshness is keyed by edge ID and `!==` value identity: a changed retained value is fresh again, not a deep comparison. Read batches with `graph.from(view, edge)` or `view.messages`, results with `view.values.get(edge.id)`. `Message.create`/`emit` target wired message edges, never value edges. IDs must be unique within each source-outbound and target-inbound set. Register endpoints before `addEdge`; never mutate transport.
-- **Generator protocol.** Start dependent bodies with `let view = yield []`; priming consumes no queued inputs. Each activation advances once; returning `T` marks done and updates all outbound value edges. Only delivery on the returning node's own value self-edge re-arms it: a new `step()` generator, same state. Message self-edges, non-self value updates and multi-node cycles do not re-arm returned nodes. Bound re-runs through availability; results retain the latest return. Annotate hand-written bodies `async function* (): graph.NodeGenerator<N, T> { … }`.
-- **Generic inference.** `new StepNode` / `new EmitOnce` infer `S`, `N`, `T` from arguments including `options` (`state: undefined` infers `S = undefined`). If these differ from graph types (e.g. `void` state, union `N`, narrower trigger), pass explicit generics: `new graph.nodes.StepNode<void, Payload, string>(…)`. `Message.create` infers from arguments. `graph.from(view, edge)` returns graph-wide `N`, not the edge's narrower type; narrow payloads with type guards, never casts.
+- **Edges.** Message edges queue emitted `Static<N>`; value edges retain the source's latest returned `T`, replacing the previous value on each return. Agency delivery freshness is keyed by edge ID and `!==` value identity: a changed retained value is fresh again, not a deep comparison. Read batches with `graph.from(view, edge)` or `view.messages`, results with `view.values.get(edge.id)`. Only ordinary message edges accept explicit publication. `Edge.returned` queues the exact successful result once, even for repeated references. IDs must be unique within each source-outbound and target-inbound set. Register endpoints before `addEdge`; never mutate transport.
+- **Generator protocol.** Start dependent bodies with `let view = yield []`; priming consumes no queued inputs. Each activation advances once; returning `T` marks done and updates all outbound value edges. For a native generator only its own value self-edge re-arms it: a new `step()` generator, same state. Message self-edges, non-self value updates and multi-node cycles do not re-arm returned nodes. Use consumable inputs for recurring graph-managed prompt agents; results retain the latest return. Annotate hand-written bodies `async function* (): graph.NodeGenerator<N, T> { … }`.
+- **Generic inference.** `new StepNode` / `new EmitOnce` infer `S`, `N`, `T` from arguments including `options` (`state: undefined` infers `S = undefined`). If these differ from graph types (e.g. `void` state, union `N`, narrower trigger), pass explicit generics: `new graph.nodes.StepNode<void, Payload, string>(…)`. `Message.create` infers from arguments. `graph.from(view, edge)` returns the delivered batch admitted by the edge schema; narrow payloads with type guards, never casts.
 - **Agent graphs use `Task` messages and `AssistantMessage` results** (the `JuncoGraph` defaults). Every task carries `taskId`, `spec`, `deps` and `history`, all required: construct a new one with `Task.create({ kind: "prompt", text, spec })`, which mints the UID with empty `deps`/`history`; an agent's `send` fills them in and never shows them to the model. A deterministic node feeding an agent emits `Task.create(…)` or forwards a received task; an agent node rejects an incomplete task (`DataflowDefinitionError`).
 - **Closing.** `JuncoGraph.close()` recursively closes agents, graphs and coroutines, joining active evaluations (provider/port work included) before releasing collection holds. Source/Sink states own no independent lifecycle resources. Results remain readable; repeated close is safe. Until successful registration, acquirers own resources and must close earlier acquisitions on failure. Close persistent round members once at the end, not per round.
 - **Spawn policy.** `JuncoGraph.spawn(source,sink,root,inputs,child)` returns a parallel context under root authorization. Ports precede root/children; explicit port names consume no automatic work IDs. Native root/child message pairs remain bidirectional; callers wire terminal work to the sink. Construction failure leaves members caller-owned; unpublished factory failures also release port claims, allowing untouched-port retry.
@@ -219,12 +214,11 @@ Each agency needs fresh, distinct deterministic ports with explicit branded IDs.
 ```text
 export class Source<N, T> implements NodeSpec<Source<N, T>, N, T>
   constructor(route: (view: ParentView<N, T>) => Message<N>[],
-    options: Pick<NodeOptions<N, T>, "description"> & { readonly id: NodeId })
+    options: { readonly id: NodeId; readonly schema: N; readonly description?: string; readonly trigger?: TriggerRule<N,T> })
   readonly id: NodeId
   readonly description?: string
   readonly state: Source<N, T>
   readonly trigger: TriggerRule<N, T>
-  readonly is_available: AvailabilityFn<N, T>
   readonly step: () => NodeGenerator<N, T>
   readonly revision: number
   enqueue(view: ParentView<N, T>): void
@@ -232,22 +226,21 @@ export class Source<N, T> implements NodeSpec<Source<N, T>, N, T>
 
 export class Sink<N, T> implements NodeSpec<Sink<N, T>, N, T>
   constructor(body: (sink: Sink<N, T>) => NodeGenerator<N, T>,
-    options: Omit<NodeOptions<N, T>, "id"> & { readonly id: NodeId })
+    options: Omit<NodeOptions<N, T>, "id"> & { readonly id: NodeId; readonly schema: N })
   readonly id: NodeId
   readonly description?: string
   readonly state: Sink<N, T>
   readonly trigger: TriggerRule<N, T>
-  readonly is_available?: AvailabilityFn<N, T>
   readonly step: () => NodeGenerator<N, T>
   send(message: Message<N>): void
   drain(deliver: (message: Message<N>) => void): void
 ```
 
-`enqueue` detaches each native edge-addressed `ParentView` into FIFO delivery, preserving message keys/batch order, empty message keys and present values (including `undefined`), while borrowing opaque payload identities. Ignore views without queued messages or present values. `peek` never consumes; revision advances only on admission/consumption. On its first activation a scheduled Source consumes one delivery and calls synchronous `route`: no initial empty yield or scheduler-side routing. Without ingress it stays dormant; route exceptions fail the native node. Closed-input workflows must reject unexpected non-empty ingress, never discard it. Receiving routes validate/convert original parent edge IDs and emit only on explicitly wired child edges.
+`enqueue` detaches each native edge-addressed `ParentView` into FIFO delivery, preserving message keys/batch order, empty message keys and present values (including `undefined`), while borrowing opaque payload identities. Ignore views without queued messages or present values. `peek` never consumes; revision advances only on admission/consumption. A default scheduled Source consumes one delivery per activation; a credit-triggered Source primes without consuming and then consumes a satisfying credit batch before calling synchronous `route`. No scheduler-side routing. Without ingress it stays dormant; route exceptions fail the native node. Closed-input workflows must reject unexpected non-empty ingress, never discard it. Receiving routes validate/convert original parent edge IDs and emit only on explicitly wired child edges.
 
-A Sink delegates an ordinary generator, collecting yielded messages in an ordered outbox and internally yielding `[]`: those IDs address the enclosing graph. `send` uses the same outbox, permitting final messages and exact `return T` in one activation. `drain` removes items only after successful synchronous delivery; failure retains the remaining suffix, never replays successful prefixes. Trigger/availability must not readmit already-handled retained values; unwired sinks are dormant. Only the sink's native retained result is nested output. Failed/aborted child work never drains.
+A Sink delegates an ordinary generator, collecting yielded messages in an ordered outbox and forwarding its continuation flag with an empty batch: those IDs address the enclosing graph. `send` uses the same outbox, permitting final messages and exact `return T` in one activation. `drain` removes items only after successful synchronous delivery; failure retains the remaining suffix, never replays successful prefixes. Streaming sinks must wait on consumable inputs; unwired sinks are dormant. Only the sink's native retained result is nested output. Failed/aborted child work never drains.
 
-Before collection holds, construction validates Source/Sink instance types and distinct runtime string IDs (`""` allowed), then claims port identities for the graph lifetime. Reusing a claimed pair fails. Source inbound, sink outbound and source outbound value edges are rejected before effects. Successful/public graphs retain claims after close; failed unpublished map/spawn construction releases claims without closing caller-owned members. Source/Sink states own no coroutine/agent resources.
+Before collection holds, construction validates Source/Sink instance types and distinct runtime string IDs (`""` allowed), then claims port identities for the graph lifetime. Reusing a claimed pair fails. Non-credit source inbound, sink outbound and source outbound value edges are rejected before effects. Successful/public graphs retain claims after close; failed unpublished map/spawn construction releases claims without closing caller-owned members. Source/Sink states own no coroutine/agent resources.
 
 
 Verbatim signature excerpts (body and constant node classes; `ConstNodeOptions` and `ConstNodeSpec` are implementation-local supporting types):
@@ -276,10 +269,9 @@ type ConstNodeOptions<S, T> = Pick<
 
 type ConstNodeSpec<S, N, T> = Omit<
   NodeSpec<S, N, T>,
-  "step" | "is_available"
+  "step"
 > & {
   readonly step: () => NodeGenerator<N, T>;
-  readonly is_available?: AvailabilityFn<unknown, unknown>;
 };
 
 export class ConstFanout<S, N, T> implements ConstNodeSpec<S, N, T>
@@ -289,16 +281,16 @@ export class ConstFanout<S, N, T> implements ConstNodeSpec<S, N, T>
     options: ConstNodeOptions<S, T>,
   )
 
-export class ConstFanin<S, C, T> implements ConstNodeSpec<S, C | C[], T>
+export class ConstFanin<S, C extends TSchema, T> implements ConstNodeSpec<S, C | TArray<C>, T>
   constructor(
     inputs: readonly Edge<C, T>[],
-    output: Edge<C[], T>,
+    output: Edge<TArray<C>, T>,
     options: ConstNodeOptions<S, T>,
   )
 ```
 
 - `EmitOnce` emits its batch, returning `ret` next activation. `StepNode` never returns; use it for streaming sinks. Both are complete specs: `options` supplies all but `step` (`{ state, trigger, … }`).
-- A finite generator's trigger/availability must still admit the activation that performs its final `return`. Bound feedback loops by the task's actual stop condition.
+- `yield { resume: batch }` requests one continuation; a continuation-only turn consumes no edges. `return new graph.FinalMessages(batch)` publishes and finishes without a result. Bound feedback loops by the task's actual stop condition.
 - Constant classes are complete specs requiring `{ state, ret }` (`undefined` only if graph types allow). Construct with `new` once per node.
 - `ConstFanout` sends one shared payload reference on each distinct message edge, in `outputs` order, then completes. Zero outputs still complete.
 - `ConstFanin` accumulates all messages from every input across activations, emits one list in *input order*, not arrival order, then completes next activation. Array payloads stay one element; zero inputs emit one `[]`. Graph messages must admit `C` and `C[]`.
@@ -348,6 +340,7 @@ export type AgenticNode<N = Task, T = AssistantMessage> = (
     })
   | (StepLess<N, T> & {
       readonly state: JuncoAgent | MockAgent; // chat wires only
+      readonly prompt: string | ((inputs: ParentView<N,T>) => string);
       readonly step?: never;
       readonly policy: ToolCollection["policy"];
     })
@@ -371,16 +364,16 @@ export class Deterministic<N = Task, T = AssistantMessage> implements NodeGenera
   close(): Promise<void>
 ```
 
-- A registered agent (`workflow.addNode({ ...options, policy, state: agent })`) runs **one staged prompt per run** and returns when it settles; without a value self-edge a staged-prompt source with `trigger: TriggerRule.always()` runs once. Prompts belong to the agent: `JuncoAgent.create({ prompt })` (one-shot), or `agent.stagePrompt(prompt)` while idle before another admitted run (`busy` unless idle). A `prompt` callback `(inputs: graph.ParentView<Task, AssistantMessage>) => string` runs once synchronously with the delivered view when its staged prompt starts; throws fail the node unchanged. A value self-edge re-arms the returned node with the same agent/session; another staged prompt is still required. Never register `prompt`. The scheduler selects message reads; each delivered Task text/images payload is steered as a separate user message in delivered order, irrespective of `kind`, its text followed by a `Task:` JSON line (`taskId`, `spec`, `deps`, `history`); a task missing any of them throws `DataflowDefinitionError`. Other payloads are steered as `JSON.stringify({ id, payload })`. Admission puts the staged instruction before queued steering, and a paused native run sees delivered steering on its next request. There is no retained graph-agent inbox; values are never steered and remain available to staged callbacks. Input without a staged prompt does not start a run. Use `send({ id: edgeId, payload, handoff, task, spec })` (all required) for outgoing message edges: `task` names a task the node has received; with that task's `spec` the payload hands it off with `handoff` appended to its history, with another `spec` it becomes a new subtask recorded in the named task's `deps`. A node that received no task cannot send a task payload; non-task payloads pass unchanged. Use `info({})` for topology routes; value edges carry the latest returned result. Only `yield` and Marsh policy denial pause runs; native yields resume the same run, not another round. Settlement returns the node's `AssistantMessage`; failure throws the native error.
+- Register an idle agent as `{ ...options, policy, state: agent, prompt }`. Each firing starts the registered prompt with its delivered view on the same session. A continuation advances that run without restaging. Use a consumable assignment or completion FIFO for finite runs.
 - **Topology and instructions.** `info` reports live parents and children as `{ id, edgeId, kind }`, including parallel and self edges. Put artifact requirements and acceptance conditions in role/handoff prompts, and select handoffs by explicit edge ID plus kind `message`, not prose. Edge schemas and deterministic consumers validate data.
-- **Validated handoffs.** A consumer's prompt callback may validate `inputs.messages.get(edgeId)` / `inputs.values.get(edgeId)` and throw on invalid data. Render value reports into assignments, but return a constant instruction referring to following user messages for message inputs: copying their text would duplicate automatic steering. YAML agent prompt placeholders accept only inbound value edges; message placeholders fail at build. `params` substitution remains separate and unchanged. Wire/trigger upstream edges directly into the consumer. Never add a deterministic node solely to prepare a prompt message.
+- **Validated handoffs.** A consumer's prompt callback may validate `inputs.messages.get(edgeId)` / `inputs.values.get(edgeId)` and throw on invalid data. Render value reports into assignments, but return a constant instruction referring to following user messages for message inputs: copying their text would duplicate automatic steering. YAML placeholders accept inbound values and return FIFOs (the latter are interpolated instead of steered); ordinary message placeholders fail at build. `params` substitution remains separate and unchanged. Wire/trigger upstream edges directly into the consumer. Never add a deterministic node solely to prepare a prompt message.
 - Never separately iterate an agent the graph is driving.
 - `{ ...options, state: coroutine }` registers a `Deterministic` whose `body(signal)` uses the same generator protocol. Register each single-consumer coroutine once; honor `signal` in long loops.
 - **Nested boundaries.** Register `{ ...nodeOptions, state: childContext }`, never a bare graph. Parent priming makes no child decision. Each later activation enqueues edge-addressed batches and fresh retained values into `childContext.graph.source`, advances at most one child decision, then drains the sink only on success. Value freshness is edge ID plus `!==` identity. Only the sink's retained `T` is the nested result (present `undefined` included); quiescence without it fails. Completing sinks stage final parent messages before returning; intermediate drafts never escape. Validate/convert/route in port bodies, never policies.
 
 ### workflows and schedules.ralph
 
-`workflows.ralph` is YAML text exported from `junco`. It declares an ordinary agent `Ralph`, assignment ingress `$source~>Ralph`, value feedback `Ralph->Ralph` and final output `Ralph->$sink`. Construct it with `JuncoGraph.fromYaml`; its models come from a TypeScript ladder and round control from `schedules.ralph` availability hooks.
+`workflows.ralph` is YAML text exported from `junco`. It declares an ordinary agent `Ralph`, assignment ingress `$source~>Ralph`, controller `RalphControl` consuming the `ralph-complete` return FIFO and final output `Ralph->$sink`. Construct it with `JuncoGraph.fromYaml`; its models come from a TypeScript ladder and round control from the `schedules.ralph` code registry.
 
 ```ts
 import { graph, JuncoGraph, schedules, Task, workflows } from "junco";
@@ -405,9 +398,9 @@ try {
 }
 ```
 
-`fromYaml(source, { ...config, params })` (or `syntax.parse`) substitutes generic `{{ params.name }}` text before parsing YAML; quote placeholders because substitution is verbatim. Missing params fail; parsed objects reject params. Ralph itself has no model parameter: pass a complete ladder. `schedules.ralph({ rounds })` returns availability factories for Ralph and $sink; factories decline levels without Ralph->Ralph. Rounds must be positive safe integers (default two). Admit one or more image-free prompts on the assignment source route in one batch: each is one objective, in delivery order. The first prompt is the objectives (one verbatim, several as a numbered list); every later round restates only that list and asks for another depth-first attempt building on the previous answer, which stays in the session as the last assistant turn (it is never pasted into a user turn). Blank or non-normal intermediate drafts fail before the next round; the controller does not validate the final draft. Native yields continue the current round. Only the final round reaches the sink. `schedules.ralph({ until, rounds? })` instead stops at the first draft a synchronous `schedules.RalphPredicate` `(result, { objectives, round, label }) => boolean` accepts, called once per completed draft (validated first); no cap unless `rounds` is given, and a rejected draft at that cap fails without publishing.
+`fromYaml(source, { ...config, params })` (or `syntax.parse`) substitutes generic `{{ params.name }}` text before parsing YAML; quote placeholders because substitution is verbatim. Missing params fail; parsed objects reject params. Ralph itself has no model parameter: pass a complete ladder. `schedules.ralph({ rounds })` supplies `{ code }`. Rounds must be positive safe integers (default two). Deliver one ordered batch of image-free objective tasks; the controller sends revision/retry work on the same session and publishes acceptance only after its terminal decision.
 
-For nesting, pre-acquire the built context and register `{ ...nodeOptions, state: childContext }`, with no own spec-level policy; the native state is its graph. A direct assignment can be enqueued once on the child's `assignment` route before registration. For parent-edge ingress, build a document copy whose `graph.source.routes` maps that parent edge ID to `["$source~>Ralph"]`; do not mutate the parsed document or assume topology edges forward assignments automatically. If final output must be sent on a parent message edge, configure a nested Sink that sends the validated final prompt on that edge before returning the exact final message; the stock Ralph sink only returns its value. Close through the owning root recursively, then finish a retained shared TUI once after all users stop, guarded by `instanceof tracer.TuiTracer`; caller-supplied observers need no final call. Do not stage the Ralph worker yourself: its availability hooks stage each round.
+For nesting, pre-acquire the built context and register `{ ...nodeOptions, state: childContext }`, with no own spec-level policy; the native state is its graph. A direct assignment can be enqueued once on the child's `assignment` route before registration. For parent-edge ingress, preserve source credits with `{ ...inner.source, routes }` in a document copy whose `graph.source.routes` maps that parent edge ID to `["$source~>Ralph"]`; do not mutate the parsed document or assume topology edges forward assignments automatically. With YAML nesting, ordinary parent message edges are forwarded by the wrapper and return FIFOs receive its exact settlement once. Close through the owning root recursively, then finish a retained shared TUI once after all users stop, guarded by `instanceof tracer.TuiTracer`; caller-supplied observers need no final call. Do not stage the Ralph worker yourself: its availability hooks stage each round.
 
 ### graph.trigger
 
@@ -471,7 +464,7 @@ export const evaluateTrigger = <N, T>(
 - Entries carry edge message/result types; unannotated `allOf`/`anyOf` infer their payload union. Node payload types must include it: narrow rules fit wider-payload graphs; wrong-payload rules fail compilation.
 - Ordered `TriggerRule.anyOf`: ordinary trigger-driven reads take only the first satisfied entry. `TriggerRule.when(edge)` is single-edge conjunction; `TriggerRule.always()` empty conjunction (sources); `TriggerRule.never()` empty disjunction. Untyped empty rules fit every graph.
 - A rule naming an unwired inbound edge, or repeating an entry, is a definition error.
-- A trigger says *which* edges must carry something; `is_available` may further restrict or extend readiness (e.g. "publish once": `is_available: () => !published`).
+- A trigger admits new work. A graph-managed agent on a retained value or `always` can run indefinitely. Use a consumable edge when one delivery should start one run.
 
 ### agent
 
@@ -485,6 +478,7 @@ export type AgenticYieldReason = {
   readonly toolCallId: string;
   readonly toolName: string;
   readonly reason: string;
+  readonly waitForInput?: true;
 };
 
 export type AgenticStep =
@@ -605,7 +599,7 @@ The voluntary-suspension tool lives under **`tools`** (see below), not `agent`.
 - **MCP sources:** both factories accept `mcp.JuncoMcpTools` in `tools`, alone or mixed with concrete tools (`tools: [servers, lsp, ...collection.tools]`), connected from `cwd`. Agents get fresh MCP clients/server processes, closed with them; names are `mcp__<server>__<tool>`. Definitions are factory-only; `setTools` accepts concrete tools only.
 - **Never interchange model shapes:** `create` takes a model ID *string* in `model`; `fromResolved` takes a resolved `Model<Api>` in `model`; `setModel` takes `{ provider, modelId }` (`ModelIdentity`).
 - **Final text:** use `contentText(message.content)` from `@earendil-works/pi-ai`; forward reports only with `message.stopReason === "stop"` and nonblank trimmed text.
-- **Iterator boundaries:** preserve `yield` / `settled` / `failed`; rethrow failed `error`. `return()` or early `for await` break closes terminally. For round reuse, drive explicit `next()` or graph-register and `stagePrompt` each round.
+- **Iterator boundaries:** preserve `yield` / `settled` / `failed`; rethrow failed `error`. `return()` or early `for await` break closes terminally. For round reuse, drive explicit `next()` or register an idle agent and a reusable prompt on the graph.
 
 ### tools
 
@@ -683,7 +677,7 @@ export interface MarshPolicyDeniedError extends Error {
 }
 export function isMarshPolicyDenied(error: unknown): error is MarshPolicyDeniedError
 
-export type YieldToolDetails = { readonly reason: string };
+export type YieldToolDetails = { readonly reason: string; readonly waitForInput?: true };
 export type YieldTool = AgentTool<typeof yieldParameters, YieldToolDetails>;
 export const YieldTool: new () => YieldTool
 export function isYieldTool(tool: object): boolean
@@ -719,7 +713,7 @@ export class AssignedTaskTool implements AgentTool<typeof assignedParameters, Ta
 }
 ```
 
-(`yieldParameters` is implementation-local: `{ reason: string }`, non-empty, no extras. `isYieldTool` requires an object constructed by `new YieldTool()`, not a same-named tool or spread copy; the same branding applies to `TaskTool.is`/`AssignedTaskTool.is`, which also reject `Object.create` prototype forgeries. Implementation-local `launchSchema`: `{ context: string; tasks: { name?: string; task: string; model?: { provider: string; modelId: string }; tools?: string[] }[] }`; required shared `context` prefixes each task, at least one task, non-blank strings, no extras. `taskParameters`/`assignedParameters` form one model-facing object with optional launch and/or decision fields (`action`, `id`, `attempt`). Validate each call against the exact launch (free-form only), `{}` (assigned only) or decision shape (`attempt`: positive safe integer).)
+(`yieldParameters` is implementation-local: `{ reason: string, waitForInput?: true }`, non-empty reason, no extras. A successful authenticated explicit yield with this flag parks the same run until its declared input trigger fires; ordinary yields request another turn. `isYieldTool` requires an object constructed by `new YieldTool()`, not a same-named tool or spread copy; the same branding applies to `TaskTool.is`/`AssignedTaskTool.is`, which also reject `Object.create` prototype forgeries. Implementation-local `launchSchema`: `{ context: string; tasks: { name?: string; task: string; model?: { provider: string; modelId: string }; tools?: string[] }[] }`; required shared `context` prefixes each task, at least one task, non-blank strings, no extras. `taskParameters`/`assignedParameters` form one model-facing object with optional launch and/or decision fields (`action`, `id`, `attempt`). Validate each call against the exact launch (free-form only), `{}` (assigned only) or decision shape (`attempt`: positive safe integer).)
 
 (`UpstreamLspTool`, `UpstreamLspToolDetails`, `LspToolFields`, `TUnsafe` are implementation-local. `LspTool` is a factory object plus a tool type, not a constructible class.)
 
@@ -1015,26 +1009,33 @@ For a model-driven agency with an already-acquired `worker` and resolved `models
 ```ts
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import * as O from "fp-ts/lib/Option.js";
-import { graph, schedules, tools, tracer } from "junco";
+import { AssistantMessageSchema, TaskSchema, graph, schedules, tools, tracer } from "junco";
 
 const terminal = graph.NodeId.create("worker");
-const final = graph.Edge.value<graph.nodes.Task, AssistantMessage>("worker->$sink");
-const source = new graph.nodes.Source<graph.nodes.Task, AssistantMessage>(() => {
-  throw new graph.DataflowDefinitionError("Worker workflow does not accept external input");
-}, { id: graph.NodeId.create("$source") });
-const sink = new graph.nodes.Sink<graph.nodes.Task, AssistantMessage>(async function* (): graph.NodeGenerator<graph.nodes.Task, AssistantMessage> {
+const final = graph.Edge.value("worker->$sink", AssistantMessageSchema);
+const job = graph.Edge.message("assignment", TaskSchema);
+const source = new graph.nodes.Source<typeof TaskSchema, AssistantMessage>((view) => {
+  if ([...view.messages.keys()].some(id => id !== job.id) || [...view.values.keys()].length)
+    throw new Error("Unexpected source route");
+  const tasks = view.messages.get(job.id);
+  if (!tasks?.length) throw new Error("Missing assignment");
+  return tasks.map(task => graph.Message.create(job, task));
+}, { id: graph.NodeId.create("$source"), schema: TaskSchema });
+const sink = new graph.nodes.Sink<typeof TaskSchema, AssistantMessage>(async function* (): graph.NodeGenerator<typeof TaskSchema, AssistantMessage> {
   yield [];
   const result = execution.graph.result(terminal);
   if (!O.isSome(result)) throw new Error("Worker did not produce a result");
   return result.value;
-}, { id: graph.NodeId.create("$sink"), trigger: graph.trigger.TriggerRule.when(final) });
+}, { id: graph.NodeId.create("$sink"), schema: TaskSchema, trigger: graph.trigger.TriggerRule.when(final) });
 const observer = tracer.TuiTracer.shared();
 const execution = schedules.context({
   graph: new graph.JuncoGraph(source, sink, graph.Width.create(1), graph.UNBOUNDED, observer, tools.LockPolicy),
   scheduler: schedules.pi({ models, model, systemPrompt: "Coordinate the work.", prompt: "Complete the assignment." }),
 });
 execution.graph.addNode({ id: terminal, state: worker, policy: tools.LockPolicy,
-  trigger: graph.trigger.TriggerRule.always() });
+  prompt: "Complete the assignment in the following message.", trigger: graph.trigger.TriggerRule.when(job) });
+execution.graph.addEdge(source.id, terminal, job);
+source.enqueue({ messages: new Map([[job.id, [graph.nodes.Task.create({ kind: "prompt", text: assignment, spec: assignment })]]]), values: new Map() });
 execution.graph.addEdge(terminal, sink.id, final);
 try { await execution.run(); }
 finally {
@@ -1043,7 +1044,7 @@ finally {
 }
 ```
 
-Use `schedules.parallel()` in the same external pair for deterministic select-all; `schedules.roundRobin()` with thread bound 1 for one-at-a-time fairness. Never pass policies to graph constructors. Manually orchestrated persistent-agent rounds may use fresh graph/context/ports and reuse members; close round graphs only after members' final owning use. The Ralph workflow instead re-arms one agent in the same graph/session through its value self-edge and `schedules.ralph` hooks. Compact only the requested settled round graph; close resources and finish a retained shared TUI once at orchestration end, guarded by `instanceof tracer.TuiTracer`. Scheduling needs no session acquisition/close.
+Use `schedules.parallel()` in the same external pair for deterministic select-all; `schedules.roundRobin()` with thread bound 1 for one-at-a-time fairness. Never pass policies to graph constructors. Manually orchestrated persistent-agent rounds may use fresh graph/context/ports and reuse members; close round graphs only after members' final owning use. The Ralph workflow instead re-arms one agent in the same graph/session through the `schedules.ralph` controller. Compact only the requested settled round graph; close resources and finish a retained shared TUI once at orchestration end, guarded by `instanceof tracer.TuiTracer`. Scheduling needs no session acquisition/close.
 
 ### Resource measurements and schedules
 
@@ -1114,7 +1115,7 @@ export type DataflowRunTrace<N, T> = {
 };
 
 export type DataflowStepTrace<N, T> = {
-  end(step: IteratorResult<readonly Message<N>[], T>): void | Promise<void>;
+  end(step: IteratorResult<readonly Message<N>[], T | FinalMessages<N>>): void | Promise<void>;
   fail(error: unknown): void | Promise<void>;
 };
 
@@ -1193,9 +1194,9 @@ close(context: Context): Promise<void>;
 
 **Feedback recurrence.** Seed with `new EmitOnce(…)`, `TriggerRule.always()`; receive seed/feedback with `TriggerRule.anyOf(TriggerEntry.on(seed), TriggerEntry.on(loop))`; wire `addEdge(id, id, loop)`. The task's finite count ends with `return`: emitting the last value still sends feedback because emit/return require separate activations; the next activation checks the count and returns. Assert the result in the `run()` map. A `new StepNode(…)` sink drains and quiesces without returning. Read the pair with `graph.from`; validate length/types, not non-null assertions. Ten Fibonacci values from `0, 1`: `[0,1,1,2,3,5,8,13,21,34]`.
 
-**Research/review committee.** Persist agents/sessions; each round uses fresh Source/Sink ports and a passive graph with `schedules.parallel()`. Reject source ingress; return final work through the sink. Value edges feed reports to validating staged assignment callbacks. Keep artifact requirements in prompts. For partial handoff, find the explicit edge ID with kind `message` in `info`, `send` by that ID, then `yield`; consume with `anyOf(partial,final)`. A typed verdict tool records `{ approved,feedback }`: take-and-clear once per round; missing verdict fails, prose is not approval. Preserve the requested stop rule without a round cap. Close persistent members after their last owning use, not per-round graphs; finish a retained shared TUI once afterward, if selected. Evaluation already joins tracer delivery.
+**Research/review committee.** Persist agents/sessions; each round uses fresh Source/Sink ports and a passive graph with `schedules.parallel()`. Reject source ingress; return final work through the sink. Return-message edges deliver consumable reports to registered prompt callbacks. Keep artifact requirements in prompts. For partial handoff, find the explicit edge ID with kind `message` in `info`, `send` by that ID, then `yield`; consume with `anyOf(partial,final)`. A typed verdict tool records `{ approved,feedback }`: take-and-clear once per round; missing verdict fails, prose is not approval. Preserve the requested stop rule without a round cap. Close persistent members after their last owning use, not per-round graphs; finish a retained shared TUI once afterward, if selected. Evaluation already joins tracer delivery.
 
-**Mixed nested work.** Emit one `Task.create({ kind: "prompt", text, spec })` to an agent and nested wrapper; register `{ ...nodeOptions, state: childContext }` (native state is the actual graph). The child's scheduled Source validates/routes edge-addressed ingress; its Sink waits on final work, stages only final parent-edge messages and returns the exact result, never intermediate drafts. Reviewer uses `TriggerRule.allOf` on required finals and a validating staged assignment callback. Use fresh positional ports per graph and reject outer source ingress. Close the root recursively, then finish a retained TUI if selected; evaluation already joins delivery.
+**Mixed nested work.** Emit one `Task.create({ kind: "prompt", text, spec })` to an agent and nested wrapper; register `{ ...nodeOptions, state: childContext }` (native state is the actual graph). The child's scheduled Source validates/routes edge-addressed ingress; its Sink waits on final work, stages only final parent-edge messages and returns the exact result, never intermediate drafts. Reviewer uses `TriggerRule.allOf` on consumable return edges for the required finals and a registered prompt. Use fresh positional ports per graph and reject outer source ingress. Close the root recursively, then finish a retained TUI if selected; evaluation already joins delivery.
 
 ## Executable example
 
@@ -1203,7 +1204,7 @@ Valid quiescence with a non-returning sink, ordered fan-in, and optional tracing
 
 ```ts
 import { graph, schedules, tracer } from "junco";
-import { context } from "junco-scheduler";
+import { Type } from "typebox";
 
 /**
  * Collects two constants through an ordered fan-in and returns the collected list.
@@ -1217,15 +1218,17 @@ import { context } from "junco-scheduler";
  * @returns The collected numbers, `[9, 7]`.
  */
 async function collectPair(observer?: tracer.DataflowTracer): Promise<number[]> {
-  const workflow = new graph.DataflowGraph<void, number | number[], string, never>(
+  const number = Type.Number(), list = Type.Array(number);
+  type Wire = typeof number | typeof list;
+  const workflow = new graph.DataflowGraph<undefined, Wire, string, never>(
     graph.Width.create(1),
     graph.UNBOUNDED,
     observer,
   );
-  const execution = context({ graph: workflow, scheduler: schedules.parallel() });
-  const leftEdge = graph.Edge.message<number, string>("left");
-  const rightEdge = graph.Edge.message<number, string>("right");
-  const collectedEdge = graph.Edge.message<number[], string>("collected");
+  const execution = schedules.context({ graph: workflow, scheduler: schedules.parallel() });
+  const leftEdge = graph.Edge.message<typeof number, string>("left", number);
+  const rightEdge = graph.Edge.message<typeof number, string>("right", number);
+  const collectedEdge = graph.Edge.message<typeof list, string>("collected", list);
   const captured: number[] = [];
 
   /** Sources: each publishes one constant once, then returns its name. */
@@ -1239,7 +1242,7 @@ async function collectPair(observer?: tracer.DataflowTracer): Promise<number[]> 
 
   /** Sink: streams every delivered list into `captured`; never returns. */
   const sink = workflow.addNode(
-    new graph.nodes.StepNode<void, number | number[], string>(
+    new graph.nodes.StepNode<undefined, Wire, string>(
       (_state, view) => {
         for (const payload of graph.from(view, collectedEdge)) {
           if (!Array.isArray(payload)) throw new Error("Collector emitted a non-array payload");

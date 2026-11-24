@@ -18,8 +18,12 @@ export const fullySpecified: NodeOptions<Num, string> = {
   id: NodeId.create("fully-specified"),
   description: "",
   trigger: TriggerRule.always(),
-  is_available: (view, triggered) =>
-    triggered && view.messages.get(EdgeId.create("in"))?.[0] !== 0,
+};
+
+export const obsoleteGate: NodeOptions<Num, string> = {
+  trigger: TriggerRule.always(),
+  // @ts-expect-error admission is declared by the trigger, not a callback.
+  is_available: () => true,
 };
 
 export const triggerOnlySpec: NodeSpec<null, Num, string> = {

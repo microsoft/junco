@@ -19,7 +19,7 @@ import {
   Edge,
   gigabytes,
   NodeId,
-  type NodeOptions,
+  Message,
   TriggerEntry,
   TriggerRule,
   tokens,
@@ -29,7 +29,8 @@ import {
 import {
   AssistantMessageSchema,
   JuncoAgent,
-  type TaskSchema,
+  Task,
+  TaskSchema,
 } from "junco-agent";
 import { LockPolicy, TaskTool } from "junco-tools";
 import { Type } from "typebox";
@@ -50,19 +51,19 @@ type Policy = schedules.Scheduler<
   AssistantMessage,
   schedules.AgencyNodeMetadata
 >;
-const member = (
-  name: string,
-  agent: MockAgent,
-  options: Partial<
-    Pick<NodeOptions<typeof TaskSchema, AssistantMessage>, "is_available">
-  > = {},
-) => ({
-  id: NodeId.create(name),
-  state: agent,
-  policy: LockPolicy,
-  trigger: TriggerRule.always<typeof TaskSchema, AssistantMessage>(),
-  ...options,
-});
+function addMember(graph: JuncoGraph, name: string, agent: MockAgent | JuncoAgent) {
+  const start = Edge.message(`${name}:start`, TaskSchema);
+  const id = graph.addNode({
+    id: NodeId.create(name),
+    state: agent,
+    prompt: "Complete the assigned work.",
+    policy: LockPolicy,
+    trigger: TriggerRule.when(start),
+  });
+  graph.addEdge(graph.source.id, id, start);
+  graph.emit(graph.source.id, Message.create(start, Task.create({ kind: "prompt", text: "go", spec: "" })));
+  return id;
+}
 function recorded(inner: Policy): {
   readonly waves: string[][];
   readonly scheduler: Policy;
@@ -94,12 +95,7 @@ test("memory admission packs calibrated floors and isolates unmeasured mock memb
     const { ports, graph } = agencyGraph();
     try {
       const members = names.map((name) =>
-        graph.addNode(
-          member(
-            name,
-            new MockAgent({ prompt: "go", runs: [yieldsThen(0, name)] }),
-          ),
-        ),
+        addMember(graph, name, new MockAgent({ runs: [yieldsThen(0, name)] })),
       );
       ports.connect(graph, members[3]!);
       const { waves, scheduler } = recorded(
@@ -151,7 +147,6 @@ test("a scheduler's token estimates pick the cheapest racer; losers never start"
   const agents = names.map(
     (name) =>
       new MockAgent({
-        prompt: "go",
         runs: [yieldsThen(0, name)],
       }),
   );
@@ -164,17 +159,8 @@ test("a scheduler's token estimates pick the cheapest racer; losers never start"
     new DummyTracer(),
     LockPolicy,
   );
-  let winner: string | undefined;
   try {
-    const racers = names.map((name, i) => {
-      const agent = agents[i]!;
-      return graph.addNode(
-        member(name, agent, {
-          is_available: (_view, triggered) =>
-            triggered && (winner === undefined || agent.status !== "ready"),
-        }),
-      );
-    });
+    const racers = names.map((name, i) => addMember(graph, name, agents[i]!));
     const edges = names.map((name) =>
       Edge.value(`${name}->join`, AssistantMessageSchema),
     );
@@ -183,10 +169,7 @@ test("a scheduler's token estimates pick the cheapest racer; losers never start"
         const view = yield [];
         for (const edge of edges) {
           const value = view.values.get(edge.id);
-          if (value !== undefined) {
-            winner = textOf(value);
-            return value;
-          }
+          if (value !== undefined) return value;
         }
         throw new Error("join fired without a value");
       },
@@ -214,7 +197,14 @@ test("a scheduler's token estimates pick the cheapest racer; losers never start"
         width: () => 1,
       }),
     );
-    const results = await schedules.context({ graph, scheduler }).run();
+    const race = schedules.context({ graph, scheduler });
+    let results = graph.results();
+    for (let steps = 0; ; steps++) {
+      const winner = results.get(joinId);
+      if (winner && results.has(NodeId.create(textOf(winner)))) break;
+      assert.ok(steps < 16, "race did not settle");
+      results = await race.step();
+    }
     assert.deepEqual(memberWaves(waves, [...names, "join"]), [
       ["R2"],
       ["R2"],
@@ -242,7 +232,6 @@ test("agency ladders switch model and thinking before work, only when strength c
   };
   for (const configured of [undefined, ladder]) {
     const agent = new MockAgent({
-      prompt: "go",
       runs: [yieldsThen(1, "done")],
     });
     const ports = terminalPorts();
@@ -255,7 +244,7 @@ test("agency ladders switch model and thinking before work, only when strength c
       LockPolicy,
     );
     try {
-      const id = graph.addNode(member("worker", agent));
+      const id = addMember(graph, "worker", agent);
       ports.connect(graph, id);
       const scheduler: Policy = schedules.strength(
         (snapshot) => (snapshot.history.length === 0 ? "smol" : "high"),
@@ -322,7 +311,7 @@ function providers(scripts: Record<string, readonly FauxResponseStep[]>) {
   return { models, faux };
 }
 
-/** A real agent on `provider`'s model, staged with a prompt. */
+/** A real agent on `provider`'s model. The registration supplies its prompt. */
 async function placed(
   models: ReturnType<typeof createModels>,
   provider: string,
@@ -336,7 +325,6 @@ async function placed(
     systemPrompt: "sys",
     tools,
     tool_block: NATIVE_TOOL_BLOCK,
-    prompt: "go",
   });
   return { agent, session };
 }
@@ -353,13 +341,6 @@ function agencyGraph() {
   );
   return { ports, graph };
 }
-
-const memberOf = (name: string, agent: JuncoAgent) => ({
-  id: NodeId.create(name),
-  trigger: TriggerRule.always<typeof TaskSchema, AssistantMessage>(),
-  policy: LockPolicy,
-  state: agent,
-});
 
 async function usageFailure(work: Promise<unknown>) {
   const error = await work.then(
@@ -411,7 +392,7 @@ test("an outer evaluation budget spans native task subagents and its exhaustion 
   caller.setSubagentObserver({ acquired: () => acquired++ });
   const { ports, graph } = agencyGraph();
   try {
-    ports.connect(graph, graph.addNode(memberOf("caller", caller)));
+    ports.connect(graph, addMember(graph, "caller", caller));
     const error = await usageFailure(
       schedules
         .context({
@@ -455,7 +436,7 @@ test("nested activation and evaluation limits each count every agent call exactl
     for (const [index, name] of ["a", "b", "c"].entries()) {
       const { agent } = await placed(models, name, [mocks[index]!.tool]);
       agents.push(agent);
-      const id = graph.addNode(memberOf(name, agent));
+      const id = addMember(graph, name, agent);
       if (name === "c") ports.connect(graph, id);
     }
     const error = await usageFailure(
@@ -499,7 +480,7 @@ test("an evaluation tool cap denies the call past it before its body; an adequat
     const { agent } = await placed(models, "solo", [mock.tool]);
     const { ports, graph } = agencyGraph();
     try {
-      const id = graph.addNode(memberOf("solo", agent));
+      const id = addMember(graph, "solo", agent);
       ports.connect(graph, id);
       const run = schedules
         .context({
@@ -557,7 +538,7 @@ test("admitted parallel requests finish and count; no peer starts new work after
         await dispatched.promise;
         return undefined;
       });
-      const id = graph.addNode(memberOf(name, member.agent));
+      const id = addMember(graph, name, member.agent);
       if (name === "b") ports.connect(graph, id);
     }
     const error = await usageFailure(

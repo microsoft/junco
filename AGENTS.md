@@ -50,7 +50,7 @@ Reuse these instead of hand-writing the topology. Source routes are the keys of 
 
 | Export | Source | Summary | Routes / output | Drive with |
 | --- | --- | --- | --- | --- |
-| `workflows.ralph` | `src/std/workflows/ralph.yml` | Ralph: one agent revising its complete answer in a `Ralph -> Ralph` loop; drive with `schedules.ralph`. | `assignment` → `$source~>Ralph`; result `Ralph->$sink` | `...schedules.ralph({ rounds })` or `({ until, rounds? })` |
+| `workflows.ralph` | `src/std/workflows/ralph.yml` | Ralph revises its answer in the same session; `RalphControl` decides each delivered settlement. | `assignment` → `$source~>Ralph`; result `Ralph->$sink` | `...schedules.ralph({ rounds })` or `({ until, rounds? })` |
 | `workflows.allFanIn` | `src/std/workflows/all-fan-in.yml` | One selection of the best candidate once every candidate has returned. | `candidates` → `$source~>AllFanIn`; `sink.returns: AllFanIn` | any scheduler; selection criteria in the agent's `system` |
 | `workflows.anyFanIn` | `src/std/workflows/any-fan-in.yml` | One streamed selection per newly delivered candidate batch; drive with `schedules.anyFanIn`. | `candidates` → `$source~>AnyFanIn`; `sink.stream: true`, output `AnyFanInPublish~>$sink` | `...schedules.anyFanIn()` |
 | `workflows.memoryRalphLoop` | `src/std/workflows/memory.ts` (JSON text) | Ralph revisions persisted before decisions, with fresh recall before each round. | `assignment` → `$source~>Memory`; `sink.returns: Ralph` after `Memory~>$sink` flushes | `...schedules.memory({ memory, ralph? })` |
@@ -60,7 +60,7 @@ Reuse these instead of hand-writing the topology. Source routes are the keys of 
 
 ### `schedules` — policies, combinators and workflow controllers
 
-`config.scheduler: (label, graphPath) => policy`; controllers are spread into the `fromYaml` config (`{ available }` / `{ available, code }`).
+`config.scheduler: (label, graphPath) => policy`. Workflow controllers supply `{ code }` to `fromYaml`; merge their `code` maps when composing workflows. Preserve the nested `source.trigger` when rekeying `source.routes`.
 `schedules.ralph({ retries })` and `schedules.memory({ ralph: { retries } })` re-run provider-error results (`stopReason: "error"`) in the same round, at most `retries` times per graph level; memory Ralph neither saves nor decides an error result. The default is zero; other invalid results and exhausted retries retain their existing failure behavior.
 
 
@@ -89,8 +89,8 @@ Reuse these instead of hand-writing the topology. Source routes are the keys of 
 | `schedules.uniformLadder` | const | `src/node-policy.ts` | The same rung at every strength. |
 | `schedules.ModelLadder` | class | `src/node-policy.ts` | Every available model (`models`) and the five rungs this ladder allows (`rungs`), checked against the catalog. |
 | `schedules.validateLadder` | fn | `src/node-policy.ts` | Reject a ladder unless all five rungs name a `"provider/model-id"` model; throws `DataflowDefinitionError`. |
-| `schedules.ralph` | fn | `src/std/schedules/ralph.ts` | Availability hooks for the original, non-memory Ralph workflow. |
-| `schedules.anyFanIn` | fn | `src/std/schedules/any-fan-in.ts` | Hooks and code for `JuncoGraph.fromYaml(workflows.anyFanIn, { ...options, ...anyFanIn() })`. |
+| `schedules.ralph` | fn | `src/std/schedules/ralph.ts` | Code registration for the non-memory Ralph round controller. |
+| `schedules.anyFanIn` | fn | `src/std/schedules/any-fan-in.ts` | Code registrations that validate each candidate batch and publish its selection before releasing ingress. |
 | `schedules.memory` | fn | `src/std/schedules/memory.ts` | Borrowed-memory controllers for all three standard memory workflow topologies. |
 | `schedules.runOptimizer` | fn | `src/std/schedules/optimizer.ts` | Optimize the prepared target `request` names until every requested stop predicate holds on a confirmed incumbent, a caller budget or cancellation stops it, or a prerequisite blocks it. |
 | `schedules.Scheduler` | type | `packages/junco-scheduler/src/scheduler.ts` | A policy: from a `Snapshot` of the graph (and an optional cancellation signal) to one `Decision`. |
@@ -140,10 +140,11 @@ Compose `errors.record(errors.retry({ afterMs: 100, times: 2 }, errors.escalate(
 | --- | --- | --- | --- |
 | `graph.JuncoGraph` | class | `src/junco-graph.ts` | A passive native work graph owning its agents, child graphs and coroutines. `fromYaml(source, config)` builds the workflow a YAML document and its config define. |
 | `graph.DataflowGraph` | class | `packages/dataflow-engine/src/dataflow-graph.ts` | Native work topology and concrete lanes-by-turns executor; policy lives outside the graph. |
-| `graph.Edge` | const | `packages/dataflow-engine/src/edges.ts` | Construction of `Edge`s (`Edge.message`, `Edge.value`). |
+| `graph.Edge` | const | `packages/dataflow-engine/src/edges.ts` | Constructs message FIFOs (`message`), retained value cells (`value`) and FIFOs fed by successful returns (`returned`). |
 | `graph.EdgeId` | const | `packages/dataflow-engine/src/identity.ts` | Construction of `EdgeId`s. |
 | `graph.NodeId` | const | `packages/dataflow-engine/src/identity.ts` | Construction of `NodeId`s. |
 | `graph.Message` | const | `packages/dataflow-engine/src/node.ts` | Construction of `Message`s. |
+| `graph.FinalMessages` | class | `packages/dataflow-engine/src/node.ts` | Return a final message batch and end without recording a result. |
 | `graph.Queue` | const | `packages/dataflow-engine/src/queue.ts` | Construction of `Queue`s. |
 | `graph.Width` | const | `packages/dataflow-engine/src/width.ts` | Construction of `Width`s. |
 | `graph.UNBOUNDED` | const | `packages/dataflow-engine/src/width.ts` | `Infinity` as a `Width`: unbounded turns per lane, or unbounded lanes per plan. |
@@ -154,12 +155,12 @@ Compose `errors.record(errors.retry({ afterMs: 100, times: 2 }, errors.escalate(
 | `graph.UsageLimitError` | class | `packages/dataflow-engine/src/usage-limits.ts` | A token or tool budget was hit; `details` and `toJSON()` carry the limit and the amount that hit it. |
 | `graph.DataflowDefinitionError` | class | `packages/dataflow-engine/src/errors.ts` | A graph wiring / contract violation detected before or between node activations. |
 | `graph.DataflowNodeError` | class | `packages/dataflow-engine/src/errors.ts` | A hard error raised by a node body and re-raised by the runtime. |
-| `graph.AvailabilityFn` | type | `packages/dataflow-engine/src/node.ts` | Availability hook, consulted only for a node that is not `done`, after the runtime has evaluated its trigger. |
 | `graph.ErrorFn` | type | `packages/dataflow-engine/src/node.ts` | Failure hook of a node whose body threw. |
 | `graph.StepFn` | type | `packages/dataflow-engine/src/node.ts` | A node body. |
-| `graph.NodeGenerator` | type | `packages/dataflow-engine/src/node.ts` | The generator a node body returns: yields message batches, is resumed with views, returns `T`. |
+| `graph.NodeGenerator` | type | `packages/dataflow-engine/src/node.ts` | A node body yields `NodeYield`, receives a `ParentView` and returns a result or `FinalMessages`. |
+| `graph.NodeYield` | type | `packages/dataflow-engine/src/node.ts` | A message batch waits for the next trigger; `{ resume: batch }` requests a continuation after publication. |
 | `graph.Node` | type | `packages/dataflow-engine/src/node.ts` | A registered graph node: its programmable state, lifecycle, trigger, body and live generator. |
-| `graph.NodeOptions` | type | `packages/dataflow-engine/src/node.ts` | Registration options common to every node kind: identity, optional prose, firing rule and availability. |
+| `graph.NodeOptions` | type | `packages/dataflow-engine/src/node.ts` | Registration options common to every node kind: optional identity and description, and a required trigger. |
 | `graph.NodeSpec` | type | `packages/dataflow-engine/src/node.ts` | What a caller passes to `DataflowGraph.addNode`: common options plus state, body and failure hook. |
 | `graph.NodeStatus` | type | `packages/dataflow-engine/src/node.ts` | Lifecycle of a node: never activated, mid-generator, or returned (a value self-edge delivery re-arms it to `ready`). |
 | `graph.ParentView` | type | `packages/dataflow-engine/src/node.ts` | What the runtime hands a running node on each input-delivery turn. |
@@ -186,10 +187,10 @@ Compose `errors.record(errors.retry({ afterMs: 100, times: 2 }, errors.escalate(
 | `graph.nodes.StepNode` | class | `packages/dataflow-engine/src/builders.ts` | A complete node spec whose body never terminates: after its priming yield, `fn` maps the registered node's current state plus each delivered view to the messages emitted that turn. |
 | `graph.nodes.ConstFanout` | class | `packages/dataflow-engine/src/stdlib.ts` | A complete source spec that sends one constant `payload` once on every edge in `outputs`, then finishes with `options.ret`. |
 | `graph.nodes.ConstFanin` | class | `packages/dataflow-engine/src/stdlib.ts` | A complete collector spec that waits until every edge in `inputs` has delivered its constant, sends them as ONE list message on `output`, then finishes with `options.ret`. |
-| `graph.nodes.Source` | class | `packages/dataflow-engine/src/stdlib.ts` | Externally queued native ingress; one detached delivery per selected activation. |
-| `graph.nodes.Sink` | class | `packages/dataflow-engine/src/stdlib.ts` | Native egress: yielded and explicitly sent messages await acknowledged external delivery. |
+| `graph.nodes.Source` | class | `packages/dataflow-engine/src/stdlib.ts` | Routes pending external deliveries FIFO. An optional trigger can require inbound message credits; priming then consumes neither credit nor delivery. |
+| `graph.nodes.Sink` | class | `packages/dataflow-engine/src/stdlib.ts` | Stages yielded, terminal and explicitly sent messages for acknowledged external delivery. |
 | `graph.nodes.Agentic` | type | `src/agentic.ts` | Native work states; policies and execution contexts are never graph members. |
-| `graph.nodes.AgenticNode` | type | `src/agentic.ts` | Complete bodies require their authorization policy. |
+| `graph.nodes.AgenticNode` | type | `src/agentic.ts` | A graph-managed prompt agent registers its reusable prompt; complete bodies require their authorization policy. |
 | `graph.nodes.Task` | type, const | `packages/junco-agent/src/agentic.ts` | The task payload of agent graphs: a description, a readonly completion spec, subtask deps and the history of its holders. All four fields are required; `Task.create({ kind, text, spec })` mints its `taskId` UID with empty `deps` and `history`. |
 | `graph.nodes.CompactionPolicy` | type | `src/agentic.ts` | Which direct prompt-agent node states `JuncoGraph.compact` compacts. |
 

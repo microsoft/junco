@@ -5,11 +5,11 @@ description: 'Generate runnable Junco workflows as paired `name.yml` topology an
 
 # Junco graph creation
 
-One request → one runnable workflow: `<name>.yml` (declarative graph) + `<name>.ts` (`JuncoGraph.fromYaml` → run → close → finish an interactive TUI). Export deterministic code-node definitions from that same TypeScript module and pass them in `config.code`; do not create separate code modules. TypeScript also supplies the model ladder, scheduler, custom tools, round loops and host-state availability. Hand-wired `DataflowGraph`/`JuncoGraph` programs are an escape hatch, not the default: see **Escape hatches**.
+One request → one runnable workflow: `<name>.yml` (declarative graph) + `<name>.ts` (`JuncoGraph.fromYaml` → run → close → finish an interactive TUI). Export deterministic code-node definitions from that same TypeScript module and pass them in `config.code`; do not create separate code modules. TypeScript also supplies the model ladder, scheduler, custom tools, executed controllers and round loops. Hand-wired `DataflowGraph`/`JuncoGraph` programs are an escape hatch, not the default: see **Escape hatches**.
 
 ## Hard constraints
 
-- Import only public packages: `junco`, `@earendil-works/pi-*`. Never machine, installed-skill, checkout or package-source paths.
+- Import only public packages: `junco`, `typebox`, `@earendil-works/pi-*`. Never machine, installed-skill, checkout or package-source paths.
 - Preserve the task's inputs, output, roles, dependencies, stop condition, tool permissions and tracing. Do not invent retries, extra agents, iteration caps, reviewers, resource allowances or cost ordering.
 - Deterministic computation → `kind: emit` or `kind: code`; agents only for judgment/language work. No wrapper class hierarchies, CLI scaffolding or runtime model-routing/fallback frameworks.
 - Consult the [standard library index in junco's root AGENTS.md](../../AGENTS.md#standard-library-index) before designing topology or writing code. Compose its reusable `workflows`, `schedules`, `graph.nodes`, `trigger` and `tracer` exports instead of hand-writing equivalents; read the definition's JSDoc for the full contract.
@@ -33,6 +33,7 @@ Graph:
   threads?: int >= 1 | unbounded       # default unbounded
   source?:
     description?: string
+    trigger?: <Trigger>                # delivery also requires pending input
     routes?:
       <parent edge id>: [<edge id from $source>, ...]
   sink?:
@@ -43,8 +44,10 @@ Graph:
     <node id>: <Node>
   edges?:
     - from: <node id | $source>
-      to: <node id | $sink>
+      to: <node id | $sink | $source>  # only declared ordinary credits may target $source
       kind?: value | message
+      schema: <JSON Schema>
+      on?: return                      # message only: runtime publishes each successful result
       id?: string
       # kind default value; id default "<from>-><to>" for value, "<from>~><to>" for message
 
@@ -53,7 +56,7 @@ Node: common fields description?, trigger?; discriminated by kind (default agent
     system?: string
     tools?: [string]                                   # ADDITIONAL collection or config.tools entries by name
     skills?: [<skill name>]
-    prompt?: string                                    # staged instruction; {{<inbound value edge id>}} placeholders
+    prompt: nonblank string                            # reusable instruction; value or return-message placeholders
   kind: emit                        # publishes one task {kind: prompt, text, spec, taskId, deps: [], history: []} on every outbound message edge, once
     text: string                    # no inbound edges; no outbound value edges; >= 1 outbound message edge
     spec: string                    # required: when the task counts as complete
@@ -64,16 +67,16 @@ Node: common fields description?, trigger?; discriminated by kind (default agent
 
 `Trigger` is `always`, `never`, a scalar inbound edge ID, or a flat `{ all: [...] }` / `{ any: [...] }` mapping (no nesting, no `not`). Omitted trigger: `always` for a node without inbound edges, otherwise `all` inbound edges in declaration order.
 
-`JuncoGraphValidator` checks whether each node and `$sink` can start under those triggers, at every graph level. For example, if a loop head has a `seed` edge from `$source` and a `feedback` edge from the loop body, its default `all` waits for feedback that cannot exist yet. Use `trigger: { any: [seed, feedback] }` to let the seed start the loop. Explicit `never` and `{ any: [] }` may stay parked, but cannot seed another node; `emit` always starts. This check assumes reachable producers can publish on their edges. It does not run availability hooks or prove runtime progress.
+`JuncoGraphValidator` checks whether each node and `$sink` can start under those triggers, at every graph level. For example, if a loop head has a `seed` edge from `$source` and a `feedback` edge from the loop body, its default `all` waits for feedback that cannot exist yet. Use `trigger: { any: [seed, feedback] }` to let the seed start the loop. Explicit `never` and `{ any: [] }` may stay parked, but cannot seed another node. Emit honors its trigger. This check assumes reachable producers can publish on their edges. It does not prove runtime progress.
 
 Semantics that decide whether a document runs:
 
-- **Edges.** `value` edges (default, id `A->B`) retain the source's latest returned `AssistantMessage`; `message` edges (id `A~>B`) queue task payloads `{ kind: "prompt", text, taskId, spec, deps, history }` (all required): build them with `graph.nodes.Task.create({ kind: "prompt", text, spec })` (it mints `taskId` with empty `deps`/`history`; an agent node rejects an incomplete task). An agent's `send` takes `task` (a received task id), `spec` and `handoff`: the same spec hands that task off with `handoff` appended to its history; a different spec creates a subtask recorded in that task's `deps`; a node that received no task cannot send one. Use message edges for assignments and partial handoffs, value edges for finished reports. Edges into `$source`, out of `$sink`, and value edges out of `$source` are rejected. Quote edge IDs containing `>` where YAML would misparse (`"Goals~>Direct"`).
-- **Agents run once per staged prompt.** A YAML `prompt` is staged once at build. `{{edge}}` placeholders render only inbound value edges with `finalText(value)` (requires `stopReason === "stop"` and non-empty text, else the node fails); message-edge placeholders fail at build. Stage an instruction referring to the user message(s) following this prompt, not a copy of message content. Without a `prompt`, nothing starts the agent — then code (a `kind: code` node, `createAgent`, or `schedules.ralph`) must stage it. A value self-edge re-arms a returned agent but still needs another staged prompt, so agent loops in pure YAML are Ralph loops only.
-- **Scheduler-decided reads.** Each selected node's mandatory `readEdges` chooses queued inbound message edges; default policies use `schedules.plannedReads(snapshot, nodeId)`. Each read delivers all queued messages on that edge. Agentic text/images arrive as separate user messages in delivered order, after the staged instruction; `kind` is data, never native command dispatch. Other payloads arrive as `JSON.stringify({ id, payload })`. Paused native runs see delivered steering on their next request. Values are never steered; prompt callbacks and value placeholders see them. `schedules.reads(() => [], schedules.parallel())` runs selected nodes without consuming queued messages; there is no retained graph-agent inbox.
+- **Edges.** `value` edges (default, id `A->B`) retain the source's latest returned `AssistantMessage`; `message` edges (id `A~>B`) queue task payloads `{ kind: "prompt", text, taskId, spec, deps, history }` (all required): build them with `graph.nodes.Task.create({ kind: "prompt", text, spec })` (it mints `taskId` with empty `deps`/`history`; an agent node rejects an incomplete task). An agent's `send` takes `task` (a received task id), `spec` and `handoff`: the same spec hands that task off with `handoff` appended to its history; a different spec creates a subtask recorded in that task's `deps`; a node that received no task cannot send one. Use ordinary messages for assignments and partial handoffs, `kind: message, on: return` for each exact settled result, and values for retained reports. Only ordinary credit messages named in an explicit source trigger may enter `$source`. Edges out of `$sink` and value edges out of `$source` are rejected. Quote edge IDs containing `>` where YAML would misparse (`"Goals~>Direct"`).
+- **Agents run once per firing of their declared trigger.** On each new run the graph stages the required YAML prompt on the same idle session. `always` and resolved value cells stay true after settlement: use a one-shot assignment or consumable return-message trigger for finite work. `{{edge}}` renders a retained value or the consumed return FIFO (ordered, joined by blank lines, absent → empty); interpolated results are not also steered. Ordinary message placeholders are invalid.
+- **Scheduler-decided reads.** Each selected node's mandatory `readEdges` chooses queued inbound message edges; default policies use `schedules.plannedReads(snapshot, nodeId)`. Each read delivers all queued messages on that edge. Agentic text/images arrive as separate user messages in delivered order, after the staged instruction; `kind` is data, never native command dispatch. Other payloads arrive as `JSON.stringify({ id, payload })`, except interpolated return messages. A continuation-only turn cannot consume messages or values. Paused native runs see delivered steering on their next request. Values are never steered; prompt callbacks and value placeholders see them. `schedules.reads(() => [], schedules.parallel())` runs selected nodes without consuming queued messages; there is no retained graph-agent inbox.
 - **Agent tools.** Default coordination tools are `task`, `yield`, `send`, `info` (names reserved; cannot be listed or shadowed); `complain` is a separate enabled default. `tools:` adds collection tools (`read`, `bash`, `edit`, `grep`, `find`, `code_graph`, `ast_grep`, `ast_edit`, `diff`, `release`) or names supplied through `BuildOptions.tools`; existing native defaults and `tool_block` behavior are unchanged. Put handoff requirements and explicit route IDs in prompts: `send` directly using the declared message edge ID, then `yield`. For dynamic topology discovery, `info` shows live parent and child routes as `{ id, edgeId, kind }`. Value edges carry final results; edge schemas and deterministic consumers validate payloads.
-- **`emit`** needs `text`, `spec`, ≥ 1 outbound message edge and no inbound edges; it publishes the same task once per edge and parks.
-- **Nested graphs.** `source.routes` forwards each parent message on edge `k` unchanged onto the listed internal `$source~>…` edges; parent values arrive as `{ kind: "prompt", text: finalText(value) }`. No routes = closed source (unexpected ingress throws). The nested `sink` reads `graph.result(returns)` (default: the unique predecessor of `$sink`; several predecessors need an explicit `returns`), returns it as the wrapper's value, and also sends it as a prompt on every parent message edge leaving the wrapper. Only the final retained result escapes; intermediate drafts never do. `sink: { stream: true }` instead forwards every message reaching `$sink` (message edges only, no `returns`) and never returns; its wrapper parks between inputs, so connect it by message edges only. With several inbound edges, a streaming sink needs `trigger: { any: [...] }` (the default is all-of).
+- **`emit`** needs `text`, `spec`, ≥ 1 outbound message edge and no inbound edges; it publishes the same task once per edge and finishes.
+- **Nested graphs.** `source.routes` forwards each parent message on edge `k` unchanged onto the listed internal `$source~>…` edges; routed parent values also arrive unchanged. No routes = closed source (unexpected ingress throws). The nested `sink` reads `graph.result(returns)` (default: the unique predecessor of `$sink`; several predecessors need an explicit `returns`), returns it as the wrapper's value, and also forwards it on ordinary parent message edges leaving the wrapper; return-message edges receive the exact wrapper result once. Only the final retained result escapes; intermediate drafts never do. `sink: { stream: true }` instead forwards every message reaching `$sink` (message edges only, no `returns`) and never returns; its wrapper parks between inputs, so connect it by message edges only. With several inbound edges, a streaming sink needs `trigger: { any: [...] }` (the default is all-of).
 - **`$sink` of the root** retains the selected terminal's exact result; read it from the `run()` map by node ID (`results.get(graph.NodeId.create("Reviewer"))`) or `execution.graph.result(execution.graph.sink.id)`. A sink whose `returns` node never finishes throws `<returns> did not produce a result`.
 - **Skills** load once per registry name and are appended to `system` with `"\n\n"`. **MCP** servers are attached in the runner, not YAML: `await new mcp.McpBuilder().add({ name, type: "stdio", command, args, clientOptions? }).build(cwd, options?)` returns a `tools.ToolCollection` whose `tools` include the `mcp__<server>__<tool>` wrappers; pass it as config `collection` (one server process shared by every agent) or, for a server per agent, build one per node and hand it over through `createAgent: (spec) => syntax.createJuncoAgent({ ...spec, collection: perNode.get(spec.node) }, ladder)`. Every agent over a collection gets all its tools like native defaults (`tool_block` opts out by name); close collections after the graph. Servers are stdio; capture their stderr in the runner when a TUI tracer owns the terminal.
 - **Params.** `JuncoGraph.fromYaml(text, { ...config, params: { description: "review" } })` splices `{{ params.description }}` verbatim into YAML text before parsing (quote the placeholder). Distinct from runtime `{{edge}}` prompt placeholders; params on a parsed object throw. `syntax.parse(text, { params })` supports the same authoring substitution.
@@ -82,8 +85,7 @@ Semantics that decide whether a document runs:
 
 ```ts
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { contentText } from "@earendil-works/pi-ai";
-import { graph, JuncoGraph, schedules, tracer } from "junco";
+import { graph, JuncoGraph, schedules, syntax, tracer } from "junco";
 import source from "./review.yml" with { type: "text" };
 
 /**
@@ -100,22 +102,20 @@ const execution = await JuncoGraph.fromYaml(source, {
   scheduler: () => schedules.parallel(),         // called once per graph level as (label, graphPath)
   ladder,
   tracer: new tracer.DummyTracer(),              // silent; see shared TUI lifecycle above for interactive runs
-  ...schedules.ralph({ rounds: 2 }),             // only for graphs containing a `Ralph->Ralph` loop
+  ...schedules.ralph({ rounds: 2 }),             // only for documents containing the standard RalphControl
 });
 let terminalText: string;
 try {
   const results = await execution.run();
   const review = results.get(graph.NodeId.create("Reviewer"));
-  if (review?.stopReason !== "stop") throw new Error("Reviewer did not finish normally");
-  terminalText = contentText(review.content).trim();
-  if (!terminalText) throw new Error("Reviewer returned an empty report");
+  terminalText = syntax.finalText(review, "Reviewer");
 } finally {
   await execution.graph.close();                // releases built agents, nested graphs, the collection build created
 }
 console.log(terminalText);                       // only after close (and TUI finish when interactive)
 ```
 
-`syntax.FromYamlOptions` (all code-side): `cwd`, `scheduler(label, graphPath)` (display label, which may repeat, and unique wrapper path, `""` at the root), `ladder` (`schedules.ModelLadder` pairing the runtime with its five allowed rungs), `code` (node ID → exported `syntax.DeterministicNode`), `policy` (default `tools.LockPolicy`), `collection` (caller-owned; construction otherwise creates one when agents list collection tools), `tracer`, `tools` (name → `AgentTool` for YAML `tools:` entries), `createAgent(spec)` (supply persistent agents by `spec.node`, or by the unique root-relative `spec.path` such as `Child/Worker` when nested graphs reuse IDs; `spec.graph` is the display label), `available` (node ID → `({ graph, edges }) => AvailabilityFn | undefined`, including `$sink`), `context` (typed code-node inputs), `signal`, `params`, `loopGuard` (`new agent.LoopGuard(options)` applies to each agent the builder creates; `createAgent` receives it as `spec.loopGuard`), `tool_pruning` (`true` deactivates never-called collection tools after ten settled runs per agent; valid only when the builder creates the collection). `syntax.resolveAgents(document, { cwd })` resolves role prompts/tools without constructing agents. A ladder is required for default agent creation; with `createAgent`, omitting it disables model switching. `new schedules.ModelLadder(models, rungs)` checks all five model identities, catalog presence and supported thinking levels synchronously; credentials/availability still need preflight. `syntax.createJuncoAgent(spec, ladder)` uses the paired runtime and initializes at `med`. Each decision applies its selected rung's model and thinking (default `"off"`); built-in policies select `med`, and `schedules.strength((snapshot, nodeId) => "high", inner)` overrides it per node.
+`syntax.FromYamlOptions` (all code-side): `cwd`, `scheduler(label, graphPath)` (display label, which may repeat, and unique wrapper path, `""` at the root), `ladder` (`schedules.ModelLadder` pairing the runtime with its five allowed rungs), `code` (node ID → exported `syntax.DeterministicNode`), `policy` (default `tools.LockPolicy`), `collection` (caller-owned; construction otherwise creates one when agents list collection tools), `tracer`, `tools` (name → `AgentTool` for YAML `tools:` entries), `createAgent(spec)` (supply persistent agents by `spec.node`, or by the unique root-relative `spec.path` such as `Child/Worker` when nested graphs reuse IDs; `spec.graph` is the display label), `context` (typed code-node inputs), `signal`, `params`, `loopGuard` (`new agent.LoopGuard(options)` applies to each agent the builder creates; `createAgent` receives it as `spec.loopGuard`), `tool_pruning` (`true` deactivates never-called collection tools after ten settled runs per agent; valid only when the builder creates the collection). `syntax.resolveAgents(document, { cwd })` resolves role prompts/tools without constructing agents. A ladder is required for default agent creation; with `createAgent`, omitting it disables model switching. `new schedules.ModelLadder(models, rungs)` checks all five model identities, catalog presence and supported thinking levels synchronously; credentials/availability still need preflight. `syntax.createJuncoAgent(spec, ladder)` uses the paired runtime and initializes at `med`. Each decision applies its selected rung's model and thinking (default `"off"`); built-in policies select `med`, and `schedules.strength((snapshot, nodeId) => "high", inner)` overrides it per node.
 
 Round loops that are not Ralph (repeat until a typed verdict approves) live in the runner: build a fresh graph per round over the same persistent agents via `createAgent` with `createAgentOwnership: "caller"` (graph close then aborts them without disposing them), pass the verdict tool through `tools`, read the verdict after `run()`, close each round's graph, and close the agents once after the last round. Never add a round cap the task did not state.
 
@@ -125,7 +125,7 @@ A `kind: code` node is a deterministic coroutine exported from the same-named wo
 
 ```text
 export type CodeContext<C = unknown> = {
-  readonly graph: JuncoGraph;             // live graph; getNode(id).status for host-state availability
+  readonly graph: JuncoGraph;             // live graph
   readonly label: string;                 // graph name
   readonly node: string;                  // this node's id
   readonly edges: ReadonlyMap<string, Edge>;   // every edge touching this node, by YAML id
@@ -134,58 +134,38 @@ export type CodeContext<C = unknown> = {
   readonly context: C;                    // BuildOptions.context
   readonly signal?: AbortSignal;
 };
-export type CodeRegistration = {
-  readonly state: Deterministic<Task, AssistantMessage>;
-  readonly is_available?: graph.AvailabilityFn<Task, AssistantMessage>;  // overrides BuildOptions.available for this id
-};
-export type DeterministicNode<C = unknown> = (context: CodeContext<C>) => CodeRegistration | Promise<CodeRegistration>;
-// graph.nodes.Deterministic: new Deterministic<Task, AssistantMessage>(
+export type DeterministicNode<C = unknown> = (context: CodeContext<C>) => Deterministic<TSchema, unknown> | Promise<Deterministic<TSchema, unknown>>;
+// graph.nodes.Deterministic: new Deterministic<TSchema, unknown>(
 //   async function* (signal, collection?) : NodeGenerator, policy, collection?)
 ```
 
 ```ts
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { contentText } from "@earendil-works/pi-ai";
-import { graph, type syntax } from "junco";
+import type { TSchema } from "typebox";
+import { graph, syntax } from "junco";
 
-/** Publishes the assignment once to both competitors, then parks (like `emit`, but text comes from context). */
+/** Publishes the assignment once to both competitors, then finishes (like `emit`, but text comes from context). */
 export const Goals: syntax.DeterministicNode<{ goals: string }> = ({ context, edges, policy }) => {
   const outputs = ["Goals~>Direct", "Goals~>Ralph"].map((id) => edges.get(id)!);
-  let published = false;
-  return {
-    state: new graph.nodes.Deterministic<graph.nodes.Task, AssistantMessage>(async function* (signal) {
-      const task = graph.nodes.Task.create({ kind: "prompt", text: context.goals, spec: context.goals }); // one task, both competitors
-      while (true) {
-        signal.throwIfAborted();
-        published = true;
-        yield outputs.map((edge) => graph.Message.create(edge, task));
-      }
-    }, policy),
-    is_available: () => !published,
-  };
+  return new graph.nodes.Deterministic<TSchema, unknown>(async function* (signal) {
+    const task = graph.nodes.Task.create({ kind: "prompt", text: context.goals, spec: context.goals }); // one task, both competitors
+    signal.throwIfAborted();
+    return new graph.FinalMessages(outputs.map((edge) => graph.Message.create(edge, task)));
+  }, policy);
 };
 
 /** Joins two value reports, validates them, and prepares one assignment message. */
 export const Join: syntax.DeterministicNode = ({ edges, policy }) => {
   const a = graph.EdgeId.create("A->Join"), b = graph.EdgeId.create("B->Join");
-  let published = false;
-  return {
-    state: new graph.nodes.Deterministic<graph.nodes.Task, AssistantMessage>(async function* () {
-      const inputs = yield [];                                   // prime; consumes nothing
-      const text = [inputs.values.get(a), inputs.values.get(b)].map((m, i) => {
-        if (m?.stopReason !== "stop") throw new Error(`${i ? "B" : "A"} did not finish normally`);
-        return contentText(m.content).trim();
-      }).join("\n\n");
-      published = true;
-      const task = graph.nodes.Task.create({ kind: "prompt", text, spec: "One merged report covering both inputs." });
-      while (true) yield [graph.Message.create(edges.get("Join~>Reducer")!, task)];
-    }, policy),
-    is_available: (_view, triggered) => triggered && !published,
-  };
+  return new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+    const inputs = yield [];                                   // prime; consumes nothing
+    const text = [inputs.values.get(a), inputs.values.get(b)].map((m, i) => syntax.finalText(m, i ? b : a)).join("\n\n");
+    const task = graph.nodes.Task.create({ kind: "prompt", text, spec: "One merged report covering both inputs." });
+    return new graph.FinalMessages([graph.Message.create(edges.get("Join~>Reducer")!, task)]);
+  }, policy);
 };
 ```
 
-Rules: start dependent bodies with `const inputs = yield []`; read values with `inputs.values.get(EdgeId)` and messages with `inputs.messages.get(EdgeId)`; emit only on edges the YAML wired from this node; validate upstream reports (`stopReason`, non-empty text, exact message counts) instead of trusting prose; gate "publish once" with `is_available`, not with an iteration counter; put run-local inputs (request text, feedback, counters) in `config.context`, never module globals. Pass each referenced code node directly in `config.code`, including nodes inside nested graphs.
+Rules: start dependent bodies with `const inputs = yield []`; read values with `inputs.values.get(EdgeId)` and messages with `inputs.messages.get(EdgeId)`; emit only on edges the YAML wired from this node; validate upstream reports (`stopReason`, non-empty text, exact message counts) instead of trusting prose; finish message-only publishers with `return new graph.FinalMessages(batch)`; put run-local inputs (request text, feedback, counters) in `config.context`, never module globals. Pass each referenced code node directly in `config.code`, including nodes inside nested graphs.
 
 ## Patterns
 
@@ -193,12 +173,12 @@ Rules: start dependent bodies with `const inputs = yield []`; read values with `
 |---|---|---|
 | Fixed assignment fan-out | `kind: emit` → message edges to each worker; workers `prompt: "Complete the assignment in the user message(s) following this prompt."` | none |
 | Assignment from runtime input | `kind: code` publisher reading `context` | `Goals` above |
-| Join / review | `trigger: { all: [A->R, B->R] }`, `prompt` with `{{A->R}}`/`{{B->R}}` and report requirements | none; or a code join when reports need validation beyond `finalText` |
-| Partial handoff | sender prompt names the outbound message edge ID and payload requirements; receiver `trigger: { any: [partial~>, final->] }` | code receiver when "exactly one partial" must be enforced |
-| Fixed-round revision (Ralph) | standalone: `JuncoGraph.fromYaml(workflows.ralph, config)`, assignment on source route `assignment`. Nested: splice `syntax.parse(workflows.ralph).graph` into a `kind: graph` node, rekeying `source.routes` to the parent edge; do not re-declare the loop | `...schedules.ralph({ rounds })` in config; rounds only if stated (default two) |
+| Join / review | two return FIFOs with explicit IDs, `trigger: { all: [A->R, B->R] }`, `prompt` with `{{A->R}}`/`{{B->R}}` and report requirements | none; or a code join when reports need validation beyond `finalText` |
+| Partial handoff | sender prompt names the outbound message edge ID and payload requirements; receiver `trigger: { any: [partial-message, final-return-event] }` | code receiver when "exactly one partial" must be enforced |
+| Fixed-round revision (Ralph) | standalone: `JuncoGraph.fromYaml(workflows.ralph, config)`, assignment on source route `assignment`. Nested: splice `syntax.parse(workflows.ralph).graph` into a `kind: graph` node, preserving `source.trigger` with `{ ...inner.source, routes }` when rekeying `source.routes` to the parent edge; do not re-declare the loop | `...schedules.ralph({ rounds })` in config; rounds only if stated (default two) |
 | Repeat until approved | one round graph with a verdict tool in `tools:` | runner loop with `createAgent` + `tools` + verdict take-and-clear; no cap |
 | Nested agency | `kind: graph` with `source.routes`/`sink.returns` | none |
-| Host-state gating (pause a member) | — | `BuildOptions.available` or code `is_available` reading `graph.getNode(id).status` |
+| Wait for release | declare a message trigger and send its credit from an executed controller | none in scheduler policies |
 | Pick best of candidates | all returned: splice `workflows.allFanIn`; streaming as candidates arrive: splice `workflows.anyFanIn` | `...schedules.anyFanIn()` for AnyFanIn |
 | Memory/token/runtime/cost ordering | — | configure `measurementWindows` in TS; rank recorded samples with `schedules.lowest` / `highest` or your own policy |
 
@@ -208,15 +188,15 @@ The [AGENTS.md standard library index](../../AGENTS.md#standard-library-index) i
 
 | Namespace | Use in generated workflows |
 |---|---|
-| `workflows.ralph` | The only Ralph definition: YAML text, source route `assignment`, loop `Ralph->Ralph`, output `Ralph->$sink`. Models come from config.ladder. Never hand-write a Ralph graph. |
-| `schedules.ralph({ rounds })` / `schedules.ralph({ until, rounds? })` | Round controller; returns `{ available }` for fromYaml config. `until` is a synchronous success check per completed draft (no cap unless `rounds` is given). Declines graph levels without `Ralph->Ralph`, so it is safe on a parent document. |
-| `workflows.allFanIn` | Select (never synthesize) the best of completed candidates once all returned: source route `candidates`, output `AllFanIn->$sink`. Embedded: wrapper `trigger: { all: [<parent value edges>] }`, those edges routed to `$source~>AllFanIn`. Selection criteria go in the agent's `system`. |
-| `workflows.anyFanIn` + `schedules.anyFanIn()` | Stream one selection per delivered candidate batch (`Task.create({ kind: "prompt", text, spec })` on route `candidates`) without waiting for parents to return; streamed under `AnyFanInPublish~>$sink`. Embedded: route parent message edges to `$source~>AnyFanIn`, wrapper `trigger: { any: [...] }`, message edges only. Spread `...schedules.anyFanIn()` into config (`{ available, code }`); merge `available` with Ralph's when both appear. |
+| `workflows.ralph` | The only Ralph definition: YAML text, source route `assignment`, controller `RalphControl`, output `Ralph->$sink`. Models come from config.ladder. Never hand-write a Ralph graph. |
+| `schedules.ralph({ rounds })` / `schedules.ralph({ until, rounds? })` | Round controller; returns `{ code }` for fromYaml config. `until` is a synchronous success check per completed draft (no cap unless `rounds` is given). Register its code for documents containing RalphControl. |
+| `workflows.allFanIn` | Select (never synthesize) the best of completed candidates once all returned: source route `candidates`, output `AllFanIn->$sink`. Embedded: wrapper `trigger: { all: [<parent return-message edges>] }`, those edges routed to `$source~>AllFanIn`. Selection criteria go in the agent's `system`. |
+| `workflows.anyFanIn` + `schedules.anyFanIn()` | Stream one selection per delivered candidate batch (`Task.create({ kind: "prompt", text, spec })` on route `candidates`) without waiting for parents to return; streamed under `AnyFanInPublish~>$sink`. Embedded: route parent message edges to `$source~>AnyFanIn`, wrapper `trigger: { any: [...] }`, message edges only. Spread `...schedules.anyFanIn()` into config (`{ code }`); combine distinct code entries explicitly when composing controllers. |
 | `schedules.parallel()`, `roundRobin()`, `agent()`/`pi(...)`, `choose`, `separate`, `strength`, `reads`, `limit`, `lowest`, `highest` | Scheduler policies for config.scheduler. Default `parallel()` chooses `med` and planned message reads; `strength` assigns a rung per node, `reads` overrides selected message edges. Custom decisions use `select(snapshot, ids, strength?)` or supply mandatory `readEdges`. |
 | `schedules.context`, `SchedulerContext` | What `fromYaml` returns (`run()`, `step()`, `.graph`); only hand-wired graphs call `context` themselves. |
 | `tracer.DummyTracer`, `tracer.TuiTracer.shared()` | `BuildOptions.tracer`; shared returns `TuiTracer | DummyTracer`. Retain and pass the shared observer explicitly to finish an interactive TUI after all graphs close; print only after terminal restoration. |
 | `graph.nodes.Deterministic`, `graph.Message`, `graph.EdgeId`, `graph.NodeId`, `graph.from` | Code-node bodies and result lookup. |
-| `graph.trigger.TriggerRule`/`TriggerEntry` | Only inside `BuildOptions.available`/code `is_available` logic; YAML `trigger:` already compiles to these. |
+| `graph.trigger.TriggerRule`/`TriggerEntry` | Native declarative node triggers; YAML `trigger:` already compiles to these. |
 | `graph.nodes.EmitOnce`, `StepNode`, `ConstFanout`, `ConstFanin`, `Source`, `Sink` | Hand-wired `DataflowGraph` programs only (escape hatch); in YAML use `kind: emit`/`kind: code`. |
 
 ## Model selection
@@ -240,15 +220,15 @@ Only for documents with agents. Deterministic-only documents skip this.
 
 ## Escape hatches
 
-Read `references/typescript-api.md` (namespace signature excerpts, composition patterns, hand-wired example) when the document cannot express the task: graph compaction, custom tracer callbacks, non-chat message/result types, or availability beyond `available`/`is_available`. Resource measurement windows and resource-aware scheduling are ordinary `fromYaml` configuration.
+Read `references/typescript-api.md` (namespace signature excerpts, composition patterns, hand-wired example) when the document cannot express the task: graph compaction, custom tracer callbacks, non-chat message/result types, or custom native ports. Resource measurement windows and resource-aware scheduling are ordinary `fromYaml` configuration.
 
 Repository work (such as refactor, translate, verify or audit) follows `references/repository-workflows.md`: inspect source with omp's available tools and author task-oriented YAML directly. Generated Junco agents use `code_graph` at execution time when their roles need repository exploration; do not require omp to call it first. Clusters are evidence, not work packages or a schedule. Preserve requested permissions, handoffs and concurrency; route every required report to the requested terminal output.
 
 ## Before returning
 
 - [ ] `syntax.parse(source)` succeeds offline; the complete ladder's models and thinking levels are verified.
-- [ ] Every agent has a `prompt` (or a documented code/Ralph staging path); handoff prompts name route IDs and payload requirements; message vs value kind matches assignment vs report.
-- [ ] Each `kind: code` ID has a same-named exported `syntax.DeterministicNode` in config.code; publishers gate with is_available; joins validate stopReason/text.
+- [ ] Every agent has a `prompt`; handoff prompts name route IDs and payload requirements; message vs value kind matches assignment vs report.
+- [ ] Each `kind: code` ID has a same-named exported `syntax.DeterministicNode` in config.code; message-only publishers return FinalMessages; joins validate stopReason/text.
 - [ ] Stop condition matches the task: terminal node wired to `$sink`; Ralph rounds only as stated; no invented caps, retries, reviewers or allowances.
 - [ ] Model choices carry catalog + credential + dated freshness evidence beside the TypeScript ladder, or a reported missing prerequisite.
 - [ ] Runner passes only needed `BuildOptions`; close in `finally`, then guarded retained TUI `finish()` in nested `finally` when interactive; persistent agents close once after their last round; MCP stderr captured under TUI.

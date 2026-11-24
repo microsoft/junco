@@ -419,13 +419,11 @@ describe("close", () => {
       ),
       state: downstream.coroutine,
     });
-    // The trigger edge must be inbound; the coroutine never emits on it.
-    graph.addEdge(suspendedId, suspendedId, input);
+    graph.addEdge(graph.source.id, suspendedId, input);
     graph.addEdge(suspendedId, downstreamId, suspendedCleanup);
     graph.addEdge(waitingId, downstreamId, waitingCleanup);
     graphPorts.connect(graph, downstreamId);
-    assert.ok(E.isLeft(input.transport));
-    input.transport.left.push("go");
+    graph.emit(graph.source.id, Message.create(input, "go"));
 
     const drive = failureOf(graphContext.run());
     await Promise.all([suspendedReady.promise, entered.promise]);
@@ -499,8 +497,8 @@ describe("close", () => {
     graph.addNode({
       state: sibling,
       policy: LockPolicy,
-      trigger: TriggerRule.always(),
-      is_available: () => false,
+      prompt: "Wait for work",
+      trigger: TriggerRule.never(),
     });
     graphPorts.connect(graph, coroutineId);
     await graphContext.step();
@@ -636,13 +634,11 @@ describe("close", () => {
       LockPolicy,
     );
     parent.addNode({
-      trigger: TriggerRule.always(),
-      is_available: () => false,
+      trigger: TriggerRule.never(),
       state: coroutine,
     });
     const nested = parent.addNode({
-      trigger: TriggerRule.always(),
-      is_available: () => false,
+      trigger: TriggerRule.never(),
       state: childContext,
     });
     parentPorts.connect(parent, nested);
@@ -932,7 +928,7 @@ describe("direct protocol", () => {
     const coroutine = new graphApi.nodes.Deterministic<TNumber, string>(
       async function* () {
         try {
-          yield [Message.create(edge, 1)];
+          yield { resume: [Message.create(edge, 1)] };
           yield [Message.create(edge, 2)];
           return "done";
         } finally {
@@ -942,8 +938,10 @@ describe("direct protocol", () => {
       LockPolicy,
     );
     const payloads: number[] = [];
-    for await (const batch of coroutine)
-      payloads.push(...batch.map((message) => message.payload));
+    for await (const batch of coroutine) {
+      const messages = Array.isArray(batch) ? batch : batch.resume;
+      payloads.push(...messages.map((message) => message.payload));
+    }
     assert.deepEqual(payloads, [1, 2]);
     assert.equal(cleaned, 1);
     await coroutine.close();
@@ -1109,6 +1107,7 @@ describe("policy and borrowed collections", () => {
     const agentId = agents.addNode({
       state: new MockAgent({ runs: [] }),
       policy: EmptyPolicy,
+      prompt: "Apply the registered policy",
       trigger: TriggerRule.always(),
     });
     agentsPorts.connect(agents, agentId);

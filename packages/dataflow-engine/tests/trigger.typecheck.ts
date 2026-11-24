@@ -163,6 +163,7 @@ const available: NodeAvailability<Num | NumList, string> = {
   view,
   trigger: narrowRule,
   satisfied: [numberEdge.id],
+  continuationOnly: false,
   status: "ready",
 };
 export const narrowInputs: InputSchedule = triggerInputs(available);
@@ -171,6 +172,7 @@ export const stringAvailability: NodeAvailability<Num | NumList, string> = {
   // @ts-expect-error string messages do not fit a number | number[] graph
   trigger: stringRule,
   satisfied: [stringEdge.id],
+  continuationOnly: false,
   status: "running",
 };
 export const dateAvailability: NodeAvailability<Num | NumList, string> = {
@@ -178,5 +180,6 @@ export const dateAvailability: NodeAvailability<Num | NumList, string> = {
   // @ts-expect-error Date results do not fit a string-result graph
   trigger: dateResultRule,
   satisfied: [],
+  continuationOnly: false,
   status: "ready",
 };

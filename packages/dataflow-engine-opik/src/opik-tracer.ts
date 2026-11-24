@@ -9,7 +9,7 @@ import type {
   NodeStatus,
   ParentView,
 } from "dataflow-engine";
-import { renderPretty } from "dataflow-engine";
+import { FinalMessages, renderPretty } from "dataflow-engine";
 import { generateId, isTracingActive, type Opik } from "opik";
 
 /** Opik's error record, with the message always present. */
@@ -209,19 +209,26 @@ export class OpikTracer implements DataflowTracer {
         return {
           end: (step) => {
             this.#activations.delete(String(id));
-            return updateSpan(
-              step.done === true
-                ? {
-                    endTime: new Date(),
-                    output: capturePayload({ value: step.value }),
-                    metadata: { outcome: "return", nodeStatus: "done" },
-                  }
-                : {
-                    endTime: new Date(),
-                    output: capturePayload({ messages: step.value }),
-                    metadata: { outcome: "yield", nodeStatus: "running" },
-                  },
-            );
+            let messages;
+            if (step.done) {
+              if (!(step.value instanceof FinalMessages)) {
+                return updateSpan({
+                  endTime: new Date(),
+                  output: capturePayload({ value: step.value }),
+                  metadata: { outcome: "return", nodeStatus: "done" },
+                });
+              }
+              messages = step.value.messages;
+            } else {
+              messages = step.value;
+            }
+            return updateSpan({
+              endTime: new Date(),
+              output: capturePayload({ messages }),
+              metadata: step.done
+                ? { outcome: "final", nodeStatus: "done" }
+                : { outcome: "yield", nodeStatus: "running" },
+            });
           },
           fail: (error) => {
             this.#activations.delete(String(id));

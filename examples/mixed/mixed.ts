@@ -10,6 +10,7 @@
 
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { graph, JuncoGraph, schedules, syntax, tracer } from "junco";
+import type { TSchema } from "typebox";
 import { problemRecorder, runCli, type YamlExecution } from "../support.ts";
 import source from "./mixed.yml" with { type: "text" };
 
@@ -31,16 +32,17 @@ export const MixedGraph = {
     const execution = await JuncoGraph.fromYaml(source, {
       cwd: process.cwd(),
       scheduler: () => schedules.parallel(),
-      ...ralph,
-      available: {
-        ...ralph.available,
-        Reviewer: ({ graph: workflow }) => (view, triggered) => {
-          // Validate the raw draft without copying it into the staged prompt.
-          if (triggered)
-            for (const draft of view.messages.get(graph.EdgeId.create("Ralph~>Reviewer")) ?? [])
-              syntax.finalText(draft, "Ralph~>Reviewer");
-          return triggered || workflow.getNode(reviewerId)?.status === "running";
-        },
+      code: {
+        ...ralph.code,
+        ValidateDraft: ({ edges, policy }) => new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+          const inputs = yield [];
+          const source = edges.get("Ralph~>Reviewer")!;
+          const output = edges.get("ValidateDraft~>Reviewer")!;
+          return new graph.FinalMessages(graph.from(inputs, source).map((draft) => {
+            syntax.finalText(draft, source.id);
+            return graph.Message.create(output, draft);
+          }));
+        }, policy),
       },
       ...options,
     });

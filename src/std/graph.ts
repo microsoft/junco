@@ -2,7 +2,6 @@
 // `graph.nodes` and trigger rules under `graph.trigger`.
 
 export {
-  type AvailabilityFn,
   DataflowDefinitionError,
   type DataflowExecution,
   DataflowGraph,
@@ -13,6 +12,7 @@ export {
   EdgeId,
   type EdgeIdType,
   type ErrorFn,
+  FinalMessages,
   from,
   type Identifiable,
   isUsageLimitError,
@@ -25,6 +25,7 @@ export {
   type NodeOptions,
   type NodeSpec,
   type NodeStatus,
+  type NodeYield,
   type ParentView,
   type Pretty,
   Queue,

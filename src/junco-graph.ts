@@ -10,6 +10,7 @@ import {
   type DataflowTracer,
   Edge,
   type EdgeIdType,
+  FinalMessages,
   type NodeGenerator,
   NodeId,
   type NodeIdType,
@@ -56,6 +57,7 @@ import {
   type NodeRegistration,
   nodePolicies,
   registeredNodeContexts,
+  rethrowControllerFailure,
   unseenValues,
 } from "./node-policy.js";
 import { build, type FromYamlOptions } from "./syntax/build.js";
@@ -229,7 +231,7 @@ function startActivation<S, N extends TSchema, T, EH>(
   inputs: ParentView<N, T> | undefined,
 ):
   | ((
-      end: IteratorResult<readonly unknown[], T> | "error" | "cancelled",
+      end: IteratorResult<readonly unknown[], T | FinalMessages<N>> | "error" | "cancelled",
     ) => void)
   | undefined {
   const view = graphView?.add_context(String(id));
@@ -280,7 +282,9 @@ function startActivation<S, N extends TSchema, T, EH>(
       kind: "metrics",
       ...operation,
       counters: end.done
-        ? { activations_returned: 1, output_values: 1 }
+        ? end.value instanceof FinalMessages
+          ? { activations_returned: 1, output_messages: end.value.messages.length }
+          : { activations_returned: 1, output_values: 1 }
         : { activations_yielded: 1, output_messages: end.value.length },
     });
     finish?.("success");
@@ -382,18 +386,17 @@ export class JuncoGraph<
   }
 
   override addEdge(from: NodeIdType, to: NodeIdType, edge: Edge<N, T>): this {
-    if (to === this.source.id)
-      throw new DataflowDefinitionError(
-        "Graph source cannot have inbound edges",
-      );
     if (from === this.sink.id)
       throw new DataflowDefinitionError(
         "Graph sink cannot have outbound edges",
       );
-    if (from === this.source.id && E.isRight(edge.transport))
-      throw new DataflowDefinitionError(
-        "Graph source cannot produce value edges",
-      );
+    if (edge.onReturn) {
+      const producer = this.getNode(from);
+      if (producer && nodePolicies.get(producer.step)?.persistent === true)
+        throw new DataflowDefinitionError(
+          `Node "${from}" cannot produce return messages`,
+        );
+    }
     if (
       E.isRight(edge.transport) &&
       [from, to].some((id) => {
@@ -426,7 +429,7 @@ export class JuncoGraph<
       JuncoGraph<TSchema, unknown>
     >
   > {
-    const { params, sourceName, ...options } = config;
+    const { params, sourceName } = config;
     let doc: JuncoDocument;
     try {
       doc = parse(source, { params, sourceName });
@@ -448,7 +451,7 @@ export class JuncoGraph<
         );
       throw error;
     }
-    return build(doc, options);
+    return build(doc, config);
   }
 
   /**
@@ -501,7 +504,7 @@ export class JuncoGraph<
    */
   static map<S, L, N extends TSchema = typeof TaskSchema, T = AssistantMessage>(
     skeleton: Pick<Graph<S, L>, "forEachNode" | "forEachLink" | "getLinks">,
-    f: (state: S) => Agentic<N, T> | AgenticNode<N, T>,
+    f: (state: S) => Deterministic<N, T> | AgenticNode<N, T>,
     options: {
       readonly source: Source<N, T>;
       readonly sink: Sink<N, T>;
@@ -550,12 +553,9 @@ export class JuncoGraph<
         const mapped = f(node.data);
         if (mapped instanceof JuncoGraph)
           throw new TypeError("Nested graph node requires a SchedulerContext");
-        const spec =
-          mapped instanceof JuncoAgent || mapped instanceof MockAgent
-            ? { state: mapped, policy: options.policy }
-            : mapped instanceof Deterministic
-              ? { state: mapped }
-              : mapped;
+        if (mapped instanceof JuncoAgent || mapped instanceof MockAgent)
+          throw new DataflowDefinitionError("Map a prompt agent with its state, prompt, policy and trigger");
+        const spec = mapped instanceof Deterministic ? { state: mapped } : mapped;
         graph.addNode({
           trigger:
             inputs.length === 0
@@ -815,10 +815,13 @@ export class JuncoGraph<
   }
 
   /** Register native work, preserving its actual state and this registration's sender identity. */
+  override addNode(spec: Extract<AgenticNode<N, T>, { readonly prompt: unknown }>): NodeIdType;
   override addNode(spec: AgenticNode<N, T>): NodeIdType;
   // The complete-spec branch alone keeps this override compatible with the native signature.
   override addNode(spec: CompleteNode<N, T>): NodeIdType;
   override addNode(spec: AgenticNode<N, T>): NodeIdType {
+    if ("is_available" in spec)
+      throw new DataflowDefinitionError("is_available was removed; declare a trigger instead");
     const state = spec.state;
     const nested = isNestedContext<N, T>(state);
     const policy = JuncoGraph.#nodePolicy(spec, this.policy);
@@ -843,10 +846,15 @@ export class JuncoGraph<
       complete = { ...spec, policy, state, step: state.step };
     else if (nested)
       complete = this.#graphNode(spec as NestedNode<N, T>, policy);
-    else if (state instanceof JuncoAgent || state instanceof MockAgent)
+    else if (state instanceof JuncoAgent || state instanceof MockAgent) {
+      if (!("prompt" in spec))
+        throw new DataflowDefinitionError("A graph-managed agent requires a prompt");
       complete = AgentDriver.node<N, T>(state, { ...spec, policy });
-    else throw new TypeError("An agentic node requires a step");
-    const id = super.addNode(complete);
+    } else throw new TypeError("An agentic node requires a step");
+    const id = this.registerNode(
+      complete,
+      spec.step === undefined && (state instanceof JuncoAgent || state instanceof MockAgent),
+    );
     const current = (): AbortSignal => this.signal;
     const recorder = () => this.recorder;
     const sendParameters = () => this.#sendParameters(id);
@@ -904,7 +912,7 @@ export class JuncoGraph<
   #sendParameters(id: NodeIdType): NodeRegistration<N>["sendParameters"] {
     const routes: (readonly [EdgeIdType, TSchema])[] = [];
     this.forEachLink((from, _to, edge) => {
-      if (from === id && E.isLeft(edge.transport))
+      if (from === id && E.isLeft(edge.transport) && !edge.onReturn)
         routes.push([edge.id, withoutProvenance(edge.schema)]);
     });
     return SendTool.parametersFor(routes);
@@ -919,13 +927,11 @@ export class JuncoGraph<
     const graph = execution.graph;
     const parent = this;
     const seenValues = new Map<EdgeIdType, unknown>();
-    let started = false;
     const step: StepFn<Agentic<N, T>, N, T> = async function* (): NodeGenerator<
       N,
       T
     > {
       let view = yield [];
-      started = true;
       while (true) {
         const signal = graph.signal;
         signal.throwIfAborted();
@@ -942,6 +948,7 @@ export class JuncoGraph<
               ? drive()
               : graph.runWithRecorder(placement, drive));
           } catch (error) {
+            rethrowControllerFailure(graph, parent);
             throw cancellation(signal, error);
           }
           signal.throwIfAborted();
@@ -949,44 +956,20 @@ export class JuncoGraph<
         signal.throwIfAborted();
         graph.sink.drain((message) => parent.emit(this.id, message));
         signal.throwIfAborted();
-        if (persistent !== true && graph.available().size === 0) {
+        const pending = graph.available().size > 0;
+        if (persistent !== true && !pending) {
           const retained = graph.result(graph.sink.id);
-          if (O.isSome(retained)) {
-            started = false;
-            return retained.value;
-          }
+          if (O.isSome(retained)) return retained.value;
           throw new JuncoAgentError(
             "invalid_state",
             "Nested graph quiesced without a sink result",
           );
         }
-        view = yield [];
+        view = yield pending ? { resume: [] } : [];
       }
     };
-    nodePolicies.set(
-      step,
-      persistent ? { seenValues, persistent } : { seenValues },
-    );
-    const triggerRule = options.trigger.rule;
-    return {
-      ...options,
-      policy,
-      state: graph,
-      step,
-      is_available:
-        options.is_available ??
-        (persistent
-          ? // Parked: wake only for child work or a queued trigger message, never a bare empty rule.
-            (view, triggered) =>
-              started
-                ? graph.available().size > 0 ||
-                  (triggered &&
-                    triggerRule.some(
-                      (id) => (view.messages.get(id)?.length ?? 0) > 0,
-                    ))
-                : triggered
-          : (_view, triggered) => started || triggered),
-    };
+    if (persistent) nodePolicies.set(step, { persistent });
+    return { ...options, policy, state: graph, step };
   }
 
   /** Node `id`'s parent and child routes, one entry per actual edge. */
@@ -1072,6 +1055,7 @@ export class JuncoGraph<
     try {
       const result = await super.evaluate((execute, signal) => {
         caller?.throwIfAborted();
+        rethrowControllerFailure(this);
         if (caller !== undefined && caller !== this.signal)
           caller.addEventListener("abort", interrupt, { once: true });
         return operation(execute, signal);
@@ -1088,6 +1072,7 @@ export class JuncoGraph<
           [failure, abortError],
           "Graph evaluation and abort failed",
         );
+      rethrowControllerFailure(this);
       throw failure;
     } finally {
       caller?.removeEventListener("abort", interrupt);

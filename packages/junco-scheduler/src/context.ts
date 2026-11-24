@@ -81,7 +81,10 @@ export function context<
         if (candidates.size === 0) break;
         const observation = graph.observe();
         const plans = new Map(
-          [...candidates].map(([id, candidate]) => [id, inputs(id, candidate)]),
+          [...candidates].map(([id, candidate]) => [
+            id,
+            candidate.continuationOnly ? new Map() : inputs(id, candidate),
+          ] as const),
         );
         const metadata = new Map<NodeIdType, C>();
         if (describeNode !== undefined) {
@@ -113,6 +116,11 @@ export function context<
           signal?.throwIfAborted();
           try {
             validateDecision(attempt, decision);
+            for (const { nodeId, readEdges } of decision.selected)
+              if (readEdges.length && candidates.get(nodeId)?.continuationOnly)
+                throw new DataflowDefinitionError(
+                  `Scheduler decision cannot read inputs for continuation-only node "${nodeId}"`,
+                );
             break;
           } catch (error) {
             if (

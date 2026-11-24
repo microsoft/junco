@@ -1,25 +1,23 @@
 import { parse } from "../../syntax/parse.js";
-import type { JuncoDocument } from "../../syntax/schema.js";
+import { edgeId, type GraphSpec, type JuncoDocument } from "../../syntax/schema.js";
 import anyFanInSource from "./any-fan-in.yml" with { type: "text" };
 import ralphSource from "./ralph.yml" with { type: "text" };
 
 const ralph = parse(ralphSource).graph;
 const selector = parse(anyFanInSource).graph;
-const prompt = selector.edges?.find(
-  (edge) => edge.from === "$source" && edge.to === "AnyFanIn",
-)?.schema;
-const assistant = selector.edges?.find(
-  (edge) => edge.from === "AnyFanIn" && edge.to === "AnyFanIn",
-)?.schema;
-const ralphAssistant = ralph.edges?.find(
-  (edge) => edge.from === "Ralph" && edge.to === "Ralph",
-)?.schema;
-if (
-  prompt === undefined ||
-  assistant === undefined ||
-  ralphAssistant === undefined
-)
-  throw new TypeError("Memory workflows require prompt and assistant schemas");
+function edge(graph: GraphSpec, id: string) {
+  const found = graph.edges?.find((candidate) => edgeId(candidate) === id);
+  if (!found) throw new TypeError(`${graph.name} requires ${id}`);
+  return found;
+}
+const prompt = edge(selector, "$source~>AnyFanIn").schema;
+const assistant = edge(selector, "AnyFanInPublish~>$sink").schema;
+const credits = [
+  edge(selector, "ingress-open"),
+  { ...edge(selector, "ingress-ack"), from: "Memory" },
+];
+const IngressOpen = selector.nodes.IngressOpen;
+if (IngressOpen?.kind !== "emit") throw new TypeError("AnyFanIn requires IngressOpen");
 const broadcast = { anyOf: [prompt, assistant] };
 const ralphAgent = ralph.nodes.Ralph;
 const selectorAgent = selector.nodes.AnyFanIn;
@@ -37,19 +35,21 @@ if (
 const ralphDocument: JuncoDocument = {
   graph: {
     name: "MemoryRalphLoop",
-    source: { routes: { assignment: ["$source~>Memory"] } },
+    source: { ...selector.source, routes: { assignment: ["$source~>Memory"] } },
     sink: {
       returns: "Ralph",
       trigger: { all: ["Ralph->$sink", "Memory~>$sink"] },
     },
     nodes: {
+      IngressOpen,
       Memory: {
         kind: "code",
-        trigger: { any: ["$source~>Memory", "Ralph->Memory"] },
+        trigger: { any: ["$source~>Memory", "ralph-complete"] },
       },
       Ralph: { ...ralphAgent, trigger: "Memory~>Ralph" },
     },
     edges: [
+      ...credits,
       {
         id: "$source~>Memory",
         from: "$source",
@@ -62,29 +62,10 @@ const ralphDocument: JuncoDocument = {
         from: "Memory",
         to: "Ralph",
         kind: "message",
-        schema: prompt,
+        schema: edge(ralph, "RalphControl~>Ralph").schema,
       },
-      {
-        id: "Ralph->Ralph",
-        from: "Ralph",
-        to: "Ralph",
-        kind: "value",
-        schema: ralphAssistant,
-      },
-      {
-        id: "Ralph->Memory",
-        from: "Ralph",
-        to: "Memory",
-        kind: "value",
-        schema: ralphAssistant,
-      },
-      {
-        id: "Ralph->$sink",
-        from: "Ralph",
-        to: "$sink",
-        kind: "value",
-        schema: ralphAssistant,
-      },
+      { ...edge(ralph, "ralph-complete"), to: "Memory" },
+      { ...edge(ralph, "Ralph->$sink"), id: "Ralph->$sink", kind: "value" },
       {
         id: "Memory~>$sink",
         from: "Memory",
@@ -99,9 +80,10 @@ const ralphDocument: JuncoDocument = {
 const fanInDocument: JuncoDocument = {
   graph: {
     name: "MemoryFanIn",
-    source: { routes: { candidates: ["$source~>MemoryCandidates"] } },
+    source: { ...selector.source, routes: { candidates: ["$source~>MemoryCandidates"] } },
     sink: { stream: true },
     nodes: {
+      IngressOpen,
       Memory: {
         kind: "code",
         trigger: { any: ["$source~>MemoryCandidates", "Select~>Memory"] },
@@ -131,6 +113,7 @@ const fanInDocument: JuncoDocument = {
       },
     },
     edges: [
+      ...credits,
       {
         id: "$source~>MemoryCandidates",
         from: "$source",
@@ -167,6 +150,7 @@ const fanOutDocument: JuncoDocument = {
   graph: {
     name: "MemoryFanOut",
     source: {
+      ...selector.source,
       routes: {
         assignment: ["$source~>MemoryAssignment"],
         updates: ["$source~>MemoryUpdate"],
@@ -174,6 +158,7 @@ const fanOutDocument: JuncoDocument = {
     },
     sink: { stream: true },
     nodes: {
+      IngressOpen,
       Memory: {
         kind: "code",
         trigger: {
@@ -182,6 +167,7 @@ const fanOutDocument: JuncoDocument = {
       },
     },
     edges: [
+      ...credits,
       {
         id: "$source~>MemoryAssignment",
         from: "$source",

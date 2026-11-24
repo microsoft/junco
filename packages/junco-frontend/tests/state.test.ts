@@ -97,6 +97,20 @@ test("a handed-off task's card moves queued → running → waiting, and a retur
   expect(state.log).toHaveLength(seq);
 });
 
+test("a final publication completes the producer and queues its task downstream", () => {
+  const state = step(EMPTY, {
+    kind: "graph", graph: 1,
+    nodes: [{ id: "a", status: "running" }, { id: "b", status: "ready" }],
+    links: [{ from: "a", to: "b", id: "e", kind: "message" }],
+  });
+  const end = step(state, {
+    kind: "step", ...where, node: "a", outcome: "final",
+    messages: [{ edge: "e", payload: task }],
+  });
+  expect(end.graphs[1]?.nodes.a?.live).toBe("done");
+  expect(end.cards["T1@b"]?.status).toBe("queued");
+});
+
 test("a tool start and end fold into one call", () => {
   const call = {
     kind: "tool",

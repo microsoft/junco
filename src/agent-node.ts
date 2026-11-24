@@ -7,7 +7,6 @@ import type {
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
   DataflowDefinitionError,
-  type EdgeIdType,
   type ErrorFn,
   holdsUsageFailure,
   type Message,
@@ -36,7 +35,6 @@ import {
   type NodeRegistration,
   nodePolicies,
   registrationOf,
-  unseenValues,
 } from "./node-policy.js";
 
 /** A tracer that also observes the agent behind an agentic node (`TuiTracer`, `OpikTracer`); `observeAgent` returns its detach function. */
@@ -106,9 +104,6 @@ export class AgentDriver<N extends TSchema, V> {
   #started = false;
   #attempt = 0;
   #soft: readonly Message<N>[] | undefined;
-  /** Parent results already staged, with the value staged; a re-resolved edge is fresh again. */
-  readonly #seenValues = new Map<EdgeIdType, unknown>();
-  /** The node body's policy, sharing {@link #seenValues}. */
   readonly #policy: NodePolicy;
   /** The node's own graph registration, captured when its body was primed. */
   #registration: NodeRegistration<N> | undefined;
@@ -125,7 +120,6 @@ export class AgentDriver<N extends TSchema, V> {
     this.#agent = agent;
     this.#policy = {
       agent,
-      seenValues: this.#seenValues,
       inputMode: "all-messages",
     };
   }
@@ -197,31 +191,6 @@ export class AgentDriver<N extends TSchema, V> {
       fields = { taskId, spec, deps: [], history: [entry] };
     }
     return { ...message, payload: { ...payload, ...fields } as Static<N> };
-  }
-
-  #deliver(view: ParentView<N, V>): Message<N>[] {
-    unseenValues(view.values, this.#seenValues);
-    return messagesOf(view);
-  }
-
-  /**
-   * Once started, the run stays resumable until it returns. Before that, the node needs its
-   * trigger and either a staged prompt or fresh inbound data: a nonempty message batch, or a
-   * parent result not yet staged. Never marks anything seen.
-   */
-  #isAvailable(view: ParentView<N, V>, triggered: boolean): boolean {
-    if (this.#started) return true;
-    if (!triggered) return false;
-    if (this.#agent.status === "ready") return true;
-    for (const id of view.messages.keys())
-      if ((view.messages.get(id)?.length ?? 0) > 0) return true;
-    for (const id of view.values.keys())
-      if (
-        !this.#seenValues.has(id) ||
-        this.#seenValues.get(id) !== view.values.get(id)
-      )
-        return true;
-    return false;
   }
 
   /**
@@ -319,6 +288,7 @@ export class AgentDriver<N extends TSchema, V> {
   ): Promise<AssistantMessage | undefined> {
     const agent = this.#agent;
     for (const { id, payload: input } of messages) {
+      const interpolated = !this.#started && this.#policy.promptReturnEdges?.has(id);
       const payload: unknown = input;
       if (Value.Check(TaskDraftSchema, payload) && "text" in payload) {
         if (!Value.Check(TaskSchema, payload))
@@ -329,17 +299,14 @@ export class AgentDriver<N extends TSchema, V> {
           ...payload,
           deps: [...payload.deps],
         });
+        if (interpolated) continue;
         await agent.steer(
           renderTask(payload),
           payload.images?.length ? { images: payload.images } : undefined,
         );
-      } else await agent.steer(JSON.stringify({ id, payload }));
+      } else if (!interpolated) await agent.steer(JSON.stringify({ id, payload }));
     }
-    if (!this.#started) {
-      // Steers wait in Pi until a staged run is admitted.
-      if (agent.status !== "ready") return undefined;
-      this.#started = true;
-    }
+    this.#started = true;
     const result = await agent.next(view);
     if (result.done === true)
       throw new JuncoAgentError(
@@ -366,16 +333,21 @@ export class AgentDriver<N extends TSchema, V> {
    * can retry failed runs before yielding. A settlement returns the native final message.
    * While it drives a `JuncoAgent`, the agent's `send` admits messages on this node's outgoing
    * message edges, attaching task provenance (see `#outbound`), and `info` describes this node's
-   * routes. Delivered tasks are steered as {@link renderTask} text. Unless
-   * `options.is_available` replaces it, the node is available before it starts only when its
-   * trigger fires with a staged prompt or fresh inbound data, and once started it stays resumable
-   * until it returns; a node re-armed through a value self-edge waits for its trigger again.
+   * routes. Delivered tasks are steered as {@link renderTask} text.
    * A `JuncoAgent`'s `task` calls run subagents natively; its settlement already follows their reports.
    */
   static node<N extends TSchema, V>(
     agent: DrivenAgent<N, V>,
-    options: NodeOptions<N, V> & Pick<ToolCollection, "policy">,
+    options: NodeOptions<N, V> & Pick<ToolCollection, "policy"> & {
+      readonly prompt: string | ((inputs: ParentView<N, V>) => string);
+    },
   ): NodeSpec<Agentic<N, V>, N, V> & Pick<ToolCollection, "policy"> {
+    const { prompt } = options;
+    if (
+      typeof prompt !== "function" &&
+      (typeof prompt !== "string" || !prompt.trim())
+    )
+      throw new DataflowDefinitionError("A prompt agent requires a nonblank prompt");
     const driver = new AgentDriver<N, V>(agent);
     const step: StepFn<Agentic<N, V>, N, V> = async function* (): NodeGenerator<
       N,
@@ -384,11 +356,12 @@ export class AgentDriver<N extends TSchema, V> {
       driver.#registration = registrationOf(this);
       driver.#node = String(this.id);
       let view = yield [];
+      agent.stagePrompt(prompt);
       while (true) {
         const result = await driver.#recovering(
           this,
           view,
-          driver.#deliver(view),
+          messagesOf(view),
         );
         if (result !== undefined) {
           driver.#started = false;
@@ -396,7 +369,10 @@ export class AgentDriver<N extends TSchema, V> {
           // The native result; the step-less registration admits AssistantMessage into V.
           return result as V;
         }
-        view = yield [];
+        const wait = driver.#policy.lastYield?.some(
+          (reason) => reason.kind === "tool" && reason.waitForInput === true,
+        );
+        view = yield wait ? [] : { resume: [] };
       }
     };
     nodePolicies.set(step, driver.#policy);
@@ -412,9 +388,6 @@ export class AgentDriver<N extends TSchema, V> {
       state: agent,
       step,
       ...(agent.errorHandler === undefined ? {} : { on_error }),
-      is_available:
-        options.is_available ??
-        ((view, triggered) => driver.#isAvailable(view, triggered)),
     };
   }
 }

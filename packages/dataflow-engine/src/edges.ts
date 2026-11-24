@@ -30,6 +30,8 @@ export type Edge<N extends TSchema, T> = Identifiable<EdgeId> & {
   readonly schema: TSchema;
   transport: E.Either<Queue<Static<N>>, O.Option<T>>;
   readonly probe?: (value: unknown) => void;
+  /** Only a successful value return may publish to this FIFO. */
+  readonly onReturn?: true;
   readonly [edgeMessages]: N;
 };
 
@@ -75,6 +77,15 @@ export const Edge = {
       transport: E.left(Queue.empty<Static<N>>()),
       ...(probe === undefined ? {} : { probe }),
     }) as unknown as Edge<N, T> & { readonly schema: N },
+  /** Mint a message FIFO carrying one product per successful return, including repeated values. */
+  returned: <N extends TSchema>(
+    id: string,
+    schema: N,
+    probe?: (value: unknown) => void,
+  ): Edge<N, Static<N>> & { readonly schema: N; readonly onReturn: true } => ({
+    ...Edge.message<N, Static<N>>(id, schema, probe),
+    onReturn: true,
+  }),
   /** Mint a value edge: a cell holding the source node's latest return value, admitted by `schema`. */
   value: <V extends TSchema>(
     id: string,

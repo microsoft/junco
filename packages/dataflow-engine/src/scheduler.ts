@@ -25,14 +25,15 @@ export type NodeSchedule = {
 export type Schedule = readonly (readonly NodeSchedule[])[];
 
 /**
- * What the runtime knows about one available node when it asks for a plan. Every entry is a node
- * the runtime has already admitted: not `done`, trigger evaluated, availability hook passed.
+ * A node eligible to run because its trigger fired or its last yield requested a continuation.
  * These are candidate-local input-planning facts; nothing here reaches any other node.
  */
 export type NodeAvailability<N extends TSchema, T> = {
   /** LIVE, non-destructive view of the node's inbound edges: queues are unconsumed. */
   readonly view: ParentView<N, T>;
   readonly trigger: TriggerRule<N, T>;
+  /** The operation owes another turn but its trigger does not independently fire. */
+  readonly continuationOnly: boolean;
   /** Rule edges carrying something right now, in rule insertion order. */
   readonly satisfied: readonly EdgeId[];
   /** `"ready"` until its first occurrence primes the generator, then `"running"`. */
@@ -47,8 +48,7 @@ export type NodeAvailability<N extends TSchema, T> = {
  * honours it. A scheduler wanting fixed-size batches, or a partial drain, builds its own
  * {@link InputSchedule} instead — that is the entire point of the count living here.
  *
- * A partially satisfied `"all"` rule reads NOTHING — atomicity. Reachable only when a custom
- * `is_available` hook reports a node available while its trigger is unsatisfied.
+ * A partially satisfied `"all"` rule reads nothing, including on continuation-only turns.
  */
 export const triggerInputs = <N extends TSchema, T>({
   trigger,

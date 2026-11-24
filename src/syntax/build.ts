@@ -10,7 +10,6 @@ import {
 import { contentText } from "@earendil-works/pi-ai";
 import { loadSkillsFromDir } from "@earendil-works/pi-coding-agent";
 import * as graph from "dataflow-engine";
-import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
 import * as agent from "junco-agent";
 import type * as mcp from "junco-mcp";
@@ -38,6 +37,7 @@ import type * as tracer from "../std/tracer.js";
 import type { ParseOptions } from "./parse.js";
 import {
   edgeId,
+  type EdgeSpec,
   type GraphSpec,
   inboundEdges,
   type JuncoDocument,
@@ -109,14 +109,10 @@ export type CodeContext<C = unknown> = {
   readonly context: C;
   readonly signal?: AbortSignal;
 };
-export type CodeRegistration = {
-  readonly state: Deterministic<TSchema, unknown>;
-  readonly is_available?: Available;
-};
 /** Definition keyed by the code node's id in the workflow config. */
 export type DeterministicNode<C = unknown> = (
   context: CodeContext<C>,
-) => CodeRegistration | Promise<CodeRegistration>;
+) => Deterministic<TSchema, unknown> | Promise<Deterministic<TSchema, unknown>>;
 export type BuildOptions<C = unknown> = {
   readonly cwd: string;
   /**
@@ -178,17 +174,6 @@ export type BuildOptions<C = unknown> = {
    * agents can serve one graph per round. Requires `createAgent`.
    */
   readonly createAgentOwnership?: "graph" | "caller";
-  readonly available?: Readonly<
-    Record<
-      string,
-      (context: {
-        graph: JuncoGraph<TSchema, unknown>;
-        edges: ReadonlyMap<string, Edge>;
-        /** This graph level's label, the one `scheduler` receives. */
-        label: string;
-      }) => Available | undefined
-    >
-  >;
   readonly context?: C;
   readonly signal?: AbortSignal;
 };
@@ -404,9 +389,11 @@ function createEdges(
           : undefined;
       return [
         id,
-        edge.kind === "message"
-          ? graph.Edge.message<TSchema, unknown>(id, edge.schema, probe)
-          : graph.Edge.value(id, edge.schema, probe),
+        edge.on === "return"
+          ? graph.Edge.returned(id, edge.schema, probe)
+          : edge.kind === "message"
+            ? graph.Edge.message<TSchema, unknown>(id, edge.schema, probe)
+            : graph.Edge.value(id, edge.schema, probe),
       ];
     }),
   );
@@ -426,7 +413,6 @@ function createSource(
   spec: GraphSpec,
   label: string,
   edges: ReadonlyMap<string, Edge>,
-  is_available: Available | undefined,
 ): graph.Source<TSchema, unknown> {
   const routes = spec.source?.routes;
   return new graph.Source<TSchema, unknown>(
@@ -452,12 +438,12 @@ function createSource(
     {
       id: graph.NodeId.create("$source"),
       description: spec.source?.description,
+      trigger: resolveTrigger(spec, "$source", edges, spec.source?.trigger ?? "always"),
       schema: domain(
         Object.values(routes ?? {})
           .flat()
           .map((target) => edgeOf(edges, target)),
       ),
-      ...(is_available ? { is_available } : {}),
     },
   );
 }
@@ -468,13 +454,11 @@ function createSink(
   parentOutputs: readonly Edge[],
   root: boolean,
   result: (id: string) => O.Option<unknown>,
-  is_available: Available | undefined,
 ): graph.Sink<TSchema, unknown> {
   const options = {
     id: graph.NodeId.create("$sink"),
     description: spec.sink?.description,
     trigger: resolveTrigger(spec, "$sink", edges, spec.sink?.trigger),
-    ...(is_available ? { is_available } : {}),
   };
   if (spec.sink?.stream === true) {
     const inbound = inboundEdges(spec, "$sink").map((e) =>
@@ -518,40 +502,35 @@ function registerEmit(
   task: { readonly text: string; readonly spec: string },
   outbound: readonly Edge[],
 ): void {
-  let published = false;
   const state = new Deterministic<TSchema, unknown>(async function* (
     signal,
   ): graph.NodeGenerator<TSchema, unknown> {
+    signal.throwIfAborted();
     // One task, broadcast on every outbound edge.
     const payload = agent.Task.create({
       kind: "prompt",
       text: task.text,
       spec: task.spec,
     });
-    while (true) {
-      signal.throwIfAborted();
-      published = true;
-      yield outbound.map((edge) => graph.Message.create(edge, payload));
-    }
+    return new graph.FinalMessages(
+      outbound.map((edge) => graph.Message.create(edge, payload)),
+    );
   }, tools.EmptyPolicy);
-  g.addNode({
-    ...registration,
-    trigger: graph.TriggerRule.always(),
-    is_available: registration.is_available ?? (() => !published),
-    state,
-  });
+  g.addNode({ ...registration, state });
 }
 
 async function registerAgent(
   c: Construction,
   g: JuncoGraph<TSchema, unknown>,
   spec: GraphSpec,
-  edges: ReadonlyMap<string, Edge>,
   id: string,
   node: Extract<NodeSpec, { kind?: "agent" }>,
   registration: Registration,
   key: string,
 ): Promise<void> {
+  const { prompt, promptReturnEdges } = compilePrompt(
+    node.prompt, id, inboundEdges(spec, id),
+  );
   let instance: YamlAgent | YamlMockAgent;
   if (c.agents) {
     const prepared = c.agents.get(key);
@@ -579,43 +558,23 @@ async function registerAgent(
       instance = created;
     }
   }
-  if (node.prompt !== undefined) {
-    const prompt = compilePrompt(node.prompt);
-    const inbound = inboundEdges(spec, id);
-    for (const match of node.prompt.matchAll(PLACEHOLDER)) {
-      const placeholder = match[1];
-      if (placeholder === undefined || placeholder.startsWith("params."))
-        continue;
-      const edge = edges.get(placeholder);
-      if (
-        !inbound.some((candidate) => edgeId(candidate) === placeholder) ||
-        edge === undefined ||
-        !E.isRight(edge.transport)
-      )
-        throw new graph.DataflowDefinitionError(
-          `junco-syntax: prompt placeholder {{${placeholder}}} of node "${id}" names message edge "${placeholder}"; delivered messages are steered into the agent as user messages, placeholders render value edges`,
-        );
-    }
-    instance.stagePrompt(prompt);
-  }
   const registered = g.addNode({
     ...registration,
-    trigger: resolveTrigger(spec, id, edges, node.trigger),
+    prompt,
     state: instance,
     policy: c.policy,
   });
-  if (c.options.createAgent) {
-    // No await since registration: until the build commits, rollback never disposes this agent.
-    const step = g.getNode(registered)?.step;
-    const policy = step && nodePolicies.get(step);
-    if (policy === undefined)
-      throw new agent.JuncoAgentError(
-        "invalid_state",
-        `Node "${id}" has no policy`,
-      );
-    policy.agentOwnership = "caller";
-    c.borrowed.push(policy);
-  }
+  // Until commit, rollback disposes acquired agents itself; factory agents stay borrowed.
+  const step = g.getNode(registered)?.step;
+  const policy = step && nodePolicies.get(step);
+  if (policy === undefined)
+    throw new agent.JuncoAgentError(
+      "invalid_state",
+      `Node "${id}" has no policy`,
+    );
+  if (promptReturnEdges.size) policy.promptReturnEdges = promptReturnEdges;
+  policy.agentOwnership = "caller";
+  c.borrowed.push(policy);
 }
 
 /** `spec` at node `id` of `g`, carrying `g`'s recorder view when it records. */
@@ -643,26 +602,13 @@ async function buildGraph(
     spec,
     recorder === undefined ? undefined : () => g.recorder,
   );
-  // Port hooks bind once `g` exists; ports consult them only during execution.
-  let sourceHook: Available | undefined;
-  const source = createSource(
-    spec,
-    label,
-    edges,
-    c.options.available?.$source
-      ? (v, t) => (sourceHook ? sourceHook(v, t) : t)
-      : undefined,
-  );
-  let sinkHook: Available | undefined;
+  const source = createSource(spec, label, edges);
   const sink = createSink(
     spec,
     edges,
     parentOutputs,
     path === "",
     (id) => g.result(graph.NodeId.create(id)),
-    c.options.available?.$sink
-      ? (v, t) => (sinkHook ? sinkHook(v, t) : t)
-      : undefined,
   );
   // The document validator checked these dynamic integers; Width.create only accepts numeric literals.
   const g = new JuncoGraph<TSchema, unknown>(
@@ -679,10 +625,6 @@ async function buildGraph(
     recorderNodeId,
   );
   c.partialRoots.add(g);
-  const hook = (id: string) =>
-    c.options.available?.[id]?.({ graph: g, edges, label });
-  sourceHook = hook("$source");
-  sinkHook = hook("$sink");
   const execution = context({
     scheduler: c.options.scheduler(label, path),
     graph: g,
@@ -694,14 +636,13 @@ async function buildGraph(
   for (const [id, node] of Object.entries(spec.nodes)) {
     c.options.signal?.throwIfAborted();
     const outbound = outboundEdges(spec, id)
-      .filter((e) => e.kind === "message")
+      .filter((e) => e.kind === "message" && e.on !== "return")
       .map((e) => edgeOf(edges, edgeId(e)));
-    const is_available = hook(id);
     const key = path === "" ? id : `${path}/${id}`;
     const registration: Registration = {
       id: graph.NodeId.create(id),
       description: node.description,
-      ...(is_available ? { is_available } : {}),
+      trigger: resolveTrigger(spec, id, edges, node.trigger),
     };
     if (node.kind === "emit") {
       registerEmit(g, registration, node, outbound);
@@ -718,7 +659,6 @@ async function buildGraph(
       );
       g.addNode({
         ...registration,
-        trigger: resolveTrigger(spec, id, edges, node.trigger),
         state: child,
         ...(node.graph.sink?.stream === true
           ? { persistent: true as const }
@@ -731,7 +671,7 @@ async function buildGraph(
         throw new graph.DataflowDefinitionError(
           `junco-syntax: code node "${id}" has no definition in options.code`,
         );
-      const created = await definition({
+      const state: unknown = await definition({
         graph: g,
         label,
         node: id,
@@ -743,14 +683,20 @@ async function buildGraph(
         context: c.options.context,
         signal: c.options.signal,
       });
-      g.addNode({
-        ...registration,
-        ...(created.is_available ? { is_available: created.is_available } : {}),
-        trigger: resolveTrigger(spec, id, edges, node.trigger),
-        state: created.state,
-      });
+      if (!(state instanceof Deterministic)) {
+        // The old factory shape may already have acquired a collection lease.
+        const unregistered =
+          typeof state === "object" && state !== null && "state" in state ? state.state : undefined;
+        if (unregistered instanceof Deterministic) c.acquired.push(unregistered);
+        throw new graph.DataflowDefinitionError(
+          `junco-syntax: code node "${key}" must return a Deterministic directly; declare its admission with trigger`,
+        );
+      }
+      c.acquired.push(state);
+      g.addNode({ ...registration, state });
+      c.acquired.pop(); // Registered: its graph now owns cleanup.
     } else {
-      await registerAgent(c, g, spec, edges, id, node, registration, key);
+      await registerAgent(c, g, spec, id, node, registration, key);
     }
   }
   for (const edge of spec.edges ?? [])
@@ -769,7 +715,7 @@ async function rollback(
   const failures: unknown[] = [];
   for (const instance of [...c.acquired].reverse()) {
     try {
-      await instance.return();
+      await instance[Symbol.asyncDispose]();
     } catch (failure) {
       failures.push(failure);
     }
@@ -806,16 +752,35 @@ function render(payload: unknown, id: string): string {
   );
 }
 
-function compilePrompt(
-  text: string,
-): string | ((inputs: graph.ParentView<TSchema, unknown>) => string) {
-  if (![...text.matchAll(PLACEHOLDER)].length) return text;
-  return (inputs) =>
-    text.replace(PLACEHOLDER, (_, id: string) => {
-      const key = graph.EdgeId.create(id);
-      if (inputs.values.has(key)) return render(inputs.values.get(key), id);
-      return "";
-    });
+function compilePrompt(text: string, node: string, inbound: readonly EdgeSpec[]) {
+  const parts = text.split(PLACEHOLDER);
+  const head = parts[0]!;
+  const promptReturnEdges = new Set<string>();
+  if (parts.length === 1) return { prompt: head, promptReturnEdges };
+  const substitutions: { key: graph.EdgeIdType; returned: boolean; tail: string }[] = [];
+  for (let i = 1; i < parts.length; i += 2) {
+    const id = parts[i]!;
+    const edge = inbound.find((candidate) => edgeId(candidate) === id);
+    if (!edge || (edge.kind === "message" && edge.on !== "return"))
+      throw new graph.DataflowDefinitionError(
+        `junco-syntax: prompt placeholder {{${id}}} of node "${node}" names message edge "${id}"; placeholders require a value or on: return edge`,
+      );
+    const returned = edge.on === "return";
+    if (returned) promptReturnEdges.add(id);
+    substitutions.push({ key: graph.EdgeId.create(id), returned, tail: parts[i + 1]! });
+  }
+  const prompt = (inputs: graph.ParentView<TSchema, unknown>): string => {
+    let rendered = head;
+    for (const { key, returned, tail } of substitutions) {
+      if (returned)
+        rendered += inputs.messages.get(key)?.map((payload) => render(payload, key)).join("\n\n") ?? "";
+      else if (inputs.values.has(key))
+        rendered += render(inputs.values.get(key), key);
+      rendered += tail;
+    }
+    return rendered;
+  };
+  return { prompt, promptReturnEdges };
 }
 
 const codeIds = (spec: GraphSpec) =>
@@ -828,19 +793,18 @@ type Construction = {
   readonly collection: tools.ToolCollection | undefined;
   readonly specs: Iterator<AgentSpec>;
   readonly agents: ReadonlyMap<string, YamlAgent> | undefined;
-  /** Owned agents in acquisition order, including prepared agents not yet registered. */
-  readonly acquired: YamlAgent[];
+  /** Owned agents in acquisition order, plus any code state not yet adopted by a graph. */
+  readonly acquired: AsyncDisposable[];
   /** Graphs not yet adopted by a parent. */
   readonly partialRoots: Set<JuncoGraph<TSchema, unknown>>;
-  /** Registered factory nodes, caller-owned until the whole build commits. */
+  /** Graphs borrow registered agents until the build commits. */
   readonly borrowed: NodePolicy[];
 };
 type Registration = {
   readonly id: graph.NodeIdType;
   readonly description: string | undefined;
-  readonly is_available?: Available;
+  readonly trigger: graph.TriggerRule<TSchema, unknown>;
 };
-type Available = graph.AvailabilityFn<TSchema, unknown>;
 
 function validateAgents(
   spec: GraphSpec,
@@ -883,6 +847,10 @@ export async function build<C = unknown>(
   let creates: boolean;
   let policy: tools.Policy;
   try {
+    if ("available" in options)
+      throw new graph.DataflowDefinitionError(
+        "junco-syntax: available is no longer supported; declare admission with trigger",
+      );
     if (agents && options.createAgent !== undefined)
       throw new graph.DataflowDefinitionError(
         "junco-syntax: agents and createAgent are mutually exclusive",

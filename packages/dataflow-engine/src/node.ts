@@ -1,5 +1,6 @@
 import type { Static, TSchema } from "typebox";
 import type { Edge } from "./edges.js";
+import { DataflowDefinitionError } from "./errors.js";
 import type { Identifiable } from "./identifiable.js";
 import type { EdgeId, NodeId } from "./identity.js";
 import type { TriggerRule } from "./trigger.js";
@@ -47,9 +48,8 @@ export type Lookup<K, V> = {
  *   ONLY for an edge that actually yielded items, so
  *   `view.messages.get(a) ?? view.messages.get(b)` distinguishes which branch of an `any` rule
  *   fired.
- * `values` — resolved return values of inbound value edges. The runtime owns ONE such map per
- *   node and shares it by reference into every view that node receives; entries are only ever
- *   added (a resolved `Option` never reverts).
+ * `values` — the resolved inbound value cells on an admitted input turn. A continuation-only turn
+ * receives neither messages nor values.
  */
 export type ParentView<N extends TSchema, T> = {
   readonly messages: Lookup<EdgeId, readonly Static<N>[]>;
@@ -83,10 +83,20 @@ export function snapshotView<N extends TSchema, T>(
 /** Lifecycle of a node: never activated, mid-generator, or returned (a value self-edge delivery re-arms it to `ready`). */
 export type NodeStatus = "ready" | "running" | "done";
 
-/** The generator a node body returns: yields message batches, is resumed with views, returns `T`. */
+/** An ordinary batch waits for admission; a resume batch requests another turn. */
+export type NodeYield<N extends TSchema> =
+  | Message<N>[]
+  | { readonly resume: Message<N>[] };
+
+/** Publish one last batch and finish without supplying a result. */
+export class FinalMessages<N extends TSchema> {
+  constructor(readonly messages: Message<N>[]) {}
+}
+
+/** The native yield, return and input protocol for a node body. */
 export type NodeGenerator<N extends TSchema, T> = AsyncGenerator<
-  Message<N>[],
-  T,
+  NodeYield<N>,
+  T | FinalMessages<N>,
   ParentView<N, T>
 >;
 
@@ -101,10 +111,9 @@ export type NodeGenerator<N extends TSchema, T> = AsyncGenerator<
  *    immediately.
  *  - Every running-node activation consumes its scheduled batch and calls
  *    `generator.next(view_k)` with that turn's freshly materialized view.
- *  - Each advance yields mutable `Message<N>[]` — every message the node emits that turn, routed
- *    in array order. Yield `[]` to emit nothing; a pure sink does exactly that and stays alive.
- *  - Returning `T` marks the node `done`. A node that must run for the whole graph's life simply
- *    never returns (see `StepNode` in `builders.ts`).
+ *  - An array publishes in order and waits for the next admission. `{ resume: batch }` publishes
+ *    and requests another turn, even without new input.
+ *  - Return `T` to record a result, or `new FinalMessages(batch)` to publish and end without one.
  */
 export type StepFn<S, N extends TSchema, T> = (
   this: Node<S, N, T>,
@@ -122,37 +131,24 @@ export type ErrorFn<S, N extends TSchema, T> = (
   signal: AbortSignal | undefined,
 ) => readonly Message<N>[] | Promise<readonly Message<N>[]>;
 
-/**
- * Availability hook, consulted only for a node that is not `done`, after the runtime has evaluated
- * its trigger. `view` is a NON-destructive probe aliasing the live queues; `triggered` says whether
- * the node's {@link TriggerRule} fires right now. The default hook returns `triggered`.
- *
- * A custom hook may override the trigger in either direction: demand a deeper backlog than one
- * message, or keep an already-started actor resumable after it consumed its triggering input.
- */
-export type AvailabilityFn<N extends TSchema, T> = (
-  view: ParentView<N, T>,
-  triggered: boolean,
-) => boolean;
-
-/**
- * Registration options common to every node kind: identity, optional prose, firing rule and
- * availability. Omit `id` to get an auto-assigned one; omit `description` when the node needs no
- * prose. `is_available` defaults to the trigger result.
- */
+/** Registration options common to every node kind: optional identity and prose, and its firing rule. */
 export type NodeOptions<N extends TSchema, T> = {
   readonly id?: NodeId;
   readonly description?: string;
   readonly trigger: TriggerRule<N, T>;
-  readonly is_available?: AvailabilityFn<N, T>;
 };
+
+/** Reject obsolete node options before copying them or acquiring resources. */
+export function rejectLegacyAvailability(options: object): void {
+  if ("is_available" in options)
+    throw new DataflowDefinitionError("is_available was removed; use trigger");
+}
 
 /** A registered graph node: its programmable state, lifecycle, trigger, body and live generator. */
 export type Node<S, N extends TSchema, T> = Identifiable<NodeId> &
   NodeOptions<N, T> & {
     state: S;
     status: NodeStatus;
-    readonly is_available: AvailabilityFn<N, T>;
     readonly step: StepFn<S, N, T>;
     readonly on_error?: ErrorFn<S, N, T>;
     generator: NodeGenerator<N, T> | undefined;

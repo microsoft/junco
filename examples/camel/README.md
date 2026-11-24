@@ -34,6 +34,7 @@ The optional argument replaces the default query; it must fit on one line. In an
 
 ```mermaid
 flowchart LR
+    T[Query: one user request] --> P
     P[PLLM: user query to JSON plan] --> I[Interpreter: read fixture email]
     I -->|untrusted parsing request| Q[QLLM: structured extraction]
     I -->|remaining plan and capabilities| E[Executor: policy check and fixture send]

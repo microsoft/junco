@@ -109,16 +109,18 @@ graph:
   edges:
     - {from: Goals, to: Bun, kind: message, schema: {}}
     - {from: Goals, to: Rust, kind: message, schema: {}}
-    - {from: Bun, to: Reviewer, schema: {}}
-    - {from: Rust, to: Reviewer, schema: {}}
+    - {from: Bun, to: Reviewer, id: Bun->Reviewer, kind: message, on: return, schema: {}}
+    - {from: Rust, to: Reviewer, id: Rust->Reviewer, kind: message, on: return, schema: {}}
     - {from: Reviewer, to: $sink, schema: {}}
 ```
 
-MCP servers are attached in TypeScript like every other tool: `mcp.McpBuilder` opens a tool collection and connects each added stdio server on it, one process per server, published in `collection.tools` and closed with the collection. An agent over a collection gets all of its tools; `first.ts` builds one per browsing agent through `createAgent`, so `Bun` and `Rust` run in parallel, each with its own Playwright server (`mcp__playwright__*`) next to the built-in coding tools and the coordination tools `task`, `yield`, `send` and `info`, plus the default `complain` tool, which is enabled separately. `Reviewer` gets no server. `tool_block` removes names a node must not use. `Goals` sends its text once on each `~>` message edge. Each agent gets its prompt first and the delivered question after it. `Reviewer` runs once both `->` value edges hold a result, and reads them through the `{{edge}}` placeholders.
+`Goals` sends the question once to each browser agent. `first.ts` opens a separate Playwright MCP server for each through `createAgent`; `Reviewer` gets neither server. When both browser agents return, the reviewer consumes their reports through `{{Bun->Reviewer}}` and `{{Rust->Reviewer}}`.
+
+**Migration:** every graph-managed agent requires a reusable `prompt`. Its trigger admits a fresh run in the same session after settlement. `always` and resolved value cells remain true: a graph using either to drive a prompt can make unbounded model calls. For a finite run, send a one-shot assignment from `kind: emit`, or trigger on a consumable `kind: message, on: return` edge as above. Reaching `$sink` does not stop other runnable nodes. `step()` advances one scheduling decision.
 
 The scheduler decides which queued messages a node reads: each `NodeModel` it selects lists those edges in `readEdges`. `schedules.select(snapshot, ids, strength?)` reads the edges from `schedules.plannedReads(snapshot, id)` by default, and `schedules.reads(assign, inner)` overrides them. `schedules.reads(() => [], schedules.parallel())` runs nodes without consuming any message. If a decision is invalid, the scheduler is asked again with `snapshot.lastError`, up to three attempts in all, and then the run throws.
 
-Each message a node reads reaches the agent as its own user message, in delivery order. `Task` text and images arrive as message content, the text followed by a `Task:` JSON line with the task's id, spec, deps and history, and the agent does not dispatch on their `kind`. Other payloads arrive as `JSON.stringify({ id, payload })`. Write prompts that refer to these messages, as the `Bun` and `Rust` prompts do, instead of copying their content. Value edges never arrive as messages. Prompt callbacks and YAML placeholders read them, and a placeholder that names a message edge fails at build time. Prompts can also use `params` substitutions.
+An ordinary selected message reaches the agent as a separate user message in delivery order. `Task` text and images arrive as message content with a `Task:` JSON line (`taskId`, `spec`, `deps`, `history`); other payloads arrive as `JSON.stringify({ id, payload })`. A `{{edge}}` placeholder can read a retained value or render the products consumed from an `on: return` FIFO, joined with a blank line. Products rendered in the prompt are not also steered. Ordinary message edges cannot be interpolated.
 
 Models and MCP servers are chosen in TypeScript. The YAML never names either:
 

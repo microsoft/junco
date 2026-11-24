@@ -1,11 +1,19 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { Message, NodeGenerator, ParentView } from "dataflow-engine";
+import type {
+  FinalMessages,
+  NodeGenerator,
+  NodeYield,
+  ParentView,
+} from "dataflow-engine";
 import { JuncoAgentError, type TaskSchema } from "junco-agent";
 import type { ToolCollection } from "junco-tools";
 import type { TSchema } from "typebox";
 import { checkPolicy } from "./node-policy.js";
 
-type Advance<N extends TSchema, T> = IteratorResult<Message<N>[], T>;
+type Advance<N extends TSchema, T> = IteratorResult<
+  NodeYield<N>,
+  T | FinalMessages<N>
+>;
 
 /**
  * A deterministic graph node body: one async generator speaking the engine's own
@@ -87,7 +95,9 @@ export class Deterministic<
     return this.#advance(true, () => this.#generator.next(...args));
   }
 
-  return(value: T | PromiseLike<T>): Promise<Advance<N, T>> {
+  return(
+    value: T | FinalMessages<N> | PromiseLike<T | FinalMessages<N>>,
+  ): Promise<Advance<N, T>> {
     return this.#advance(false, () => this.#generator.return(value));
   }
 

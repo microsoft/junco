@@ -31,7 +31,7 @@ const wired = (spec: GraphSpec) =>
   );
 const base = () => ({
   graph: {
-    nodes: { A: {}, B: {} },
+    nodes: { A: { prompt: "Draft" }, B: { prompt: "Review" } },
     edges: [
       { from: "A", to: "B", schema },
       { from: "B", to: "$sink", schema },
@@ -45,7 +45,7 @@ const nested = () => ({
         kind: "graph",
         graph: {
           source: { routes: { incoming: ["$source~>W"] } },
-          nodes: { W: {} },
+          nodes: { W: { prompt: "Work" } },
           edges: [
             { from: "$source", to: "W", kind: "message", schema },
             { from: "W", to: "$sink", schema },
@@ -101,12 +101,12 @@ const rejectsAt = (value: unknown, path: string) => {
 for (const id of ["$source", "$sink"])
   test(`reserved node ${id}`, () =>
     rejects((d) => {
-      d.graph.nodes[id] = {};
+      d.graph.nodes[id] = { prompt: "Work" };
     }, `node id "${id}" is reserved`));
 for (const [from, to, message] of [
   ["Missing", "B", 'references unknown node "Missing"'],
   ["A", "Missing", 'references unknown node "Missing"'],
-  ["A", "$source", "Graph source cannot have inbound edges"],
+  ["A", "$source", "Graph source credits must be ordinary messages"],
   ["$sink", "B", "Graph sink cannot have outbound edges"],
   ["$source", "B", "Graph source cannot produce value edges"],
 ] as const)
@@ -115,6 +115,54 @@ for (const [from, to, message] of [
       d.graph.edges[0] = { from, to, schema };
     }, message),
   );
+test("source credits must be explicit, reachable ordinary messages", () => {
+  const edges = [
+    { id: "open", from: "Seed", to: "$source", kind: "message", schema },
+    { id: "delivery", from: "$source", to: "Worker", kind: "message", schema },
+    { id: "ack", from: "Worker", to: "$source", kind: "message", schema },
+    { from: "Worker", to: "$sink", schema },
+  ];
+  const doc = (trigger?: TriggerSpec, credit: object = edges[0]!) => ({
+    graph: {
+      source: { ...(trigger === undefined ? {} : { trigger }), routes: { input: ["delivery"] } },
+      nodes: { Seed: { kind: "code" }, Worker: { kind: "code" } },
+      edges: [credit, ...edges.slice(1)],
+    },
+  });
+  const any = { any: ["open", "ack"] };
+  parse(doc(any));
+  rejectsAt(doc(), "/graph/edges/0");
+  rejectsAt(doc("open"), "/graph/edges/2");
+  rejectsAt(doc({ any: ["open", "missing"] }), "/graph/source/trigger/any/1");
+  rejectsAt(doc({ any: ["open", "open"] }), "/graph/source/trigger/any/1");
+  assert.equal(failure(doc({ all: any.any })).code, "unstartable-trigger");
+  for (const override of [{ from: "$source" }, { kind: "value" }, { on: "return" }])
+    rejectsAt(doc(any, { ...edges[0]!, ...override }), "/graph/edges/0/to");
+});
+test("return notifications require a message edge from a returning node", () => {
+  for (const kind of [undefined, "value"])
+    rejects((d) => {
+      d.graph.edges[0] = { from: "A", to: "B", on: "return", schema };
+      if (kind !== undefined) d.graph.edges[0].kind = kind;
+    }, "on: return requires kind: message");
+  for (const producer of ["$source", "emit", "stream"])
+    rejects((d) => {
+      if (producer === "emit")
+        d.graph.nodes.A = { kind: "emit", text: "go", spec: "done" };
+      if (producer === "stream")
+        d.graph.nodes.A = {
+          kind: "graph",
+          graph: { ...base().graph, sink: { stream: true } },
+        };
+      d.graph.edges[0] = {
+        from: producer === "$source" ? "$source" : "A",
+        to: "B",
+        kind: "message",
+        on: "return",
+        schema,
+      };
+    }, "does not return a value");
+});
 test("duplicate edge ids", () =>
   rejects((d) => {
     d.graph.edges.push({ from: "A", to: "B", schema });
@@ -174,7 +222,7 @@ test("identifiers, duplicates, source routes and sink results", () => {
   const routed = (routes: Json, extra: JsonObject[] = []): LooseDoc => ({
     graph: {
       source: { routes },
-      nodes: { A: {}, B: {} },
+      nodes: base().graph.nodes,
       edges: [
         { from: "$source", to: "A", kind: "message", schema },
         ...base().graph.edges,
@@ -190,7 +238,7 @@ test("identifiers, duplicates, source routes and sink results", () => {
           kind: "graph",
           graph: {
             ...(routes === undefined ? {} : { source: { routes } }),
-            nodes: { W: {} },
+            nodes: { W: { prompt: "Work" } },
             edges: [{ from: "W", to: "$sink", schema }],
           },
         },
@@ -230,7 +278,7 @@ test("identifiers, duplicates, source routes and sink results", () => {
     [
       "blank node key",
       variant((d) => {
-        d.graph.nodes[" "] = {};
+        d.graph.nodes[" "] = { prompt: "Work" };
       }),
       "identifier",
       "/graph/nodes/ ",
@@ -353,7 +401,7 @@ test("identifiers, duplicates, source routes and sink results", () => {
       {
         graph: {
           source: { routes: { in: ["$source~>$sink", "$source~>A"] } },
-          nodes: { A: {} },
+          nodes: { A: { prompt: "Work" } },
           edges: [
             { from: "$source", to: "$sink", kind: "message", schema: {} },
             { from: "$source", to: "A", kind: "message", schema: {} },
@@ -431,14 +479,14 @@ test("YAML and object parsing, default ids", () => {
   assert.equal(parse(doc), doc);
   assert.deepEqual(
     parse(
-      "graph:\n  nodes:\n    A: {}\n  edges: [{from: A, to: $sink, schema: {type: number}}]",
+      "graph:\n  nodes:\n    A: { prompt: Work }\n  edges: [{from: A, to: $sink, schema: {type: number}}]",
     ).graph.nodes.A,
-    {},
+    { prompt: "Work" },
   );
 });
 test("params substitute into YAML text before parsing", () => {
   const source =
-    'graph:\n  nodes:\n    A:\n      description: "{{ params.description }}"\n  edges:\n    - from: A\n      to: $sink\n      schema: { type: number }\n';
+    'graph:\n  nodes:\n    A:\n      description: "{{ params.description }}"\n      prompt: Work\n  edges:\n    - from: A\n      to: $sink\n      schema: { type: number }\n';
   for (const text of [
     source,
     source.replace("{{ params.description }}", "{{params.description}}"),
@@ -464,7 +512,7 @@ test("invalid YAML and strict shape", () => {
   for (const [value, code] of [
     [{ ...base(), extra: true }, "document"],
     [{ graph: { nodes: {}, edges: [] } }, "document"],
-    [{ graph: { nodes: { A: {} } } }, "sink-result"],
+    [{ graph: { nodes: { A: { prompt: "Work" } } } }, "sink-result"],
   ] as const)
     assert.equal(failure(value).code, code);
 });
@@ -472,7 +520,7 @@ test("invalid YAML and strict shape", () => {
 type Point = readonly [line: number, column: number];
 test("text diagnostics locate the offending token", () => {
   const valid =
-    "graph:\n  nodes: { A: {} }\n  edges:\n    - { from: A, to: $sink, schema: { type: number } }\n";
+    "graph:\n  nodes: { A: { prompt: Work } }\n  edges:\n    - { from: A, to: $sink, schema: { type: number } }\n";
   const block =
     "graph:\n  edges:\n    - from: A\n      to: $sink\n      schema: {}\n";
   const cases: [
@@ -489,7 +537,7 @@ test("text diagnostics locate the offending token", () => {
     ["first column", "grph: {}\n", "document", "/", [1, 0], [2, 0]],
     [
       "unicode before token",
-      'graph:\n  nodes: { "é😀": {} }\n  edges:\n    - { from: "é😀", to: Nope, schema: { type: number } }\n',
+      'graph:\n  nodes: { "é😀": { prompt: Work } }\n  edges:\n    - { from: "é😀", to: Nope, schema: { type: number } }\n',
       "reference",
       "/graph/edges/0/to",
       [4, 25],
@@ -535,7 +583,7 @@ test("text diagnostics locate the offending token", () => {
     ],
     [
       "alias-valued key",
-      "graph:\n  nodes:\n    A: &node {}\n    $source: *node\n  edges:\n    - { from: A, to: $sink, schema: {} }\n",
+      "graph:\n  nodes:\n    A: &node { prompt: Work }\n    $source: *node\n  edges:\n    - { from: A, to: $sink, schema: {} }\n",
       "node",
       "/graph/nodes/$source",
       [4, 4],
@@ -543,7 +591,7 @@ test("text diagnostics locate the offending token", () => {
     ],
     [
       "alias-valued unknown property",
-      "graph:\n  nodes: { A: &n {} }\n  extra: *n\n  edges:\n    - { from: A, to: $sink, schema: {} }\n",
+      "graph:\n  nodes: { A: &n { prompt: Work } }\n  extra: *n\n  edges:\n    - { from: A, to: $sink, schema: {} }\n",
       "document",
       "/graph/extra",
       [3, 2],
@@ -551,7 +599,7 @@ test("text diagnostics locate the offending token", () => {
     ],
     [
       "missing field beside a merge",
-      "graph:\n  nodes:\n    S: { kind: code }\n    N:\n      kind: graph\n      graph:\n        <<: { nodes: { W: {} }, edges: [{ from: W, to: $sink, schema: {} }] }\n  edges: [{ from: S, to: N, schema: {} }, { from: N, to: $sink, schema: {} }]\n",
+      "graph:\n  nodes:\n    S: { kind: code }\n    N:\n      kind: graph\n      graph:\n        <<: { nodes: { W: { prompt: Work } }, edges: [{ from: W, to: $sink, schema: {} }] }\n  edges: [{ from: S, to: N, schema: {} }, { from: N, to: $sink, schema: {} }]\n",
       "source-route",
       "/graph/nodes/N/graph/source/routes",
       [7, 8],
@@ -562,7 +610,7 @@ test("text diagnostics locate the offending token", () => {
     ],
     [
       "unknown field",
-      "graph:\n  nodes:\n    A: { kidn: code }\n  edges: []\n",
+      "graph:\n  nodes:\n    A: { kidn: code, prompt: Work }\n  edges: []\n",
       "document",
       "/graph/nodes/A/kidn",
       [3, 9],
@@ -570,7 +618,7 @@ test("text diagnostics locate the offending token", () => {
     ],
     [
       "escaped pointer id",
-      "graph:\n  nodes:\n    a/b~c: { trigger: nope }\n  edges:\n    - { from: a/b~c, to: $sink, schema: { type: number } }\n",
+      "graph:\n  nodes:\n    a/b~c: { trigger: nope, prompt: Work }\n  edges:\n    - { from: a/b~c, to: $sink, schema: { type: number } }\n",
       "trigger",
       "/graph/nodes/a~1b~0c/trigger",
       [3, 22],
@@ -578,7 +626,7 @@ test("text diagnostics locate the offending token", () => {
     ],
     [
       "alias use",
-      "graph:\n  nodes: { A: { description: &t Nope } }\n  edges:\n    - { from: A, to: *t, schema: { type: number } }\n",
+      "graph:\n  nodes: { A: { description: &t Nope, prompt: Work } }\n  edges:\n    - { from: A, to: *t, schema: { type: number } }\n",
       "reference",
       "/graph/edges/0/to",
       [4, 21],
@@ -586,7 +634,7 @@ test("text diagnostics locate the offending token", () => {
     ],
     [
       "merged value",
-      "graph:\n  nodes: { A: {}, B: {} }\n  edges:\n    - &e { id: x, from: A, to: $sink, schema: { type: number } }\n    - { <<: *e, from: B }\n",
+      "graph:\n  nodes: { A: { prompt: Draft }, B: { prompt: Review } }\n  edges:\n    - &e { id: x, from: A, to: $sink, schema: { type: number } }\n    - { <<: *e, from: B }\n",
       "duplicate",
       "/graph/edges/1/id",
       [5, 12],
@@ -594,7 +642,7 @@ test("text diagnostics locate the offending token", () => {
     ],
     [
       "inline merge",
-      "graph:\n  nodes:\n    A: {}\n    B:\n      <<: { kidn: code }\n  edges: []\n",
+      "graph:\n  nodes:\n    A: { prompt: Work }\n    B:\n      <<: { kidn: code }\n      prompt: Review\n  edges: []\n",
       "document",
       "/graph/nodes/B/kidn",
       [5, 10],
@@ -621,7 +669,7 @@ test("text diagnostics locate the offending token", () => {
     ],
     [
       "1 and '1'",
-      "graph:\n  nodes:\n    1: {}\n    '1': {}\n",
+      "graph:\n  nodes:\n    1: { prompt: Work }\n    '1': { prompt: Review }\n",
       "yaml",
       "/",
       [4, 4],
@@ -759,7 +807,7 @@ test("text diagnostics locate the offending token", () => {
 test("object input reports the same error without a source frame", () => {
   const error = failure({
     graph: {
-      nodes: { A: {} },
+      nodes: { A: { prompt: "Work" } },
       edges: [{ from: "A", to: "Nope", schema: { type: "number" } }],
     },
   });
@@ -796,7 +844,7 @@ test("YAML merges, overrides and scalar keys keep their semantics", () => {
     schema: { type: "number" },
   });
   const keys = parse(
-    "graph:\n  nodes: { 1: {}, true: {}, null: {} }\n  edges:\n    - { from: '1', to: 'true', schema: { type: number } }\n    - { from: 'true', to: 'null', schema: { type: number } }\n    - { from: 'null', to: $sink, schema: { type: number } }\n",
+    "graph:\n  nodes: { 1: { prompt: Draft }, true: { prompt: Check }, null: { prompt: Review } }\n  edges:\n    - { from: '1', to: 'true', schema: { type: number } }\n    - { from: 'true', to: 'null', schema: { type: number } }\n    - { from: 'null', to: $sink, schema: { type: number } }\n",
   );
   assert.deepEqual(Object.keys(keys.graph.nodes), ["1", "true", "null"]);
 });
@@ -834,14 +882,14 @@ graph:
       trigger:
         any: [ingress, seed]
       prompt: |-
-        External: {{ ingress }}
-        Seed: {{ seed }}
+        Inspect the delivered input.
+        Explain what should happen next.
     Ralph:
       description: revises the seeded assignment
       system: revise the assignment
       tools: [custom]
       skills: [guide]
-      prompt: "{{ ralph-input }}"
+      prompt: "Revise the assignment in the delivered message."
     Child:
       kind: graph
       description: nested work
@@ -861,7 +909,7 @@ graph:
           Worker:
             system: work
             trigger: child-input
-            prompt: "{{ child-input }}"
+            prompt: "Complete the delivered assignment."
         edges:
           - from: $source
             to: Worker
@@ -956,14 +1004,14 @@ graph:
           tools: ["read", "custom"],
           skills: ["guide"],
           trigger: { any: ["ingress", "seed"] },
-          prompt: "External: {{ ingress }}\nSeed: {{ seed }}",
+          prompt: "Inspect the delivered input.\nExplain what should happen next.",
         },
         Ralph: {
           description: "revises the seeded assignment",
           system: "revise the assignment",
           tools: ["custom"],
           skills: ["guide"],
-          prompt: "{{ ralph-input }}",
+          prompt: "Revise the assignment in the delivered message.",
         },
         Child: {
           kind: "graph",
@@ -985,7 +1033,7 @@ graph:
               Worker: {
                 system: "work",
                 trigger: "child-input",
-                prompt: "{{ child-input }}",
+                prompt: "Complete the delivered assignment.",
               },
             },
             edges: [
@@ -1149,6 +1197,7 @@ test("strict object boundaries and malformed list/map entries", () => {
             : kind === "emit"
               ? { text: "go", spec: "done" }
               : {}),
+          ...(kind === "agent" ? { prompt: "Work" } : {}),
           kind,
           profiles: { memory: "1 MB" },
         };
@@ -1252,6 +1301,7 @@ test("agent tool_block validates conflicts, entries and source locations", () =>
     A:
       tools: [bash]
       tool_block: [bash]
+      prompt: Work
   edges:
     - from: A
       to: $sink
@@ -1300,7 +1350,8 @@ test("agent tool_block validates conflicts, entries and source locations", () =>
     "/graph/nodes/A/tool_block/0",
   );
 
-  for (const node of [{}, { tool_block: [] }, { tool_block: ["bash"] }])
+  for (const block of [{}, { tool_block: [] }, { tool_block: ["bash"] }]) {
+    const node = { prompt: "Work", ...block };
     assert.deepEqual(
       parse({
         graph: {
@@ -1310,6 +1361,7 @@ test("agent tool_block validates conflicts, entries and source locations", () =>
       }).graph.nodes.A,
       node,
     );
+  }
 
   const nestedConflict = failure({
     graph: {
@@ -1317,7 +1369,7 @@ test("agent tool_block validates conflicts, entries and source locations", () =>
         Child: {
           kind: "graph",
           graph: {
-            nodes: { Worker: { tools: ["x"], tool_block: ["x"] } },
+            nodes: { Worker: { prompt: "Work", tools: ["x"], tool_block: ["x"] } },
             edges: [{ from: "Worker", to: "$sink", schema }],
           },
         },
@@ -1344,7 +1396,7 @@ test("recursive validation accepts connected graphs with cycles", () => {
     id: "incoming",
     schema,
   });
-  child.nodes.Other = {};
+  child.nodes.Other = { prompt: "Work" };
   child.edges.push({
     from: "$source",
     to: "Other",
@@ -1369,7 +1421,7 @@ test("recursive validation accepts connected graphs with cycles", () => {
   rejectsAt(doc, "/graph/nodes/A/graph/source/routes/incoming");
   routes.incoming = ["$source~>W", "other"];
   for (const id of ["$source", "$sink"]) {
-    child.nodes[id] = {};
+    child.nodes[id] = { prompt: "Work" };
     rejectsAt(doc, `/graph/nodes/A/graph/nodes/${id}`);
     delete child.nodes[id];
   }
@@ -1395,7 +1447,7 @@ test("recursive validation accepts connected graphs with cycles", () => {
   );
 });
 
-test("emit seeds its fan-out even with a never trigger", () => {
+test("an emit parked by never cannot seed its fan-out", () => {
   const doc = variant((d) => {
     d.graph.nodes.A = {
       kind: "emit",
@@ -1404,12 +1456,14 @@ test("emit seeds its fan-out even with a never trigger", () => {
       trigger: "never",
     };
     for (const e of d.graph.edges) e.kind = "message";
-    d.graph.nodes.C = {};
+    d.graph.nodes.C = { prompt: "Work" };
     d.graph.edges.push(
       { from: "A", to: "C", kind: "message", schema },
       { from: "C", to: "B", schema },
     );
   });
+  assert.equal(failure(doc).code, "unstartable-trigger");
+  doc.graph.nodes.A.trigger = "always";
   assert.equal(parse(doc), doc);
 });
 
@@ -1417,7 +1471,7 @@ test("graph topology needs one entry, one exit and full connectivity", () => {
   const g = (edges: [string, string][], extra: JsonObject = {}) => {
     const nodes: Record<string, JsonObject> = {};
     for (const [from, to] of edges)
-      for (const id of [from, to]) if (!id.startsWith("$")) nodes[id] ??= {};
+      for (const id of [from, to]) if (!id.startsWith("$")) nodes[id] ??= { prompt: "Work" };
     return {
       graph: {
         ...extra,
@@ -1449,7 +1503,7 @@ test("graph topology needs one entry, one exit and full connectivity", () => {
     ["A", "B"],
     ["Root", "A"],
   ]);
-  cycle.graph.nodes.A = { trigger: "Root->A" };
+  cycle.graph.nodes.A.trigger = "Root->A";
   for (const doc of [
     g([
       ["A", "B"],
@@ -1524,7 +1578,7 @@ test("graph topology needs one entry, one exit and full connectivity", () => {
     ],
     [
       variant((d) => {
-        d.graph.nodes.Isolated = {};
+        d.graph.nodes.Isolated = { prompt: "Work" };
       }),
       "entry-count",
       "/graph/nodes",
@@ -1558,7 +1612,7 @@ test("standalone validation reports the same graph error without a YAML source l
 
 test("a feedback group starts only if its trigger accepts a viable seed", () => {
   const doc = variant((d) => {
-    d.graph.nodes.Root = {};
+    d.graph.nodes.Root = { prompt: "Work" };
     d.graph.sink = { returns: "Root", trigger: "Root->$sink" };
     d.graph.edges.push(
       { from: "Root", to: "A", schema },
@@ -1573,7 +1627,7 @@ test("a feedback group starts only if its trigger accepts a viable seed", () => 
     { trigger: { any: ["B~>A", "A~>A"] } },
     { trigger: { all: ["Root->A", "B~>A"] } },
   ]) {
-    doc.graph.nodes.A = node;
+    doc.graph.nodes.A = { prompt: "Draft", ...node };
     const error = failure(doc);
     assert.equal(error.code, "unstartable-trigger");
     assert.equal(
@@ -1589,7 +1643,7 @@ test("a feedback group starts only if its trigger accepts a viable seed", () => 
     "always",
     { all: [] },
   ]) {
-    doc.graph.nodes.A = { trigger };
+    doc.graph.nodes.A.trigger = trigger;
     assert.equal(parse(doc), doc);
   }
 });
@@ -1597,7 +1651,7 @@ test("a feedback group starts only if its trigger accepts a viable seed", () => 
 test("parked nodes are legal but do not supply their consumers", () => {
   for (const trigger of ["never", { any: [] }]) {
     const doc = variant((d) => {
-      d.graph.nodes.A = { trigger };
+      d.graph.nodes.A.trigger = trigger;
     });
     const blocked = failure(doc);
     assert.equal(blocked.code, "unstartable-trigger");
@@ -1775,7 +1829,7 @@ test("every edge kind at every level requires a schema mapping", () => {
             kind: "graph",
             graph: {
               source: { routes: { incoming: ["$source~>W"] } },
-              nodes: { W: {} },
+              nodes: { W: { prompt: "Work" } },
               edges,
             },
           },
@@ -1901,7 +1955,7 @@ test("schemas must be acyclic JSON; shared YAML anchors are fine", () => {
   for (const value of [undefined, () => 1, new Date(0), Number.NaN])
     rejectsSchema({ const: value }, "/const", /JSON value/);
   const shared = parse(`graph:
-  nodes: { A: {} }
+  nodes: { A: { prompt: Work } }
   edges:
     - from: A
       to: $sink
@@ -1913,7 +1967,7 @@ test("schemas must be acyclic JSON; shared YAML anchors are fine", () => {
   assert.throws(
     () =>
       parse(`graph:
-  nodes: { A: {} }
+  nodes: { A: { prompt: Work } }
   edges:
     - from: A
       to: $sink
@@ -2040,7 +2094,7 @@ test("non-boolean probes fail document validation", () => {
 
 test("probe flags survive YAML and are checked at nested levels", () => {
   const yaml = parse(`graph:
-  nodes: { A: {} }
+  nodes: { A: { prompt: Work } }
   edges:
     - { from: A, to: $sink, schema: { type: integer }, probe: true }
 `);
@@ -2072,20 +2126,20 @@ test("probe flags survive YAML and are checked at nested levels", () => {
 const streamingWrapper = (...kinds: (string | undefined)[]): LooseDoc => ({
   graph: {
     nodes: {
-      P: {},
+      P: { prompt: "Prepare" },
       A: {
         kind: "graph",
         graph: {
           source: { routes: { in: ["$source~>W"] } },
           sink: { stream: true },
-          nodes: { W: {} },
+          nodes: { W: { prompt: "Work" } },
           edges: [
             { from: "$source", to: "W", kind: "message", schema },
             { from: "W", to: "$sink", kind: "message", schema },
           ],
         },
       },
-      B: {},
+      B: { prompt: "Review" },
     },
     edges: [
       ...kinds.map(

@@ -35,19 +35,12 @@ import {
   yieldsThen,
 } from "./deterministic-support.ts";
 import {
+  addPromptOnce,
   agencyGraph,
   runAvailable,
   scheduleCall,
   schedulerRequestOf,
 } from "./support.ts";
-
-const member = (agent: MockAgent, description: string, id?: string) => ({
-  ...(id === undefined ? {} : { id: NodeId.create(id) }),
-  state: agent,
-  policy: LockPolicy,
-  description,
-  trigger: TriggerRule.always(),
-});
 
 test("SchedulerRequest carries native descriptions and source-exact latest agency metadata only for candidates", async () => {
   const IDLE = "IDLE-DESCRIPTION-91f";
@@ -55,7 +48,6 @@ test("SchedulerRequest carries native descriptions and source-exact latest agenc
   const review = reason("need review", "y1");
   const approval = reason("need approval", "y2");
   const worker = new MockAgent({
-    prompt: "work",
     runs: [
       run([pause([review]), pause([approval]), settle(assistant(RESULT))]),
     ],
@@ -73,8 +65,14 @@ test("SchedulerRequest carries native descriptions and source-exact latest agenc
     { prompt: "go" },
   );
   const graph = context.graph;
-  const w = graph.addNode(member(worker, "the worker"));
-  const i = graph.addNode(member(idle, IDLE));
+  const w = addPromptOnce(graph, "worker", worker, "work", "the worker");
+  const i = graph.addNode({
+    state: idle,
+    policy: LockPolicy,
+    description: IDLE,
+    prompt: "Stay idle",
+    trigger: TriggerRule.never(),
+  });
   const raw = graph.addNode({
     policy: LockPolicy,
     description: "",
@@ -117,7 +115,7 @@ test("SchedulerRequest carries native descriptions and source-exact latest agenc
     assert.deepEqual(workerInfo[0], {
       status: "ready",
       description: "the worker",
-      metadata: { agentStatus: "ready" },
+      metadata: { agentStatus: "idle" },
     });
     const pauses = workerInfo
       .filter(({ metadata }) => metadata?.agentStatus === "suspended")
@@ -164,7 +162,6 @@ test("SchedulerRequest carries native descriptions and source-exact latest agenc
 test("schedules.stuck flags a node held by its loop guard until it resumes", async () => {
   const hold = reason("loop guard: stuck after 1 redirect(s)", "g1", "guard");
   const worker = new MockAgent({
-    prompt: "work",
     runs: [run([pause([hold]), settle(assistant("done"))])],
   });
   const ports = terminalPorts();
@@ -189,7 +186,7 @@ test("schedules.stuck flags a node held by its loop guard until it resumes", asy
       return schedules.parallel()(snapshot);
     },
   });
-  const w = graph.addNode(member(worker, "worker"));
+  const w = addPromptOnce(graph, "worker", worker, "work", "worker");
   ports.connect(graph, w);
   try {
     await context.run();
@@ -241,7 +238,6 @@ test("graph abort joins a pending oracle and member abort; repeated close joins 
     }
   }
   const worker = new LifecycleMember({
-    prompt: "work",
     runs: [yieldsThen(1, "unused")],
   });
   const reached = Promise.withResolvers<void>();
@@ -274,7 +270,7 @@ test("graph abort joins a pending oracle and member abort; repeated close joins 
     },
   ]);
   const graph = context.graph;
-  const id = graph.addNode(member(worker, "worker"));
+  const id = addPromptOnce(graph, "worker", worker, "work", "worker");
   ports.connect(graph, id);
   try {
     const pending = context.run().then(

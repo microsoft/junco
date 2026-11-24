@@ -744,11 +744,16 @@ const PREFLIGHT = `
 graph:
   name: Preflight
   nodes:
+    Assignment:
+      kind: emit
+      text: Call the probe tool once and report the returned value verbatim.
+      spec: The final answer contains only the probe value.
     Probe:
       description: Calls the probe tool and returns its value.
+      trigger: Assignment~>Probe
       system: You are a test agent. Use tools exactly as instructed.
       tools: [probe]
-      prompt: Call the probe tool once. Then reply with exactly the value it returned and nothing else.
+      prompt: Follow the probe assignment in the next user message. Reply with exactly the value the tool returns.
     Relay:
       kind: code
       description: Hands Probe's normal final answer to Echo as a message, like the workflow's code nodes.
@@ -759,6 +764,7 @@ graph:
       trigger: Relay~>Echo
       prompt: "Reply with exactly the value in the user message following this prompt and nothing else."
   edges:
+    - {from: Assignment, to: Probe, kind: message, schema: {}}
     - {from: Probe, to: Relay, schema: {}}
     - {from: Relay, to: Echo, kind: message, schema: {type: object, required: [kind, text], properties: {kind: {const: prompt}, text: {type: string}}}}
     - {from: Echo, to: $sink, schema: {}}
@@ -770,16 +776,11 @@ const PREFLIGHT_STRENGTH = (node: string): schedules.ModelStrengthName => (node 
 const Relay: syntax.DeterministicNode = ({ edges, policy }) => {
   const output = edges.get("Relay~>Echo");
   if (output === undefined) throw new Error("preflight declares no Relay~>Echo edge");
-  let published = false;
-  return {
-    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
-      const view = yield [];
-      const text = syntax.finalText(view.values.get(graph.EdgeId.create("Probe->Relay")), "Probe");
-      published = true;
-      yield [graph.Message.create(output, graph.nodes.Task.create({ kind: "prompt", text, spec: "The Probe's report is acknowledged." }))];
-    }, policy),
-    is_available: (_view, triggered) => triggered && !published,
-  };
+  return new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+    const view = yield [];
+    const text = syntax.finalText(view.values.get(graph.EdgeId.create("Probe->Relay")), "Probe");
+    return new graph.FinalMessages([graph.Message.create(output, graph.nodes.Task.create({ kind: "prompt", text, spec: "The Probe's report is acknowledged." }))]);
+  }, policy);
 };
 
 type SessionEntry = { type?: string; message?: { role?: string; content?: unknown; toolName?: string } };

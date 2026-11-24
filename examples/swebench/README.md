@@ -18,9 +18,9 @@ The prepared small-model workflow uses Sonnet 5.5 with high thinking for Lead, P
 
 Each instance gets nine containers from its official SWE-bench image: six agent sandboxes and three acceptance sandboxes reachable only by code nodes. Bash runs at `/testbed`, with the `testbed` environment active and no network. Native host tools and `task` are blocked; Lead and Planner have no shell.
 
-`CheckPlan` runs each draft's checks separately on the clean canonical baseline, resetting after each. It stages at most three correction turns on the plan producer. A parsed fourth draft proceeds with surviving checks (possibly none), records `planning/degraded.txt`, and warns both candidates. A malformed fourth draft still fails. The tournament prefers the first valid patch; if both fail acceptance, it selects an applying patch with the fewest failed checks (tie: A), records the degraded selection and asks Integrator to repair it. Two non-applying candidates still fail. Finish checks the unchanged final patch in a pristine sandbox; only the official SWE-bench evaluator decides resolution.
+`CheckPlan` receives each completed draft, runs its checks separately on the clean canonical baseline, and resets after each check. It sends the plan producer at most three correction assignments with the attempt number and observed failures. A parsed fourth draft proceeds with surviving checks (possibly none), records `planning/degraded.txt`, and warns both candidates. A malformed fourth draft still fails. The tournament prefers the first valid patch; if both fail acceptance, it selects an applying patch with the fewest failed checks (tie: A), records the degraded selection and asks Integrator to repair it. Two non-applying candidates still fail. Finish checks the unchanged final patch in a pristine sandbox; only the official SWE-bench evaluator decides resolution.
 
-Dormant code supports YAML-only alternatives: multiple issue recipients, a Critic/Merge plan producer with a correction self-edge, `JoinDrafts`, and edge-keyed Integrator/Verifier ablations. The incumbent retains all roles.
+Dormant code supports YAML-only alternatives: multiple issue recipients, a Critic/Merge plan producer with return and correction message edges to and from `CheckPlan`, `JoinDrafts`, and edge-keyed Integrator/Verifier ablations. The incumbent retains all roles.
 
 ## Running
 

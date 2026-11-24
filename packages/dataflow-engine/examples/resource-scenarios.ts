@@ -107,14 +107,11 @@ export async function runTokenRace(tracer?: DataflowTracer): Promise<{
     Edge.message<typeof StringSchema, string>(name, StringSchema),
   );
   const started = new Set<string>();
-  let winner: string | undefined;
   const racers = ["R1", "R2", "R3"].map((name, i) =>
     graph.addNode({
       id: NodeId.create(name),
       state: undefined,
       trigger: TriggerRule.always(),
-      is_available: (_view, triggered) =>
-        triggered && (winner === undefined || started.has(name)),
       step: async function* () {
         started.add(name);
         yield [Message.create(edges[i], name)];
@@ -128,8 +125,7 @@ export async function runTokenRace(tracer?: DataflowTracer): Promise<{
     trigger: TriggerRule.anyOf(...edges.map((edge) => TriggerEntry.on(edge))),
     step: async function* () {
       const view = yield [];
-      winner = edges.flatMap((edge) => [...from(view, edge)])[0];
-      return winner;
+      return edges.flatMap((edge) => [...from(view, edge)])[0];
     },
   });
   racers.forEach((racer, i) => {
@@ -154,9 +150,15 @@ export async function runTokenRace(tracer?: DataflowTracer): Promise<{
     waves.push(nodeIds(d.selected));
     return d;
   };
-  const results = await context({ graph, scheduler }).run();
+  const execution = context({ graph, scheduler });
+  let results = await execution.step();
+  let winner = results.get(join);
+  while (winner === undefined || !results.has(NodeId.create(winner))) {
+    results = await execution.step();
+    winner = results.get(join);
+  }
   return {
-    winner: results.get(join),
+    winner,
     waves,
     started: [...started],
     completedRacers: racers.filter((id) => results.has(id)),

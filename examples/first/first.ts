@@ -1,5 +1,5 @@
-// My first Junco workflow (README): two Playwright-browsing agents in parallel, one reviewer. Run from inside a seed
-// after `pi` → `/login` → GitHub Copilot:
+// Goals assigns each browser agent the question once. Reviewer runs when it can consume both reports.
+// Run from inside a seed after `pi` → `/login` → GitHub Copilot:
 //
 //   bun run /path/to/junco/examples/first/first.ts
 

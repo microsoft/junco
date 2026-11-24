@@ -4,8 +4,10 @@ import {
   DataflowDefinitionError,
   DummyTracer,
   Edge,
+  Message,
   NodeId,
   type NodeIdType,
+  type ParentView,
   Sink,
   Source,
   TriggerRule,
@@ -17,6 +19,7 @@ import * as O from "fp-ts/lib/Option.js";
 import {
   type Agentic,
   JuncoGraph,
+  type MockAgent,
   type MockFrame,
   type MockRequest,
   type MockRun,
@@ -26,6 +29,7 @@ import {
 import {
   type AgenticYieldReason,
   AssistantMessageSchema,
+  type JuncoAgent,
   TaskSchema,
 } from "junco-agent";
 import {
@@ -152,6 +156,40 @@ export function terminalPorts<
       graph.addEdge(terminal, sink.id, edge);
     },
   };
+}
+
+/** Register one finite prompt run, admitted by its own task on the source port. */
+export function addPromptRun(
+  graph: JuncoGraph<typeof TaskSchema, AssistantMessage>,
+  state: MockAgent | JuncoAgent,
+  id: string,
+  prompt: string | ((view: ParentView<typeof TaskSchema, AssistantMessage>) => string) = id,
+): NodeIdType {
+  const work = Edge.message<typeof TaskSchema, AssistantMessage>(
+    `$source~>${id}`,
+    TaskSchema,
+  );
+  const node = graph.addNode({
+    id: NodeId.create(id),
+    description: id,
+    state,
+    policy: LockPolicy,
+    prompt,
+    trigger: TriggerRule.when(work),
+  });
+  graph.addEdge(graph.source.id, node, work);
+  graph.emit(
+    graph.source.id,
+    Message.create(work, {
+      kind: "prompt",
+      text: id,
+      taskId: id,
+      spec: id,
+      deps: [],
+      history: [],
+    }),
+  );
+  return node;
 }
 
 // Transcript builders ------------------------------------------------------------------------------

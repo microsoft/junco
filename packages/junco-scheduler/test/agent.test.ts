@@ -312,16 +312,13 @@ test("wire snapshots only disclose available owned nodes' metadata and raw measu
   };
   type Metadata = Exclude<ReturnType<typeof describeNode>, undefined>;
   const shown: SchedulerRequest<Metadata>[] = [];
-  let plainReady = true;
   for (const name of ["worker", "plain", "unowned", "dormant"])
     graph.addNode({
       id: id(name),
       state: { secret: STATE },
       description: name === "worker" ? "" : undefined,
       trigger: name === "dormant" ? TriggerRule.never() : TriggerRule.always(),
-      is_available: (_view, triggered) =>
-        triggered && (name !== "plain" || plainReady),
-      step: twoStep([], name),
+      step: name === "plain" ? async function* () { return name; } : twoStep([], name),
     });
   const queued = Edge.message<typeof StringSchema, string>(
     "private-queue",
@@ -348,7 +345,6 @@ test("wire snapshots only disclose available owned nodes' metadata and raw measu
     ),
   });
   await execution.step();
-  plainReady = false;
   await execution.step();
   assert.deepEqual(
     shown.map((request) => request.nodes),

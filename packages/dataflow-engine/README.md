@@ -2,7 +2,7 @@
 
 Async-generator dataflow engine for TypeScript with externally paired scheduling policies.
 
-Each node is an `async function*`. The graph owns work, topology, concrete execution and resource lifetime, never a scheduler. The external `junco-scheduler` context selects existing work nodes and lowers each decision to one native column; triggers and pure input-read hooks determine how much each selected node reads.
+Each node is an `async function*`. The graph owns the nodes and their lifetime. Its triggers admit work, and a generator can request another turn of work already in progress. The external `junco-scheduler` context selects eligible nodes and decides which queued inputs they read.
 
 ## Architecture
 
@@ -21,8 +21,9 @@ flowchart TB
     L --> K["execute(Schedule)<br/>native window/thread/read validation"]
     K --> X["consume selected inputs into ParentView#lt;N, T#gt;"]
     X --> G["NodeGenerator#lt;N, T#gt;.next(view)<br/>prime without consuming; resume with delivered view"]
-    G -- "yield Message[]" --> B["route to outbound message queues"]
-    G -- "return T" --> R["graph.result(id): Option#lt;T#gt;<br/>resolve value edge cells"]
+    G -- "yield batch / yield { resume: batch }" --> B["route to outbound message queues"]
+    G -- "return FinalMessages" --> B
+    G -- "return T" --> R["graph.result(id): Option#lt;T#gt;<br/>update value cells and return-message FIFOs"]
     G -- "throw EH" --> F["reject: DataflowNodeError#lt;EH#gt;"]
   end
   N --> A
@@ -35,7 +36,7 @@ flowchart TB
 | Part | Role |
 |---|---|
 | `DataflowGraph<S, N, T, EH>` | Owns native nodes/edges (an `ngraph.graph` multigraph), observations and concrete execution via `evaluate`. `S` and `T` retain native state and result types; `N extends TSchema` is the TypeBox message schema (payloads are raw `Static<N>`, use a union of schema types for heterogeneous graphs); `EH` is the node-body error type. Construction takes only window/thread bounds and an optional tracer. |
-| `Edge.message(id, schema, probe?)` / `Edge.value(id, schema, probe?)` | A FIFO queue of `Static<N>`, or a cell holding the source node's latest return value. The TypeBox schema is required; every emission (and `Source.enqueue`/`Sink.send` against the port `schema`) and every return published on a value edge is validated, failing with `DataflowDefinitionError` before anything is queued or published. The optional `probe(value)` observes each accepted publication once, after it is queued or the cell is updated (a return rejected by any outbound value edge publishes and probes nothing); its exceptions are reported and swallowed. |
+| `Edge.message(id, schema, probe?)`, `Edge.value(…)`, `Edge.returned(…)` | `message` queues ordinary publications. `value` retains the latest successful return; `returned` queues each successful return by reference, even if the same object returns twice. All require TypeBox schemas. A return must pass every destination schema before any result, cell or FIFO changes. An optional `probe(value)` observes each accepted publication after delivery; its exceptions are reported and swallowed. |
 | Triggers | Decide **which** inbound edges must have something before a node can run: `always`, `when`, `allOf`, `anyOf`, `never`. |
 | `SchedulerContext<S,N,T,C,G>` | Externally pairs a graph with a typed policy, application metadata `C` and independent history; its `step()`/`run()` drive the graph. Policies and contexts are never work members. |
 
@@ -98,12 +99,12 @@ const results = await execution.run();
 
 ## Writing nodes as async generators
 
-A node body has the type `NodeGenerator<N, T> = AsyncGenerator<Message<N>[], T, ParentView<N, T>>`. Each activation advances its generator exactly once:
+A node body has the type `NodeGenerator<N, T> = AsyncGenerator<NodeYield<N>, T | FinalMessages<N>, ParentView<N, T>>`. Each activation advances its generator exactly once:
 
 1. **Prime.** On a node's first activation (or its first activation after re-arming), the runtime calls `step()` to create a fresh generator and then `next()` without consuming any input. A dependent node therefore starts with `let view = yield []`, while a source can yield real output straight away.
-2. **Deliver.** Every later activation pops the scheduled inputs and calls `next(view)`. `from(view, edge)` (or `view.messages.get(edge.id)`) is this turn's batch from that edge. A key exists only for an edge that actually delivered something, which is how an `anyOf` body tells which branch fired. `view.values` holds the value edges that have resolved.
-3. **Emit.** Each `yield` is the full list of messages for this turn, routed in order. `yield []` emits nothing and keeps the node alive.
-4. **Finish.** `return value` marks the node `done`, replaces its retained value in `graph.results()` and the context drive's result map, and re-resolves every outbound value edge with that latest return. A value edge from the node to itself immediately re-arms it to `ready`, discarding the finished generator but retaining the same node state. Its next activation starts a new generator. A node that never returns, such as a streaming sink or any `StepNode`, is absent from the results.
+2. **Deliver.** When the trigger fires, the runtime calls `next(view)` with the scheduled messages and resolved inbound values. `from(view, edge)` reads this turn's batch; `view.messages` has a key only for an edge that delivered something. A turn admitted only as a continuation receives empty message and value lookups, even if a non-triggering input is queued.
+3. **Yield.** `yield batch` publishes messages in order and waits for the trigger to fire again. `yield { resume: batch }` publishes in the same order and requests another turn of this operation. Either batch may be empty.
+4. **Finish.** `return value` records the result (including `undefined`), updates every outbound value cell, and enqueues the return once on each `Edge.returned` FIFO. A value self-edge re-arms the node: the next admission starts a fresh generator with the same state. `return new FinalMessages(batch)` instead publishes the batch and ends the node in this activation, without recording a result, resolving a cell or sending a return notification.
 5. **Fail.** A throw terminates the node and rejects execution with `DataflowNodeError` (`nodeId`, `error: EH`) — unless the node has an `on_error` hook (below). A `UsageLimitError` (an exhausted token or tool budget; see `junco-scheduler`'s `limit`), alone or inside an `AggregateError`/`cause` chain, propagates unchanged and never reaches `on_error`. A budget that already failed refuses the activation before it starts, and fails it after its body returns, before anything is routed.
 
 An optional `on_error(error, signal)` (`ErrorFn<S, N, T>`) on the spec recovers a body failure: a throw from `step()` or the generator's `next()`. The node is `done` first; the hook then runs once, as a method with the node as `this`, in the same activation, and its returned messages are routed in order like a yield (`[]` routes nothing). The node records no result and its value edges stay unresolved; the tracer sees the activation's `fail(error)` and, if nothing else fails, a normal run `end`. A body that threw exactly the aborted signal's reason propagates it without calling the hook. Wiring, scheduling and routing errors (`DataflowDefinitionError`) never reach it. A hook that throws rejects the invocation with `DataflowNodeError` carrying its own error (or a `DataflowDefinitionError`/the aborted signal's reason unchanged) and is never run again; an unwired returned message rejects after earlier ones were queued.
@@ -143,7 +144,7 @@ const report = graph.addNode({
 graph.addEdge(source, report, done);
 ```
 
-A value edge is never consumed: once resolved, it satisfies its trigger on every later turn and carries the source's latest return. Only a **value self-edge** re-arms a returned node: re-resolution on a non-self edge never re-arms a finished consumer, and message self-edges do not re-arm it either. A value-feedback loop must bound its runs with `is_available` (for example, a retained round counter); returning alone no longer stops such a loop. More generally, a node triggered only by resolved value edges must return without self-feedback or eventually decline availability, or `run()` never settles.
+A resolved value stays true as a trigger operand and carries the source's latest result. Returning ends an ordinary native node unless it has a value self-edge. That self-edge re-arms the node even if its result did not change; a non-self edge or message self-edge does not. To run once per upstream settlement, consume an `Edge.returned` FIFO. A loop that repeatedly re-arms on `always` or a retained value can keep `run()` active indefinitely.
 
 ### Constant fan-out and fan-in
 
@@ -165,7 +166,7 @@ const one = graph.addNode(new ConstFanout(1, [a], { state: undefined, ret: "one"
 const two = graph.addNode(new ConstFanout(2, [b], { state: undefined, ret: "two" }));
 const join = graph.addNode(new ConstFanin([b, a], list, { state: undefined, ret: "join" }));
 const seen: number[] = [];
-const sink = graph.addNode(new StepNode<void, number | number[], string>((_state, view) => {
+const sink = graph.addNode(new StepNode<void, typeof NumberSchema | typeof ListSchema, string>((_state, view) => {
   for (const batch of from(view, list)) {
     if (!Array.isArray(batch)) throw new Error("Expected a collected list");
     seen.push(...batch);
@@ -184,10 +185,11 @@ await execution.run(); // seen = [2, 1]
 | `TriggerRule.when(e)` | `e` has a queued message or a resolved value |
 | `TriggerRule.allOf(TriggerEntry.on(a), TriggerEntry.on(b))` | every entry is satisfied; when only some are, nothing is read |
 | `TriggerRule.anyOf(TriggerEntry.on(a), TriggerEntry.on(b))` | the first satisfied entry, in the order given |
+| `TriggerRule.never()` | never (an empty `anyOf`; `always()` is an empty `allOf`) |
 
-The engine evaluates each node's trigger first, then consults its `is_available(view, triggered)` hook. The default hook returns `triggered`; a node may override it, e.g. to wait for a deeper backlog or to keep a started actor resumable.
+`graph.available()` evaluates the declared rule for every unfinished node. It offers the node when the rule fires or the generator owes a continuation. To wait for a larger batch, accumulate inputs in a node body and publish when enough have arrived. To hold work until a release, wire a message edge into its trigger.
 
-`NodeSpec<S, N, T>` is `NodeOptions<N, T>` plus `state`, `step` and the optional `on_error`. `NodeOptions` holds the registration fields every node kind shares: optional `id`, optional `description` (free prose, kept on the registered `Node` when given and never used for scheduling), the required `trigger` and the optional `is_available` hook. Libraries building node specs reuse this type rather than declaring their own.
+`NodeSpec<S, N, T>` is `NodeOptions<N, T>` plus `state`, `step` and the optional `on_error` failure handler. `NodeOptions` contains a required `trigger` and optional `id` and `description`. Descriptions never affect scheduling.
 
 Nodes do not declare resource profiles. To retain measurements for a scheduler, pair it with `context({ graph, scheduler, measurementWindows: new Map([["runtime", 8]]) })`. This keeps the last eight observed runtime samples **per node**. Omitted resources and zero-length windows retain nothing; the default collects nothing.
 
@@ -210,9 +212,9 @@ const execution = context({ graph, scheduler: choose({ rank: () => 0 }) });
 const results = await execution.run(); // ties choose by string ID, not registration order
 ```
 
-`Scheduler<S,N,T,C>` is one sync/async function type returning `{ selected }`, an ordered array of `{ nodeId, modelStrength }` entries; `select(ids)` defaults strengths to `med` (2), and `nodeIds(selected)` extracts native IDs. All native data and metadata remain typed. `parallel()` and `roundRobin()` are universally callable across graph/data domains. Priority/FIFO ranks, nondeterminism and fallback are ordinary TypeScript callbacks, not extra operators. Optional `pi` is imported from `junco-scheduler/agent`, never required by the core entrypoint.
+`Scheduler<S,N,T,C>` returns `{ selected }`, an ordered array of `{ nodeId, modelStrength, readEdges }` entries. `select(snapshot, ids)` chooses `med` (2) and each node's planned reads. Each selected message edge delivers its whole queue. `nodeIds(selected)` extracts native IDs. `parallel()` and `roundRobin()` work across graph/data domains. The optional `pi` policy is imported from `junco-scheduler/agent`.
 
-`triggerInputs` reads each fired edge whole. A context's optional pure `readInputs(id, candidate)` instead returns counts (`n`, `"all"` or `"none"`) per edge, and is reused for live reads of running nodes. Native execution validates bounds, availability and all read maps before starting a column; invalid decisions or reads consume nothing and throw `DataflowDefinitionError`. Wiring mistakes throw the same error.
+`triggerInputs` plans every edge of a satisfied conjunction or the first satisfied edge of a disjunction. A context may customize the plan with `readInputs(id, candidate)`. A continuation-only candidate has an empty plan; a scheduler decision asking to read one of its edges is invalid. At the native `execute` boundary, a read map can take `n`, `"all"` or `"none"` from each edge. Live revalidation ensures a continuation-only turn consumes nothing.
 
 `messageInputs(candidate)` instead reads every nonempty inbound message queue on activation, independent of trigger edges, and consumes no value edges. This keeps inbox delivery opaque while triggers independently control readiness.
 
@@ -240,7 +242,7 @@ For raw observations, pass `onMeasurement: (nodeId, kind, value) => …` to `exe
 
 ### Typed observations and selection authority
 
-`graph.observe(): DataflowObservation<S,N,T>` captures **all** native nodes, including done/unavailable work, with `id`, `status`, optional `description` and native `state`; insertion-ordered link tuples retain direction, parallel links and self-loops. It also contains detached `ParentView` input containers, retained results and a monotone native version. Reads never invoke readiness hooks, consume inputs or activate work. Cached containers are reused until a tracked mutation, activation admission or settlement advances that version; direct writes through retained nodes/transports or opaque values are not tracked.
+`graph.observe(): DataflowObservation<S,N,T>` captures **all** native nodes, including done/unavailable work, with `id`, `status`, optional `description` and native `state`; insertion-ordered link tuples retain direction, parallel links and self-loops. It also contains detached `ParentView` input containers, retained results and a monotone native version. Neither observation nor availability consumes input or advances a node. Cached containers are reused until a tracked mutation, activation admission or settlement advances that version; direct writes through retained nodes/transports or opaque values are not tracked.
 
 Containers, queue arrays, primitive fields and membership/order are detached. Opaque `S/N/T` identities are borrowed, never deep-cloned or frozen: policies must only read them, and applications needing historical object contents must use immutable data. External `describeNode` metadata is captured freshly per decision, not cached with native observations; omission gives an empty `ReadonlyMap<NodeIdType,never>`, while `0`, `false`, `null` and `""` are valid values. A mutation during planning/read lowering rejects the stale decision before execution, without a retry.
 
@@ -248,15 +250,15 @@ Containers, queue arrays, primitive fields and membership/order are detached. Op
 
 ### Deterministic source and sink ports
 
-`Source<N,T>(route, { id, description? })` and `Sink<N,T>(body, { id, trigger, is_available?, description? })` are real native node specs (`state === this`), exported by the engine. They consume scheduling capacity and appear in topology, tracing and history. Plain `DataflowGraph` does not require ports; `JuncoGraph` requires fresh positional instances.
+`Source<N,T>(route, { id, schema, trigger?, description? })` and `Sink<N,T>(body, { id, schema, trigger, description? })` are native node specs (`state === this`). They consume scheduling capacity and appear in topology, tracing and history. Plain `DataflowGraph` does not require ports; `JuncoGraph` takes fresh positional instances.
 
-`source.enqueue(view)` detaches the native edge-addressed `ParentView` and queues non-empty deliveries FIFO; `peek()` is non-consuming. Empty message keys and present value keys (including `undefined`) survive, opaque payloads remain borrowed, and empty ingress is ignored. Only a scheduled Source invokes its synchronous route, consuming one delivery on its first selected activation with no initial empty yield. Route validation and routing run before selected downstream work starts in that column. Its revision advances on admission/consumption, not reads.
+`source.enqueue(view)` validates and detaches a nonempty delivery before appending it to the FIFO. Empty message keys and present value keys (including `undefined`) survive; opaque payloads remain borrowed. `peek()` observes the head without consuming it. A source with no pending delivery is never offered, even if it holds a credit. With the default `always` trigger, each activation routes one delivery. An edge-triggered source first primes without consuming anything. Each subsequent activation must read credits satisfying its trigger before routing the FIFO head. Only ordinary inbound message edges named in the source trigger may carry credits. The source revision advances on enqueue and consumption, never on reads.
 
-A Sink delegates an ordinary generator, intercepts yielded messages into its ordered outbox and yields `[]` internally. `sink.send(message)` can stage final messages before the body returns its exact native `T`. `drain(deliver)` synchronously removes each message only after delivery succeeds; a failed delivery retains that message and the suffix without replaying successful prefixes. A sink's trigger/availability must keep it dormant when no unhandled input exists; retained value edges must not create a busy loop. Nested agency output is only the designated sink's retained result, including present `undefined`, never an arbitrary member selector.
+A sink stages its body's yielded or terminal messages in its ordered outbox. It forwards the body's choice to wait for another trigger or request a continuation. `sink.send(message)` can also stage output before the body returns a value. `drain(deliver)` removes each message only after delivery succeeds; a failure retains that message and its suffix. Use a consumable input or finish the sink when no further work is expected. A nested agency's result comes from its designated sink, including a returned `undefined`.
 
 ### Emitting from outside a node body
 
-`graph.emit(fromId, Message.create(edge, payload))` synchronously appends one payload to the message edge wired out of `fromId` in this graph, exactly as a yielded message is routed. It only enqueues: it does not drive the graph, consume inputs, complete or start `fromId`, or resolve a value edge; the next availability and read decision observes the message. Calls and yields append in invocation order, and an enqueued message is never rolled back. An edge not wired out of `fromId` (including an incoming-only edge) and a value edge both throw `DataflowDefinitionError`. Call it on the graph that owns the outgoing edge: a nested graph's own `emit` addresses only its internal edges.
+`graph.emit(fromId, Message.create(edge, payload))` synchronously appends one validated payload to an ordinary message edge wired out of `fromId`, just like a yielded message. It does not advance a node or resolve a value cell. Calls and yields append in invocation order; a successful publication is never rolled back. An unwired, incoming-only, value or return-message edge throws `DataflowDefinitionError`: only the runtime can publish a settlement. Call `emit` on the graph that owns the outgoing edge.
 
 ## Offline profile fitting
 
@@ -271,6 +273,8 @@ A node whose state is itself a `DataflowGraph` renders as a `subgraph` titled wi
 ## Tracing
 
 Pass a `DataflowTracer` as the third constructor argument to observe execution; omit it for an untraced graph. `startRun(graph)` fires once per native `evaluate` scope (therefore once per context `step()`/`run()` invocation), covering planning as well as work. Its handle observes every generator activation (`"prime"` without a view, `"resume"` with the delivered view), yield/return, node failure and invocation end/failure. A context step's `end` means that decision completed, not that the graph is quiescent. Callbacks run synchronously as readonly observers and must snapshot retained data before returning. Completion callbacks (`end`/`fail`) may return promises: `evaluate` joins every completion before settling, without awaiting delivery inline. Throws and rejections warn and cannot change computation or mask its failure. There is no tracer `flush()`; a settled `run()` means delivery finished. Complaints are not part of the tracer interface.
+
+A step trace receives the routed batch for both forms of yield. For a terminal batch it receives `done: true` with a `FinalMessages` instance whose `messages` were published; the run's results map contains no result from that completion.
 
 `DummyTracer` is the shipped no-op implementation. The separate [`dataflow-engine-opik`](../dataflow-engine-opik) package provides `OpikTracer(client, name?)`, which exports each run as one Opik trace carrying the graph's Mermaid topology and one child span per activation. This package never depends on Opik.
 

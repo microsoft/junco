@@ -164,47 +164,39 @@ type ToolResult =
 type Outcome = { plan: Static<typeof Step>[]; results: ToolResult[] };
 
 /** Runs trusted fixture reads and publishes one quarantined request plus a private executor handoff. */
-export const Interpreter: syntax.DeterministicNode<CamelContext> = ({ context, edges, policy }) => {
-  let published = false;
-  return {
-    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
-      const inputs = yield [];
-      const { steps } = parseJson(syntax.finalText(inputs.values.get(graph.EdgeId.create("PLLM->Interpreter")), "PLLM"), Plan, "PLLM");
-      const at = steps.findIndex((step) => step.tool === "query_ai_assistant");
-      // shortcut: one quarantined query per plan, upgrade to a loop over QLLM when plans need several.
-      if (at < 0 || steps.slice(at + 1).some((step) => step.tool === "query_ai_assistant"))
-        throw new Error("plan must contain exactly one query_ai_assistant step");
-      const store: Record<string, Var> = Object.create(null);
-      for (const step of steps.slice(0, at)) {
-        if (step.tool !== "get_last_email") throw new Error("only get_last_email may precede query_ai_assistant");
-        store[step.as] = emailVar(getLastEmail(context.inbox));
-      }
-      const step = steps[at]!;
-      if (step.tool !== "query_ai_assistant") throw new Error("expected query_ai_assistant");
-      const query = resolve(step.query, store);
-      const queryText = typeof query.value === "string" ? query.value : JSON.stringify(query.value);
-      const text = `${queryText}\n\nOutput schema (one JSON object with exactly these fields): ${JSON.stringify({ ...step.output_schema, have_enough_information: "boolean" })}`;
-      const handoff: Handoff = {
-        steps: steps.slice(at + 1), store,
-        query: { as: step.as, output_schema: step.output_schema, sources: query.sources, readers: query.readers },
-      };
-      published = true;
-      const tasks = [
-        Task.create({ kind: "prompt", text, spec: "The reply is one JSON object matching the output schema." }),
-        Task.create({ kind: "prompt", text: JSON.stringify(handoff), spec: "The remaining plan steps are executed." }),
-      ];
-      while (true) yield [
-        graph.Message.create(edges.get("Interpreter~>QLLM")!, tasks[0]),
-        graph.Message.create(edges.get("Interpreter~>Executor")!, tasks[1]),
-      ];
-    }, policy),
-    is_available: (_view, triggered) => triggered && !published,
-  };
-};
+export const Interpreter: syntax.DeterministicNode<CamelContext> = ({ context, edges, policy }) =>
+  new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+    const inputs = yield [];
+    const { steps } = parseJson(syntax.finalText(inputs.values.get(graph.EdgeId.create("PLLM->Interpreter")), "PLLM"), Plan, "PLLM");
+    const at = steps.findIndex((step) => step.tool === "query_ai_assistant");
+    // shortcut: one quarantined query per plan, upgrade to a loop over QLLM when plans need several.
+    if (at < 0 || steps.slice(at + 1).some((step) => step.tool === "query_ai_assistant"))
+      throw new Error("plan must contain exactly one query_ai_assistant step");
+    const store: Record<string, Var> = Object.create(null);
+    for (const step of steps.slice(0, at)) {
+      if (step.tool !== "get_last_email") throw new Error("only get_last_email may precede query_ai_assistant");
+      store[step.as] = emailVar(getLastEmail(context.inbox));
+    }
+    const step = steps[at]!;
+    if (step.tool !== "query_ai_assistant") throw new Error("expected query_ai_assistant");
+    const query = resolve(step.query, store);
+    const queryText = typeof query.value === "string" ? query.value : JSON.stringify(query.value);
+    const text = `${queryText}\n\nOutput schema (one JSON object with exactly these fields): ${JSON.stringify({ ...step.output_schema, have_enough_information: "boolean" })}`;
+    const handoff: Handoff = {
+      steps: steps.slice(at + 1), store,
+      query: { as: step.as, output_schema: step.output_schema, sources: query.sources, readers: query.readers },
+    };
+    return new graph.FinalMessages([
+      graph.Message.create(edges.get("Interpreter~>QLLM")!,
+        Task.create({ kind: "prompt", text, spec: "The reply is one JSON object matching the output schema." })),
+      graph.Message.create(edges.get("Interpreter~>Executor")!,
+        Task.create({ kind: "prompt", text: JSON.stringify(handoff), spec: "The remaining plan steps are executed." })),
+    ]);
+  }, policy);
 
 /** Validates the QLLM reply, propagates capabilities, and halts at the first denied send. */
-export const Executor: syntax.DeterministicNode<CamelContext> = ({ context, policy }) => ({
-  state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+export const Executor: syntax.DeterministicNode<CamelContext> = ({ context, policy }) =>
+  new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
     const inputs = yield [];
     const handoffs = inputs.messages.get(graph.EdgeId.create("Interpreter~>Executor"));
     if (handoffs?.length !== 1 || !Value.Check(Type.Object({ kind: Type.Literal("prompt"), text: Type.String() }), handoffs[0]))
@@ -254,8 +246,7 @@ export const Executor: syntax.DeterministicNode<CamelContext> = ({ context, poli
       results.push({ tool: "send_email", decision: "granted", sent: sendEmail(context, addresses, subjectText, bodyText) });
     }
     return { plan: handoff.steps, results } satisfies Outcome;
-  }, policy),
-});
+  }, policy);
 
 const directory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = basename(dirname(directory)) === "dist" ? resolvePath(directory, "../../..") : resolvePath(directory, "../..");

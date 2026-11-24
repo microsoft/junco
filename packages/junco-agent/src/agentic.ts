@@ -260,6 +260,7 @@ export type AgenticYieldReason = {
   readonly toolCallId: string;
   readonly toolName: string;
   readonly reason: string;
+  readonly waitForInput?: true;
 };
 
 /**

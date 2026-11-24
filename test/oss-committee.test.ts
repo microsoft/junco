@@ -57,7 +57,7 @@ test("a round gates each member on the previous member's complete report", async
     undefined,
     quiet,
   );
-  const graph = execution.graph;
+  await using graph = execution.graph;
   assert.deepEqual([...graph.available().keys()], ["ResearchAssignment"]);
   assert.equal(committee.modelRequests.length, 0);
   await execution.step(); // the code node publishes the research assignment
@@ -83,6 +83,9 @@ test("a round gates each member on the previous member's complete report", async
   await execution.run();
   const architect = graph.result(NodeId.create("Architect"));
   assert.ok(O.isSome(architect));
+  assert.equal(graph.getNode(NodeId.create("ResearchRelease"))!.status, "done");
+  assert.deepEqual([...graph.available().keys()], []);
+  assert.equal(committee.memberInputs.Librarian.length, 1);
   assert.equal(committee.memberInputs.Architect.length, 1);
   assert.equal(
     committee.memberInputs.Librarian[0],
@@ -136,7 +139,9 @@ test("a failed lookup sends partial research to the Architect before the Librari
     undefined,
     quiet,
   );
-  const graph = execution.graph;
+  await using graph = execution.graph;
+  let librarianRuns = 0;
+  committee.members.Librarian.events.on("run_start", () => { librarianRuns++; });
   await execution.step(); // prepare the research assignment
   await execution.step(); // prime the Librarian
   await execution.step(); // failed lookup, then info, send and the real yield tool
@@ -159,11 +164,15 @@ test("a failed lookup sends partial research to the Architect before the Librari
     await execution.step();
   }
   assert.equal(committee.members.Librarian.status, "suspended");
-  assert.ok(graph.available().has(NodeId.create("Librarian")));
+  assert.deepEqual([...graph.available().keys()], ["ResearchRelease"]);
+  await execution.step(); // only an accepted partial receives architect-finished
+  assert.deepEqual([...graph.available().keys()], ["Librarian"]);
   assert.ok(committee.memberInputs.Architect[0]?.includes("Partial research"));
   assert.ok(committee.memberInputs.Architect[0]?.includes("HTTP 403"));
 
   await execution.run();
+  assert.equal(librarianRuns, 1);
+  assert.equal(committee.searchQueries.length, 1);
   assert.ok(
     committee.modelRequests.lastIndexOf("Librarian") >
       committee.modelRequests.indexOf("Architect"),
@@ -183,13 +192,17 @@ test("a policy pause before any partial send leaves the Librarian resumable", as
     undefined,
     quiet,
   );
-  const graph = execution.graph;
+  await using graph = execution.graph;
   await execution.step(); // prepare the research assignment
   await execution.step(); // prime the Librarian
   await execution.step(); // failed lookup, then a policy denial pauses the run
   assert.equal(committee.search.failures(), 1);
   assert.equal(committee.members.Librarian.status, "suspended");
   assert.deepEqual([...graph.available().keys()], ["Librarian"]);
+  assert.ok(O.isNone(graph.result(NodeId.create("Architect"))));
+  await execution.step(); // policy continuation sends the partial and genuinely waits for input
+  assert.equal(committee.members.Librarian.status, "suspended");
+  assert.deepEqual([...graph.available().keys()], ["DesignAssignment"]);
 
   await execution.run();
   assert.ok(committee.memberInputs.Architect[0]?.includes("Partial research"));
@@ -227,7 +240,7 @@ test("a truncated closing report after a handoff never reaches the Reducer", asy
     undefined,
     quiet,
   );
-  const graph = execution.graph;
+  await using graph = execution.graph;
   const error = await execution.run().catch((thrown: unknown) => thrown);
   assert.ok(
     error instanceof DataflowNodeError && error.nodeId === "ReviewAssignment",
@@ -257,7 +270,7 @@ test("a truncated research report never reaches the Architect", async () => {
     undefined,
     quiet,
   );
-  const graph = execution.graph;
+  await using graph = execution.graph;
   const error = await execution.run().catch((thrown: unknown) => thrown);
   assert.ok(
     error instanceof DataflowNodeError && error.nodeId === "DesignAssignment",
@@ -333,13 +346,14 @@ test("the design code node rejects missing searches and malformed partial handof
       undefined,
       quiet,
     );
+    await using graph = execution.graph;
     if (entry.failed)
       await assert.rejects(
         committee.search.tool.execute("failed-search", {
           query: "terminal UI",
         }),
       );
-    const state = execution.graph.getNode(
+    const state = graph.getNode(
       NodeId.create("DesignAssignment"),
     )!.state;
     assert.ok(state instanceof Deterministic);

@@ -1,12 +1,15 @@
 graph:
   name: MCP
   nodes:
+    Assignment:
+      kind: emit
+      text: Select the five central classes in this repository using graft MCP.
+      spec: Five class declarations with file locations and supporting graft evidence.
     Research:
       system: You analyze the software repository you are connected to, using only the graft MCP tools. Base every claim on graft output; never invent files, symbols, or line numbers.
       description: Selects five central classes of the repository through graft.
-      trigger: always
       prompt: |-
-        Analyze this repository using graft MCP. Begin with `mcp__graft__graft_repo_map({})`.
+        Complete the assignment in the following user message. Begin with `mcp__graft__graft_repo_map({})`.
 
         Choose exactly five distinct repository-owned classes that are central to its architecture: classes, not functions, interfaces, or type aliases, and not generated, dependency, or test-fixture code.
 
@@ -39,8 +42,18 @@ graph:
       kind: code
       description: Validates both completed reports and publishes the dependency analysis.
   edges:
+    - from: Assignment
+      to: Research
+      kind: message
+      schema:
+        type: object
+        required: [kind, text]
+        properties: { kind: { const: prompt }, text: { type: string } }
     - from: Research
       to: Dependencies
+      id: Research->Dependencies
+      kind: message
+      on: return
       schema: &assistant
         type: object
         required: [role, content, stopReason]

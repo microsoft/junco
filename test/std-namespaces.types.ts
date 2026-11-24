@@ -87,10 +87,6 @@ export async function graphTypesBuildAndReadTypedNodes(
   const view: graph.ParentView<Num, string> = { messages, values };
   const fromView: readonly number[] = graph.from(view, numbers);
 
-  const availability: graph.AvailabilityFn<Num, string> = (
-    current,
-    triggered,
-  ) => triggered && graph.from(current, numbers).length > 0;
   const step: graph.StepFn<Counter, Num, string> = async function* (
     this: graph.Node<Counter, Num, string>,
   ): graph.NodeGenerator<Num, string> {
@@ -111,7 +107,6 @@ export async function graphTypesBuildAndReadTypedNodes(
       trigger.TriggerEntry.on(numbers),
       trigger.TriggerEntry.on(done),
     ),
-    is_available: availability,
   };
   const recover: graph.ErrorFn<Counter, Num, string> = async function (
     this: graph.Node<Counter, Num, string>,
@@ -253,12 +248,14 @@ export function spawnBuildsTypedStars(
     agentSink,
     {
       state: lead,
+      prompt: "Assign the work.",
       trigger: trigger.TriggerRule.never(),
       policy: tools.LockPolicy,
     },
     tasks,
     () => ({
       state: worker,
+      prompt: "Complete the task.",
       trigger: trigger.TriggerRule.never(),
       policy: tools.LockPolicy,
     }),
@@ -267,16 +264,16 @@ export function spawnBuildsTypedStars(
     errors.retry({ afterMs: 0, times: 1 }, errors.crash()),
   );
   const mockAgent = new MockAgent({ runs: [], errorHandler });
-  defaults.graph.addNode({
+  const mockNode = {
     state: mockAgent,
+    prompt: "Complete the task.",
     policy: tools.LockPolicy,
-    trigger: trigger.TriggerRule.always(),
-  });
+    trigger: trigger.TriggerRule.always<Chat, AssistantMessage>(),
+  };
+  defaults.graph.addNode(mockNode);
   // @ts-expect-error agent nodes configure failures on the agent, not with on_error
   defaults.graph.addNode({
-    state: mockAgent,
-    policy: tools.LockPolicy,
-    trigger: trigger.TriggerRule.always(),
+    ...mockNode,
     on_error: () => [],
   });
   // @ts-expect-error the root must be an adapted node, not a bare state
@@ -1458,13 +1455,8 @@ export function ralphSuccessModeTypes() {
 export function fanInSelectorTypes() {
   const all: string = workflows.allFanIn;
   const any: string = workflows.anyFanIn;
-  // The controller spreads into `JuncoGraph.fromYaml` options beside Ralph's hooks.
-  const controller: Pick<syntax.FromYamlOptions, "available" | "code"> =
-    schedules.anyFanIn();
-  const ralph: Pick<syntax.FromYamlOptions, "available"> = schedules.ralph();
-  const merged: Pick<syntax.FromYamlOptions, "available" | "code"> = {
-    ...controller,
-    available: { ...ralph.available, ...controller.available },
+  const merged: Pick<syntax.FromYamlOptions, "code"> = {
+    code: { ...schedules.ralph().code, ...schedules.anyFanIn().code },
   };
   return [all, any, merged];
 }
@@ -1509,14 +1501,13 @@ export function memoryWorkflowTypes(memory: tools.JuncoMemory) {
     },
   };
   const controller = schedules.memory(options);
-  const available: NonNullable<syntax.BuildOptions["available"]> =
-    controller.available;
   const code: {
     readonly Memory: syntax.DeterministicNode;
+    readonly AnyFanInInput: syntax.DeterministicNode;
     readonly AnyFanInPublish: syntax.DeterministicNode;
   } = controller.code;
   const exactCodeKeys: keyof typeof controller.code = "Memory";
-  const hooks: Pick<syntax.FromYamlOptions, "available" | "code"> = controller;
+  const config: Pick<syntax.FromYamlOptions, "code"> = controller;
   schedules.memory({ memory });
   // @ts-expect-error a caller-owned memory wrapper is required
   schedules.memory({});
@@ -1532,10 +1523,9 @@ export function memoryWorkflowTypes(memory: tools.JuncoMemory) {
     ralph,
     fanIn,
     fanOut,
-    available,
     code,
     exactCodeKeys,
-    hooks,
+    config,
     worker,
   };
 }

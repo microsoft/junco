@@ -298,7 +298,6 @@ export function everyKindSharesOneNodeOptions(
     signal.throwIfAborted();
     return [...view.values.keys()].length === 0 ? message : message;
   }, LockPolicy);
-  mock.stagePrompt("go");
   const nestedNode = {
     ...options,
     state: child,
@@ -312,23 +311,23 @@ export function everyKindSharesOneNodeOptions(
     },
   };
   const nodes: AgenticNode[] = [
-    { ...options, ...policy, state: junco },
-    { ...options, ...policy, state: mock },
+    { ...options, ...policy, state: junco, prompt: "go" },
+    { ...options, ...policy, state: mock, prompt: "go" },
     { ...options, state: coroutine },
     nestedNode,
     raw,
   ];
   const ids: NodeIdType[] = nodes.map((node) => graph.addNode(node));
   // @ts-expect-error every node spec carries its policy
-  void graph.addNode({ trigger: TriggerRule.always(), state: mock });
+  void graph.addNode({ trigger: TriggerRule.always(), state: mock, prompt: "go" });
   // @ts-expect-error raw node specs carry their policy too
   void graph.addNode({
     trigger: TriggerRule.always(),
     state: mock,
     step: raw.step,
   });
-  // @ts-expect-error a prompt lives on the agent, not the registration
-  void graph.addNode({ ...options, ...policy, state: mock, prompt: "go" });
+  // @ts-expect-error a step-less agent needs a registered prompt
+  void graph.addNode({ ...options, ...policy, state: mock });
   void graph.addNode({ ...options, state: coroutine });
   // @ts-expect-error a step-less coroutine's policy is owned by its state
   void graph.addNode({ ...options, state: coroutine, policy: LockPolicy });
@@ -337,7 +336,7 @@ export function everyKindSharesOneNodeOptions(
   // Compiles (no exactOptionalPropertyTypes); rejected at runtime as an own field.
   void graph.addNode({ ...options, state: coroutine, policy: undefined });
   // @ts-expect-error an agent node without a step carries its policy
-  void graph.addNode({ ...options, state: junco });
+  void graph.addNode({ ...options, state: junco, prompt: "go" });
   // @ts-expect-error an explicit-step managed node carries its policy
   void graph.addNode({ ...options, state: coroutine, step: raw.step });
   // @ts-expect-error a managed node still requires a trigger
@@ -416,7 +415,7 @@ export function bindingsStayOutOfNodeOptions(
 ) {
   const prompted: NodeOptions<Chat, AssistantMessage> = {
     trigger: TriggerRule.always(),
-    // @ts-expect-error a prompt is execution, not a registration option
+    // @ts-expect-error a prompt belongs to a prompt-agent registration only
     prompt: "go",
   };
   const selected: NodeOptions<Chat, AssistantMessage> = {
@@ -433,7 +432,6 @@ export function bindingsStayOutOfNodeOptions(
     state: mock,
     trigger: TriggerRule.always(),
     policy: LockPolicy,
-    // @ts-expect-error a prompt lives on the agent, not the registration
     prompt: "go",
   });
   const nested: AgenticNode = { trigger: TriggerRule.always(), state: child };
@@ -466,13 +464,15 @@ export function persistenceIsANestedOptIn(
     // @ts-expect-error persistence is a literal opt-in; there is no false mode
     persistent: false,
   };
-  const agent = graph.addNode({
+  const persistentAgent = {
     state: mock,
+    prompt: "go",
     trigger: TriggerRule.always(),
     policy: LockPolicy,
-    // @ts-expect-error only a nested graph context can persist
-    persistent: true,
-  });
+    persistent: true as const,
+  };
+  // @ts-expect-error only a nested graph context can persist
+  const agent = graph.addNode(persistentAgent);
   // @ts-expect-error a coroutine is not a nested graph
   const parked: AgenticNode = {
     trigger: TriggerRule.always(),
@@ -1011,7 +1011,6 @@ export function namespacedNodeBindingsKeepWireTypes(
     source,
     sink,
   ];
-  mock.stagePrompt("go");
   // @ts-expect-error chat-typed agents cannot join a numeric graph
   graph.addNode({
     state: mock,
@@ -1603,35 +1602,35 @@ export async function schemaDomainsStayExact(
 ) {
   const id = EdgeId.create("numbers");
   const policy = { trigger: TriggerRule.always(), policy: LockPolicy };
-  // Numeric inboxes stage numeric payloads; parent values keep their own domain.
-  numericAgent.stagePrompt((inputs) => {
+  // Registered prompts read the exact message and parent value domains.
+  const numericNode = numeric.addNode({ ...policy, state: numericAgent, prompt: (inputs) => {
     const payloads = inputs.messages.get(id);
     exact<typeof payloads, readonly number[] | undefined>(true);
     const parent = inputs.values.get(id);
     exact<typeof parent, AssistantMessage | undefined>(true);
     return `${payloads?.length}`;
-  });
-  numericMock.stagePrompt((inputs) => {
+  } });
+  const mockNode = numeric.addNode({ ...policy, state: numericMock, prompt: (inputs) => {
     const payloads = inputs.messages.get(id);
     exact<typeof payloads, readonly number[] | undefined>(true);
     return `${payloads?.[0]}`;
-  });
+  } });
   // @ts-expect-error a callback over another input domain is rejected
-  numericAgent.stagePrompt((_inputs: ParentView<Str, AssistantMessage>) => "");
+  numeric.addNode({ ...policy, state: numericAgent, prompt: (_inputs: ParentView<Str, AssistantMessage>) => "" });
   // Dynamic YAML inputs stay unknown until narrowed.
-  yamlAgent.stagePrompt((inputs) => {
+  const yamlNode = yaml.addNode({ ...policy, state: yamlAgent, prompt: (inputs) => {
     const payloads = inputs.messages.get(id);
     exact<typeof payloads, readonly unknown[] | undefined>(true);
     const parent = inputs.values.get(id);
     exact<typeof parent, unknown>(true);
     return typeof parent === "number" ? `${parent + 1}` : "";
-  });
+  } });
   // Native agents join result domains containing AssistantMessage, unknown included.
   const registered: NodeIdType[] = [
-    numeric.addNode({ ...policy, state: numericAgent }),
-    numeric.addNode({ ...policy, state: numericMock }),
-    mixed.addNode({ ...policy, state: mixedAgent }),
-    yaml.addNode({ ...policy, state: yamlAgent }),
+    numericNode,
+    mockNode,
+    mixed.addNode({ ...policy, state: mixedAgent, prompt: "go" }),
+    yamlNode,
     textOnly.addNode({
       ...policy,
       state: textAgent,
@@ -1648,9 +1647,9 @@ export async function schemaDomainsStayExact(
     }),
   ];
   // @ts-expect-error a string-only result graph requires an explicit step
-  textOnly.addNode({ ...policy, state: textAgent });
+  textOnly.addNode({ ...policy, state: textAgent, prompt: "go" });
   // @ts-expect-error a number-only result graph requires an explicit step
-  numberOnly.addNode({ ...policy, state: numberAgent });
+  numberOnly.addNode({ ...policy, state: numberAgent, prompt: "go" });
   // fromYaml promises only the runtime-loaded domains.
   const loaded = await JuncoGraph.fromYaml("", config);
   exact<

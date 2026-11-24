@@ -171,7 +171,7 @@ export async function scriptedCommittee(
   const librarian: FauxResponseFactory = (context) => {
     modelRequests.push("Librarian");
     const last = context.messages.at(-1);
-    if (last?.role === "toolResult" && last.toolName === "yield") {
+    if (last?.role === "user" && latestUserText(context) === JSON.stringify({ id: "architect-finished", payload: true })) {
       return fauxAssistantMessage(
         librarianStopReason === "length"
           ? librarianReport.slice(0, 4)
@@ -191,6 +191,7 @@ export async function scriptedCommittee(
             "yield",
             {
               reason: "Waiting for the Architect to use the partial research.",
+              waitForInput: true,
             },
             { id: `librarian-yield-${librarianRound + 1}` },
           ),

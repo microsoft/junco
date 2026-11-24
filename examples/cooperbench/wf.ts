@@ -32,7 +32,6 @@ import { Value } from "typebox/value";
 import source from "./wf.yml" with { type: "text" };
 
 type Edges = syntax.CodeContext["edges"];
-type Available = NonNullable<syntax.BuildOptions["available"]>;
 const PLACEHOLDER = /\{\{\s*([^}]+?)\s*\}\}/g;
 
 /** Locally declared edges whose IDs start with `prefix`, in YAML declaration order. */
@@ -65,13 +64,10 @@ function textOf(payload: unknown, edgeId: string): string {
   return syntax.finalText(payload, edgeId);
 }
 
-/** Sends one `Task.create({ kind: "prompt", text, spec })` on `outputs` through the standard primitive, then returns. */
+/** One task with the same identity on each output; this publisher has no result. */
 function broadcast(text: string, spec: string, outputs: graph.Edge<TSchema, unknown>[]) {
-  return new graph.nodes.ConstFanout<undefined, TSchema, unknown>(
-    graph.nodes.Task.create({ kind: "prompt", text, spec }),
-    outputs,
-    { state: undefined, ret: undefined },
-  ).step();
+  const task = graph.nodes.Task.create({ kind: "prompt", text, spec });
+  return new graph.FinalMessages(outputs.map((edge) => graph.Message.create(edge, task)));
 }
 
 /** `__junco_fanout`: one payload on `__junco_fanout:input`, broadcast to every `__junco_fanout:worker:*` edge. */
@@ -80,19 +76,13 @@ export const fanout: syntax.DeterministicNode = ({ node, edges, policy }) => {
   const outputs = declared(edges, "__junco_fanout:worker:");
   if (input === undefined || outputs.length === 0)
     throw new Error(`${node} needs edge "__junco_fanout:input" and "__junco_fanout:worker:*" edges`);
-  let emitting = false;
-  return {
-    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
-      const payloads = delivered(yield [], input);
-      if (payloads.length !== 1)
-        throw new Error(`${node} needs exactly one payload on "${input.id}"`);
-      const text = textOf(payloads[0], input.id);
-      emitting = true;
-      return yield* broadcast(text, "Every worker has carried out this assignment.", outputs);
-    }, policy),
-    // Priming reads nothing; stay available through the emission's terminal-return activation.
-    is_available: (_view, triggered) => emitting || triggered,
-  };
+  return new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+    const payloads = delivered(yield [], input);
+    if (payloads.length !== 1)
+      throw new Error(`${node} needs exactly one payload on "${input.id}"`);
+    const text = textOf(payloads[0], input.id);
+    return broadcast(text, "Every worker has carried out this assignment.", outputs);
+  }, policy);
 };
 
 /** `__junco_fanin`: `ConstFanin` over `__junco_fanin:input:*` (declaration order) onto `__junco_fanin:output`. */
@@ -106,17 +96,21 @@ export const fanin: syntax.DeterministicNode = ({ node, edges, policy }) => {
     output as graph.Edge<TArray<TSchema>, unknown>,
     { state: undefined, ret: undefined },
   );
-  return {
-    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
-      return yield* collector.step();
-    }, policy),
-    is_available: (view, triggered) => {
-      // Every candidate is a normally finished, non-empty report before the primitive keeps it.
-      for (const edge of inputs)
-        for (const payload of view.messages.get(edge.id) ?? []) syntax.finalText(payload, edge.id);
-      return collector.is_available(view, triggered);
-    },
-  };
+  return new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+    const body = collector.step();
+    try {
+      let turn = await body.next();
+      while (!turn.done) {
+        const view = yield turn.value;
+        for (const edge of inputs)
+          for (const payload of view.messages.get(edge.id) ?? []) syntax.finalText(payload, edge.id);
+        turn = await body.next(view);
+      }
+      return turn.value;
+    } finally {
+      await body.return(undefined);
+    }
+  }, policy);
 };
 
 /**
@@ -143,24 +137,19 @@ export const assignment =
       throw new Error(
         `${node}: template placeholders ${JSON.stringify(used)} must match inputs ${JSON.stringify(names)}, with an output`,
       );
-    let emitting = false;
-    return {
-      state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
-        const view = yield [];
-        const texts = new Map<string, string>();
-        for (const [index, edge] of inputs.entries()) {
-          const payloads = delivered(view, edge);
-          if (payloads.length === 0)
-            throw new Error(`${node}: required input "${names[index]}" is missing`);
-          texts.set(names[index], payloads.map((p) => textOf(p, names[index])).join("\n\n"));
-        }
-        const text = template.replace(PLACEHOLDER, (_, id: string) => texts.get(id) ?? "");
-        if (!text.trim()) throw new Error(`${node}: the rendered assignment is empty`);
-        emitting = true;
-        return yield* broadcast(text, "The rendered assignment is carried out.", outputs);
-      }, policy),
-      is_available: (_view, triggered) => emitting || triggered,
-    };
+    return new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+      const view = yield [];
+      const texts = new Map<string, string>();
+      for (const [index, edge] of inputs.entries()) {
+        const payloads = delivered(view, edge);
+        if (payloads.length === 0)
+          throw new Error(`${node}: required input "${names[index]}" is missing`);
+        texts.set(names[index], payloads.map((p) => textOf(p, names[index])).join("\n\n"));
+      }
+      const text = template.replace(PLACEHOLDER, (_, id: string) => texts.get(id) ?? "");
+      if (!text.trim()) throw new Error(`${node}: the rendered assignment is empty`);
+      return broadcast(text, "The rendered assignment is carried out.", outputs);
+    }, policy);
   };
 
 /** `config.code` plus the three reserved helpers; a same-named existing entry is a collision. */
@@ -184,30 +173,12 @@ export function ralphUntil(
   checks: Readonly<Record<string, schedules.RalphPredicate>>,
   rounds?: number,
 ) {
-  return schedules.ralph({
-    rounds,
-    until: (result, context) => {
-      if (!Object.hasOwn(checks, context.label))
-        throw new Error(`no authoritative Ralph check for graph label "${context.label}"`);
-      return checks[context.label](result, context);
-    },
-  });
-}
-
-/** Existing hooks on every level; on a prepared label also `added`, conjoined with an existing gate. */
-export function mergeAvailable(
-  existing: Available | undefined,
-  added: Available,
-  prepared: ReadonlySet<string>,
-): Available {
-  const merged: Record<string, Available[string]> = {};
-  for (const id of new Set([...Object.keys(existing ?? {}), ...Object.keys(added)]))
-    merged[id] = (context) => {
-      const old = existing?.[id]?.(context);
-      const extra = prepared.has(context.label) ? added[id]?.(context) : undefined;
-      return old && extra ? (view, triggered) => old(view, triggered) && extra(view, triggered) : (extra ?? old);
-    };
-  return merged;
+  const RalphControl: syntax.DeterministicNode = (context) => {
+    if (!Object.hasOwn(checks, context.label))
+      throw new Error(`no authoritative Ralph check for graph label "${context.label}"`);
+    return schedules.ralph({ rounds, until: checks[context.label] }).code.RalphControl(context);
+  };
+  return { code: { RalphControl } };
 }
 
 /** sha256 of the parsed document with object keys sorted recursively: a topology's identity. */
@@ -341,8 +312,28 @@ export const ladderOf = (
   const leaderRung = rung(leader, thinking);
   return { smol: workerRung, low: workerRung, med: workerRung, high: leaderRung, xhigh: leaderRung };
 };
-/** Every graph level uses parallel selection at the uniform med rung. */
-const scheduler = () => schedules.parallel();
+/** Forward assignments and peer notes through the same consumable admission edge. */
+const peerInbox = (recipient: string): syntax.DeterministicNode => ({ graph: workflow, node, edges, policy }) => {
+  const member = graph.NodeId.create(recipient);
+  const output = edges.get(`${node}~>${recipient}`)!;
+  return new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+    let view = yield [];
+    while (workflow.result(member)._tag === "None") {
+      const batch = [];
+      for (const id of view.messages.keys())
+        for (const note of view.messages.get(id)!) batch.push(graph.Message.create(output, note));
+      view = yield batch;
+    }
+    return new graph.FinalMessages([]);
+  }, policy);
+};
+
+/** Flush mailboxes between model decisions, never alongside a potentially settling recipient. */
+const scheduler: syntax.BuildOptions["scheduler"] = (_label, path) =>
+  path ? schedules.parallel() : (snapshot) => {
+    const inboxes = [...snapshot.available].filter((id) => id === "Inbox1" || id === "Inbox2");
+    return { selected: schedules.select(snapshot, inboxes.length ? inboxes : snapshot.available) };
+  };
 
 /** The Architect receives both assignments; each feature team receives only its own. */
 export const document = syntax.parse(source, {
@@ -508,8 +499,7 @@ export async function createPair(request: PairRequest, options: PairOptions): Pr
     cwd: options.cwd ?? process.cwd(),
     scheduler,
     ladder,
-    code: withOptimizerCode(undefined, ASSIGNMENTS),
-    available: mergeAvailable(undefined, ralphUntil(RALPH_CHECKS, 3).available, new Set(Object.keys(RALPH_CHECKS))),
+    code: withOptimizerCode({ Inbox1: peerInbox("Agent1"), Inbox2: peerInbox("Agent2"), ...ralphUntil(RALPH_CHECKS, 3).code }, ASSIGNMENTS),
     ...(observer === undefined ? {} : { tracer: observer }),
     ...(recorder === undefined ? {} : { recorder }),
     collection: options.collection,

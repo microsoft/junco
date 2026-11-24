@@ -4,7 +4,7 @@ import type {
   Skill,
 } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { NodeSpec, Sink, Source } from "dataflow-engine";
+import type { NodeSpec, ParentView, Sink, Source } from "dataflow-engine";
 import type { JuncoAgent, TaskSchema } from "junco-agent";
 import type { SchedulerContext } from "junco-scheduler";
 import type { ToolCollection } from "junco-tools";
@@ -101,6 +101,7 @@ export type AgenticNode<
           readonly state:
             | JuncoAgent<Skill, PromptTemplate, AgentTool, N, T>
             | MockAgent<Skill, PromptTemplate, AgentTool, N, T>;
+          readonly prompt: string | ((inputs: ParentView<N, T>) => string);
           readonly step?: never;
           readonly on_error?: never;
           readonly policy: ToolCollection["policy"];

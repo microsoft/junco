@@ -12,7 +12,6 @@ import {
   Message,
   type NodeGenerator,
   NodeId,
-  type NodeOptions,
   type ParentView,
   Sink,
   Source,
@@ -48,6 +47,7 @@ import {
   type Task,
 } from "../src/index.ts";
 import {
+  addPromptRun,
   assistant,
   pause,
   policy,
@@ -183,19 +183,18 @@ const failingAbort = (failure: Error): MockAgent =>
     }
   })({ runs: [] });
 
-const member = (agent: MockAgent, description = "member", id?: string) => ({
-  ...(id === undefined ? {} : { id: NodeId.create(id) }),
+const parkedMember = (agent: MockAgent, description = "member") => ({
+  prompt: description,
   state: agent,
   description,
   policy: LockPolicy,
-  trigger: TriggerRule.always(),
+  trigger: TriggerRule.never(),
 });
 
 /** A nested-graph node its parent never runs: the test drives `child` itself. */
 const detached = (child: PolicyContext, description = "nested") => ({
   description,
-  trigger: TriggerRule.always(),
-  is_available: () => false,
+  trigger: TriggerRule.never(),
   state: child,
 });
 
@@ -228,7 +227,6 @@ for (const strategy of STRATEGIES) {
   describe(strategy, () => {
     test("a suspended member stays schedulable with its policy reasons until it settles", async () => {
       const sender = new MockAgent({
-        prompt: "send",
         runs: [yieldsThen(1, "sent")],
       });
       const first = [reason("first pause", "y1")];
@@ -246,7 +244,6 @@ for (const strategy of STRATEGIES) {
         ],
       });
       const child = new MockAgent({
-        prompt: "child",
         runs: [yieldsThen(0, "child done")],
       });
       const graphPorts = terminalPorts();
@@ -261,21 +258,17 @@ for (const strategy of STRATEGIES) {
         TaskSchema,
       );
       const result = Edge.value("worker->child", AssistantMessageSchema);
-      const s = graph.addNode({
-        state: sender,
-        description: "sender",
-        policy: LockPolicy,
-        trigger: TriggerRule.always(),
-      });
-      worker.stagePrompt("work");
+      const s = addPromptRun(graph, sender, "sender", "send");
       const w = graph.addNode({
         state: worker,
+        prompt: "work",
         description: "worker",
         policy: LockPolicy,
         trigger: TriggerRule.when(work),
       });
       const c = graph.addNode({
         state: child,
+        prompt: "child",
         description: "child",
         policy: LockPolicy,
         trigger: TriggerRule.when(result),
@@ -307,7 +300,7 @@ for (const strategy of STRATEGIES) {
       assert.ok(!graph.available().has(c));
       assert.ok(O.isNone(graph.result(w)));
 
-      await graphContext.run();
+      await stepUntil(graphContext, () => O.isSome(graph.result(c)));
       assert.equal(resultText(graph, w), "worker done");
       assert.equal(resultText(graph, c), "child done");
       assert.deepEqual(requestTexts(worker.requests), [
@@ -319,13 +312,11 @@ for (const strategy of STRATEGIES) {
       assert.equal(worker.status, "closed");
     });
 
-    test("an all trigger gates initial admission while active members read queued messages", async () => {
+    test("an all trigger admits a new batch only when both queues are ready, even during a continuation", async () => {
       const sender = new MockAgent({
-        prompt: "send",
         runs: [yieldsThen(12, "sent")],
       });
       const gatedMember = new MockAgent({
-        prompt: "start",
         steeringMode: "all",
         runs: [
           run([
@@ -351,16 +342,11 @@ for (const strategy of STRATEGIES) {
         "right",
         TaskSchema,
       );
-      const s = graph.addNode({
-        id: NodeId.create("s"),
-        state: sender,
-        description: "sender",
-        policy: LockPolicy,
-        trigger: TriggerRule.always(),
-      });
+      const s = addPromptRun(graph, sender, "s", "send");
       const m = graph.addNode({
         id: NodeId.create("m"),
         state: gatedMember,
+        prompt: "start",
         description: "gated",
         policy: LockPolicy,
         trigger: TriggerRule.allOf(
@@ -381,7 +367,7 @@ for (const strategy of STRATEGIES) {
       graph.emit(s, Message.create(left, followUp("x1")));
       await stepUntil(graphContext, () => queued(left).length === 1);
       assert.ok(!graph.available().has(m));
-      assert.equal(gatedMember.status, "ready");
+      assert.equal(gatedMember.status, "idle");
       assert.deepEqual(gatedMember.requests, []);
 
       graph.emit(s, Message.create(right, followUp("y1")));
@@ -394,8 +380,9 @@ for (const strategy of STRATEGIES) {
       graph.emit(s, Message.create(left, followUp("x2")));
       await stepUntil(graphContext, () => queued(left).length === 1);
       const before = gatedMember.requests.length;
+      assert.equal(graph.available().get(m)?.continuationOnly, true);
       await stepUntil(graphContext, () => gatedMember.requests.length > before);
-      assert.deepEqual([queued(left), queued(right)], [[], []]);
+      assert.deepEqual([queued(left), queued(right)], [[followUp("x2")], []]);
 
       graph.emit(s, Message.create(right, followUp("y2")));
       await stepUntil(
@@ -417,15 +404,14 @@ for (const strategy of STRATEGIES) {
 
     test("a nested graph triggered by one message finishes and hands its selected result on", async () => {
       const source = new MockAgent({
-        prompt: "send",
         runs: [yieldsThen(1, "sent")],
       });
       const inner = new MockAgent({
-        prompt: "inner",
         runs: [yieldsThen(2, "inner done")],
       });
       const consumer = new MockAgent({ runs: [yieldsThen(0, "reviewed")] });
       const childPorts = terminalPorts();
+      const innerWork = chatEdge("$source->inner");
       const childSource = new Source<typeof TaskSchema, AssistantMessage>(
         (view) => {
           assert.deepEqual([...view.messages.keys()], [go.id]);
@@ -440,7 +426,7 @@ for (const strategy of STRATEGIES) {
             },
           ]);
           assert.equal([...view.values.keys()].length, 0);
-          return [];
+          return from(view, go).map((task) => Message.create(innerWork, task));
         },
         { schema: TaskSchema, id: NodeId.create("$source") },
       );
@@ -450,7 +436,10 @@ for (const strategy of STRATEGIES) {
         strategy,
       );
       const child = childContext.graph;
-      const innerId = child.addNode(member(inner, "inner"));
+      const innerId = child.addNode({
+        state: inner, prompt: "inner", policy: LockPolicy, trigger: TriggerRule.when(innerWork),
+      });
+      child.addEdge(childSource.id, innerId, innerWork);
       childPorts.connect(child, innerId);
       const graphPorts = terminalPorts();
       const graphContext = policyContext(
@@ -464,19 +453,15 @@ for (const strategy of STRATEGIES) {
         TaskSchema,
       );
       const selected = Edge.value("nested=>consumer", AssistantMessageSchema);
-      const s = graph.addNode({
-        state: source,
-        policy: LockPolicy,
-        trigger: TriggerRule.always(),
-      });
+      const s = addPromptRun(graph, source, "sender", "send");
       const n = graph.addNode({
         id: NodeId.create("nested"),
         trigger: TriggerRule.when(go),
         state: childContext,
       });
-      consumer.stagePrompt("review");
       const c = graph.addNode({
         state: consumer,
+        prompt: "review",
         policy: LockPolicy,
         trigger: TriggerRule.when(selected),
       });
@@ -500,7 +485,7 @@ for (const strategy of STRATEGIES) {
       assert.ok(graph.available().has(n));
       assert.ok(O.isNone(graph.result(n)));
 
-      await graphContext.run();
+      await stepUntil(graphContext, () => O.isSome(graph.result(c)));
       assert.equal(inner.requests.length, 3);
       assert.equal(resultText(child, innerId), "inner done");
       assert.equal(resultText(graph, n), "inner done");
@@ -552,18 +537,15 @@ for (const strategy of STRATEGIES) {
           history: [],
         });
 
-        const texts: string[] = [];
+        const into = chatEdge("$source->inner");
         const deliveries: string[][] = [];
         const childSource = new Source<typeof TaskSchema, AssistantMessage>(
           (view) => {
-            const batch = [...from(view, left), ...from(view, right)].map(
-              inputText,
-            );
+            const batch = [...from(view, left), ...from(view, right)];
             assert.ok(batch.length > 0);
             assert.equal([...view.values.keys()].length, 0);
-            deliveries.push(batch);
-            texts.push(...batch);
-            return [];
+            deliveries.push(batch.map(inputText));
+            return batch.map((task) => Message.create(into, task));
           },
           { schema: TaskSchema, id: NodeId.create("$source") },
         );
@@ -603,16 +585,20 @@ for (const strategy of STRATEGIES) {
         const child: PolicyGraph = childContext.graph;
         const innerId = child.addNode({
           id: NodeId.create("inner"),
-          trigger: TriggerRule.always(),
+          trigger: TriggerRule.when(into),
           state: new Deterministic<typeof TaskSchema, AssistantMessage>(
             async function* () {
-              yield [];
-              while (texts.length < 2) yield [];
+              const texts: string[] = [];
+              while (texts.length < 2) {
+                const view = yield [];
+                texts.push(...from(view, into).map(inputText));
+              }
               return assistant(texts.join("+"));
             },
             LockPolicy,
           ),
         });
+        child.addEdge(childSource.id, innerId, into);
 
         const source = (
           edge: Edge<typeof TaskSchema, AssistantMessage>,
@@ -736,7 +722,7 @@ for (const strategy of STRATEGIES) {
         strategy,
       );
       const child = childContext.graph;
-      const idleId = child.addNode(member(idle, "idle"));
+      const idleId = child.addNode(parkedMember(idle, "idle"));
       childPorts.connect(child, idleId);
       const graphPorts = terminalPorts();
       const graphContext = policyContext(
@@ -855,14 +841,12 @@ for (const strategy of STRATEGIES) {
       await empty.close();
     });
 
-    test("one shared availability predicate holds agent, coroutine and graph nodes until released", async () => {
-      let admitted = false;
-      const shared: NodeOptions<typeof TaskSchema, AssistantMessage> = {
-        trigger: TriggerRule.always(),
-        is_available: (_view, triggered) => admitted && triggered,
-      };
+    test("release messages admit agent, coroutine and nested graph nodes", async () => {
+      const toAgent = chatEdge("release agent");
+      const toCoroutine = chatEdge("release coroutine");
+      const toNested = chatEdge("release nested graph");
+      const toInner = chatEdge("$source->inner");
       const agent = new MockAgent({
-        prompt: "go",
         runs: [yieldsThen(1, "agent done")],
       });
       const coroutine = new Deterministic<typeof TaskSchema, AssistantMessage>(
@@ -873,17 +857,22 @@ for (const strategy of STRATEGIES) {
         LockPolicy,
       );
       const inner = new MockAgent({
-        prompt: "inner",
         runs: [yieldsThen(0, "inner done")],
       });
       const childPorts = terminalPorts();
       const childContext = policyContext(
-        childPorts.source,
+        new Source<typeof TaskSchema, AssistantMessage>(
+          (view) => from(view, toNested).map((task) => Message.create(toInner, task)),
+          { schema: TaskSchema, id: childPorts.source.id },
+        ),
         childPorts.sink,
         strategy,
       );
       const child = childContext.graph;
-      const innerId = child.addNode(member(inner, "inner"));
+      const innerId = child.addNode({
+        state: inner, prompt: "inner", policy: LockPolicy, trigger: TriggerRule.when(toInner),
+      });
+      child.addEdge(child.source.id, innerId, toInner);
       childPorts.connect(child, innerId);
       const graphPorts = terminalPorts();
       const graphContext = policyContext(
@@ -893,21 +882,25 @@ for (const strategy of STRATEGIES) {
       );
       const graph = graphContext.graph;
       const a = graph.addNode({
-        ...shared,
+        trigger: TriggerRule.when(toAgent),
+        prompt: "go",
         id: NodeId.create("agent"),
         state: agent,
         policy: LockPolicy,
       });
       const d = graph.addNode({
-        ...shared,
+        trigger: TriggerRule.when(toCoroutine),
         id: NodeId.create("coroutine"),
         state: coroutine,
       });
       const n = graph.addNode({
-        ...shared,
+        trigger: TriggerRule.when(toNested),
         id: NodeId.create("nested"),
         state: childContext,
       });
+      graph.addEdge(graph.source.id, a, toAgent)
+        .addEdge(graph.source.id, d, toCoroutine)
+        .addEdge(graph.source.id, n, toNested);
 
       graphPorts.connect(graph, n);
       assert.equal((await graphContext.run()).size, 0);
@@ -915,7 +908,8 @@ for (const strategy of STRATEGIES) {
       assert.ok([a, d, n].every((id) => O.isNone(graph.result(id))));
       assert.deepEqual([agent.requests, inner.requests], [[], []]);
 
-      admitted = true;
+      for (const edge of [toAgent, toCoroutine, toNested])
+        graph.emit(graph.source.id, Message.create(edge, promptOf("go")));
       await graphContext.run();
       assert.deepEqual(
         [a, d, n].map((id) => resultText(graph, id)),
@@ -931,12 +925,12 @@ for (const strategy of STRATEGIES) {
     test("an abort reaches every nested graph and joins a cooperative sibling", async () => {
       const grandchildGate = barrier({ endOnAbort: true });
       const grandchild = gated(
-        new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }),
+        new MockAgent({ runs: [gatedRun("unused")] }),
         grandchildGate,
       );
       const siblingGate = barrier();
       const sibling = gated(
-        new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }),
+        new MockAgent({ runs: [gatedRun("unused")] }),
         siblingGate,
       );
       const childPorts = terminalPorts();
@@ -946,7 +940,7 @@ for (const strategy of STRATEGIES) {
         strategy,
       );
       const child = childContext.graph;
-      const g = child.addNode(member(grandchild, "grandchild"));
+      const g = addPromptRun(child, grandchild, "grandchild", "go");
       childPorts.connect(child, g);
       const rootPorts = terminalPorts();
       const rootContext = policyContext(
@@ -956,7 +950,7 @@ for (const strategy of STRATEGIES) {
       );
       const root = rootContext.graph;
       root.addNode(detached(childContext, "child graph"));
-      const sb = root.addNode(member(sibling, "sibling"));
+      const sb = addPromptRun(root, sibling, "sibling", "go");
       rootPorts.connect(root, sb);
 
       await childContext.step(); // primes the grandchild
@@ -995,7 +989,7 @@ for (const strategy of STRATEGIES) {
       const nested = new Error("nested abort failed");
       const siblingGate = barrier({ endOnAbort: true });
       const sibling = gated(
-        new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }),
+        new MockAgent({ runs: [gatedRun("unused")] }),
         siblingGate,
       );
       const childPorts = terminalPorts();
@@ -1007,7 +1001,7 @@ for (const strategy of STRATEGIES) {
       const child = childContext.graph;
       // Idle, so never scheduled: only the abort cascade reaches them.
       const nestedId = child.addNode(
-        member(failingAbort(nested), "nested failing"),
+        parkedMember(failingAbort(nested), "nested failing"),
       );
       childPorts.connect(child, nestedId);
       const rootPorts = terminalPorts();
@@ -1017,8 +1011,8 @@ for (const strategy of STRATEGIES) {
         strategy,
       );
       const root = rootContext.graph;
-      root.addNode(member(failingAbort(first), "failing"));
-      const sb = root.addNode(member(sibling, "sibling"));
+      root.addNode(parkedMember(failingAbort(first), "failing"));
+      const sb = addPromptRun(root, sibling, "sibling", "go");
       rootPorts.connect(root, sb);
       root.addNode(detached(childContext));
       await rootContext.step(); // primes the sibling
@@ -1039,7 +1033,7 @@ for (const strategy of STRATEGIES) {
     test("a caller signal aborts the active member and waits for its column to drain", async () => {
       const gate = barrier();
       const worker = gated(
-        new MockAgent({ prompt: "go", runs: [gatedRun("resumed", 1)] }),
+        new MockAgent({ runs: [gatedRun("resumed", 1)] }),
         gate,
       );
       const graphPorts = terminalPorts();
@@ -1049,7 +1043,7 @@ for (const strategy of STRATEGIES) {
         strategy,
       );
       const graph = graphContext.graph;
-      const id = graph.addNode(member(worker, "worker"));
+      const id = addPromptRun(graph, worker, "worker", "go");
       graphPorts.connect(graph, id);
       const controller = new AbortController();
       const cancelled = new Error("drive cancelled");
@@ -1068,7 +1062,8 @@ for (const strategy of STRATEGIES) {
       gate.release();
       await assert.rejects(running, (error) => error === cancelled);
       assert.equal(stopReason(graph, id), "aborted");
-      assert.equal(graph.getNode(id)?.status, "done");
+      assert.equal(graph.getNode(id)?.status, "ready");
+      assert.ok(!graph.available().has(id));
 
       // Caller cancellation is nonterminal.
       assert.equal(graph.signal.aborted, false);
@@ -1079,7 +1074,7 @@ for (const strategy of STRATEGIES) {
     test("a plain drive observes graph abort, and later work runs under a fresh signal", async () => {
       const gate = barrier({ endOnAbort: true });
       const worker = gated(
-        new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }),
+        new MockAgent({ runs: [gatedRun("unused")] }),
         gate,
       );
       const graphPorts = terminalPorts();
@@ -1089,7 +1084,7 @@ for (const strategy of STRATEGIES) {
         strategy,
       );
       const graph = graphContext.graph;
-      const id = graph.addNode(member(worker, "worker"));
+      const id = addPromptRun(graph, worker, "worker", "go");
       graphPorts.connect(graph, id);
       const signal = graph.signal;
       const running = outcome(graphContext.run());
@@ -1104,10 +1099,9 @@ for (const strategy of STRATEGIES) {
       assert.equal(graph.signal.aborted, false);
 
       const fresh = new MockAgent({
-        prompt: "again",
         runs: [yieldsThen(0, "fresh")],
       });
-      const f = graph.addNode(member(fresh, "fresh"));
+      const f = addPromptRun(graph, fresh, "fresh", "again");
       await graphContext.run();
       assert.equal(resultText(graph, f), "fresh");
       await graph.close();
@@ -1115,7 +1109,6 @@ for (const strategy of STRATEGIES) {
 
     test("a plain drive observes graph close; results stay readable and new drives reject", async () => {
       const first = new MockAgent({
-        prompt: "first",
         runs: [yieldsThen(0, "first")],
       });
       const graphPorts = terminalPorts();
@@ -1125,15 +1118,15 @@ for (const strategy of STRATEGIES) {
         strategy,
       );
       const graph = graphContext.graph;
-      const f = graph.addNode(member(first, "first"));
+      const f = addPromptRun(graph, first, "first");
       graphPorts.connect(graph, f);
       await graphContext.run();
       const gate = barrier({ endOnAbort: true });
       const worker = gated(
-        new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }),
+        new MockAgent({ runs: [gatedRun("unused")] }),
         gate,
       );
-      graph.addNode(member(worker, "worker"));
+      addPromptRun(graph, worker, "worker", "go");
       const signal = graph.signal;
       const running = outcome(graphContext.run());
       await gate.started;
@@ -1161,7 +1154,6 @@ for (const strategy of STRATEGIES) {
     test("closing a suspended graph closes each member once, without aborting it", async () => {
       const counted = new Counted({ runs: [] });
       const grandchild = new Counted({
-        prompt: "go",
         runs: [yieldsThen(1, "unused")],
       });
       const childPorts = terminalPorts();
@@ -1171,7 +1163,7 @@ for (const strategy of STRATEGIES) {
         strategy,
       );
       const child = childContext.graph;
-      const g = child.addNode(member(grandchild, "grandchild"));
+      const g = addPromptRun(child, grandchild, "grandchild", "go");
       childPorts.connect(child, g);
       const rootPorts = terminalPorts();
       const rootContext = policyContext(
@@ -1181,7 +1173,7 @@ for (const strategy of STRATEGIES) {
       );
       const root = rootContext.graph;
       root.addNode(detached(childContext, "child graph"));
-      const countedId = root.addNode(member(counted, "counted"));
+      const countedId = root.addNode(parkedMember(counted, "counted"));
       rootPorts.connect(root, countedId);
       await childContext.step();
       await childContext.step();
@@ -1209,7 +1201,7 @@ for (const strategy of STRATEGIES) {
       const members = agents.map((agent, index) => {
         const ports = terminalPorts();
         const context = policyContext(ports.source, ports.sink, strategy);
-        const id = context.graph.addNode(member(agent, `member ${index}`));
+        const id = context.graph.addNode(parkedMember(agent, `member ${index}`));
         ports.connect(context.graph, id);
         return { context, graph: context.graph };
       });
@@ -1257,7 +1249,7 @@ for (const strategy of STRATEGIES) {
         const bottom = bottomContext.graph;
         let context = bottomContext;
         let graph = bottom;
-        let selected = graph.addNode(member(innermost, "innermost"));
+        let selected = graph.addNode(parkedMember(innermost, "innermost"));
         bottomPorts.connect(bottom, selected);
         for (let depth = 0; depth < 4096; depth++) {
           const parentPorts = terminalPorts();
@@ -1288,7 +1280,7 @@ for (const strategy of STRATEGIES) {
     test("a direct nested close during an enclosing abort closes its members before the abort settles", async () => {
       const siblingGate = barrier();
       const sibling = gated(
-        new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }),
+        new MockAgent({ runs: [gatedRun("unused")] }),
         siblingGate,
       );
       const inner = new Counted({ runs: [] });
@@ -1299,7 +1291,7 @@ for (const strategy of STRATEGIES) {
         strategy,
       );
       const child = childContext.graph;
-      const ii = child.addNode(member(inner, "inner"));
+      const ii = child.addNode(parkedMember(inner, "inner"));
       childPorts.connect(child, ii);
       const parentPorts = terminalPorts();
       const parentContext = policyContext(
@@ -1309,7 +1301,7 @@ for (const strategy of STRATEGIES) {
       );
       const parent = parentContext.graph;
       parent.addNode(detached(childContext));
-      const sb = parent.addNode(member(sibling, "sibling"));
+      const sb = addPromptRun(parent, sibling, "sibling", "go");
       parentPorts.connect(parent, sb);
       await parentContext.step(); // primes the sibling
       const parentSignal = parent.signal;
@@ -1343,10 +1335,9 @@ for (const strategy of STRATEGIES) {
       assert.notEqual(parent.signal, parentSignal);
       assert.equal(parent.signal.aborted, false);
       const fresh = new MockAgent({
-        prompt: "again",
         runs: [yieldsThen(0, "fresh")],
       });
-      const f = parent.addNode(member(fresh, "fresh"));
+      const f = addPromptRun(parent, fresh, "fresh", "again");
       await parentContext.run();
       assert.equal(resultText(parent, f), "fresh");
       await parent.close();
@@ -1363,7 +1354,6 @@ for (const strategy of STRATEGIES) {
         }
       }
       const stubborn = new FailingCloseOnce({
-        prompt: "go",
         runs: [yieldsThen(0, "later")],
       });
       const firstPorts = terminalPorts();
@@ -1373,12 +1363,12 @@ for (const strategy of STRATEGIES) {
         strategy,
       );
       const first = firstContext.graph;
-      const firstId = first.addNode(member(stubborn, "stubborn"));
+      const firstId = addPromptRun(first, stubborn, "stubborn", "go");
       firstPorts.connect(first, firstId);
       const error = await outcome(first.close());
       assert.ok(error instanceof AggregateError);
       assert.deepEqual(error.errors, [failure]);
-      assert.equal(stubborn.status, "ready");
+      assert.equal(stubborn.status, "idle");
       // Repeated close and disposal join the same failed close.
       await assert.rejects(first.close(), (thrown) => thrown === error);
       await assert.rejects(
@@ -1394,7 +1384,7 @@ for (const strategy of STRATEGIES) {
         strategy,
       );
       const second = secondContext.graph;
-      const id = second.addNode(member(stubborn, "stubborn"));
+      const id = addPromptRun(second, stubborn, "stubborn", "go");
       secondPorts.connect(second, id);
       await secondContext.run();
       assert.equal(resultText(second, id), "later");
@@ -1472,7 +1462,7 @@ describe("nested graphs", () => {
   test("cancellation uses the activation's captured child signal after abort resets it", async () => {
     const gate = barrier({ endOnAbort: true });
     const worker = gated(
-      new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }),
+      new MockAgent({ runs: [gatedRun("unused")] }),
       gate,
     );
     const childPorts = terminalPorts();
@@ -1482,7 +1472,7 @@ describe("nested graphs", () => {
       "parallel",
     );
     const child = childContext.graph;
-    const work = child.addNode(member(worker, "gated child"));
+    const work = addPromptRun(child, worker, "gated child", "go");
     childPorts.connect(child, work);
     const parentPorts = terminalPorts();
     const parentContext = policyContext(
@@ -1534,12 +1524,11 @@ describe("round-robin", () => {
       ["2", "1", "10"].map((id) => [
         id,
         new MockAgent({
-          prompt: `go ${id}`,
           runs: [yieldsThen(1, `done ${id}`)],
         }),
       ]),
     );
-    for (const [id, agent] of agents) graph.addNode(member(agent, id, id));
+    for (const [id, agent] of agents) addPromptRun(graph, agent, id, `go ${id}`);
     graphPorts.connect(graph, NodeId.create("2"));
     const statuses = () =>
       [...agents].map(([id, agent]) => [
@@ -1551,9 +1540,9 @@ describe("round-robin", () => {
     for (let window = 0; window < 4; window++) await graphContext.step();
 
     assert.deepEqual(statuses(), [
-      ["2", "ready", "running"],
+      ["2", "idle", "running"],
       ["1", "suspended", "running"],
-      ["10", "ready", "running"],
+      ["10", "idle", "running"],
     ]);
     assert.deepEqual(
       [...agents.values()].map((agent) => agent.requests.length),
@@ -1579,7 +1568,6 @@ describe("parallel", () => {
       const entered = Promise.withResolvers<void>();
       started.push(entered.promise);
       const agent = new MockAgent({
-        prompt: `go ${index}`,
         runs: [gatedRun(`done ${index}`)],
       });
       agent.hooks.on("before_drive", async () => {
@@ -1597,7 +1585,7 @@ describe("parallel", () => {
     );
     const graph = graphContext.graph;
     const ids = agents.map((agent, index) =>
-      graph.addNode(member(agent, `member ${index}`)),
+      addPromptRun(graph, agent, `member ${index}`, `go ${index}`),
     );
 
     graphPorts.connect(graph, ids[2]!);
@@ -1608,7 +1596,7 @@ describe("parallel", () => {
     );
     assert.deepEqual(
       agents.map((agent) => agent.status),
-      ["ready", "ready", "ready"],
+      ["idle", "idle", "idle"],
     );
 
     const window = graphContext.step();
@@ -1627,7 +1615,6 @@ describe("parallel", () => {
     const agents = [0, 1, 2].map(
       (index) =>
         new MockAgent({
-          prompt: `go ${index}`,
           runs: [yieldsThen(0, `done ${index}`)],
         }),
     );
@@ -1640,7 +1627,7 @@ describe("parallel", () => {
     );
     const graph = graphContext.graph;
     const ids = agents.map((agent, index) =>
-      graph.addNode(member(agent, `member ${index}`)),
+      addPromptRun(graph, agent, `member ${index}`, `go ${index}`),
     );
 
     graphPorts.connect(graph, ids[2]!);
@@ -1654,7 +1641,7 @@ describe("parallel", () => {
     );
     assert.ok(
       agents.every(
-        (agent) => agent.status === "ready" && agent.requests.length === 0,
+        (agent) => agent.status === "idle" && agent.requests.length === 0,
       ),
     );
     await graph.close();
@@ -2483,7 +2470,7 @@ for (const strategy of STRATEGIES)
         state: echo,
       });
       const idle = new Counted({ runs: [] });
-      innermost.context.graph.addNode(member(idle, "idle"));
+      innermost.context.graph.addNode(parkedMember(idle, "idle"));
       const between = streamingLevel(strategy, outer[0], outer[1], middle, {
         trigger: TriggerRule.anyOf(TriggerEntry.on(middle[0])),
         state: innermost.context,
@@ -2552,7 +2539,7 @@ for (const strategy of STRATEGIES)
         state: child,
         persistent: true,
       });
-      const other = parent.addNode(member(new MockAgent({ runs: [] })));
+      const other = parent.addNode(parkedMember(new MockAgent({ runs: [] })));
       const valueOnly = (error: unknown) =>
         error instanceof DataflowDefinitionError &&
         error.message === "Persistent graph nodes require message edges";
@@ -2587,7 +2574,7 @@ for (const strategy of STRATEGIES)
         for (const spec of [
           { trigger: TriggerRule.always(), state: child, persistent: false },
           { trigger: TriggerRule.always(), state: coroutine, persistent: true },
-          { ...member(new MockAgent({ runs: [] })), persistent: true },
+          { ...parkedMember(new MockAgent({ runs: [] })), persistent: true },
         ])
           assert.throws(
             () => Reflect.apply(parent.addNode, parent, [spec]),

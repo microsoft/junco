@@ -27,7 +27,7 @@ import {
   Message,
   NodeId,
   type NodeIdType,
-  type NodeOptions,
+  Source,
   type ParentView,
   TriggerEntry,
   TriggerRule,
@@ -36,7 +36,7 @@ import {
 } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
-import { type AgenticOptions, JuncoAgentError } from "junco-agent";
+import { JuncoAgentError } from "junco-agent";
 import { EmptyPolicy, LockPolicy } from "junco-tools";
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
@@ -54,6 +54,7 @@ import {
 } from "../src/index.ts";
 import { nodePolicies, registeredNodeContexts } from "../src/node-policy.ts";
 import {
+  addPromptRun,
   assistant,
   failed,
   plainContext,
@@ -90,6 +91,8 @@ type Graph = JuncoGraph;
 const chatEdge = (id: string) =>
   Edge.message<Chat, AssistantMessage>(id, TaskSchema);
 const answerEdge = (id: string) => Edge.value(id, AssistantMessageSchema);
+const assignment = (text: string) =>
+  Task.create({ kind: "prompt", text, spec: "" });
 type Route = {
   readonly id: string;
   readonly edgeId: string;
@@ -144,18 +147,7 @@ const sorted = (routes: readonly Route[]) =>
  */
 async function member<N extends TSchema = Chat>(
   responses: readonly FauxResponseStep[],
-  {
-    tools = [],
-    prompt,
-  }: {
-    readonly tools?: readonly AgentTool[];
-    readonly prompt?: AgenticOptions<
-      Skill,
-      PromptTemplate,
-      AgentTool,
-      N
-    >["prompt"];
-  } = {},
+  { tools = [] }: { readonly tools?: readonly AgentTool[] } = {},
 ) {
   const contexts: Parameters<FauxResponseFactory>[0][] = [];
   const { faux, options } = await nativeOptions(
@@ -176,7 +168,6 @@ async function member<N extends TSchema = Chat>(
     ...options,
     systemPrompt: "member",
     tools: [...tools],
-    ...(prompt === undefined ? {} : { prompt }),
   });
   closers.push(() => agent.return());
   const results: ToolResultMessage[] = [];
@@ -199,8 +190,7 @@ function inert(
   }, LockPolicy);
   return graph.addNode({
     ...options,
-    trigger: TriggerRule.always(),
-    is_available: () => false,
+    trigger: TriggerRule.never(),
     state: body,
   });
 }
@@ -256,10 +246,10 @@ for (const withhold of [false, true]) {
       const numeric = Edge.message("sender-number->recipient", numberSchema);
       const unused = chatEdge("sender->bystander");
       const texts = ["first", "second", "third"];
-      const recipient = await member<N>(
-        [call("info", {}, "info-1"), fauxAssistantMessage("recipient done")],
-        { prompt: "Read your inbox." },
-      );
+      const recipient = await member<N>([
+        call("info", {}, "info-1"),
+        fauxAssistantMessage("recipient done"),
+      ]);
       const bystander = new MockAgent<Skill, PromptTemplate, AgentTool, N>({
         runs: [yieldsThen(0, "never")],
       });
@@ -296,11 +286,13 @@ for (const withhold of [false, true]) {
       });
       const r = graph.addNode({
         state: recipient.agent,
+        prompt: "Read your inbox.",
         policy: LockPolicy,
         trigger: TriggerRule.when(chat),
       });
       const b = graph.addNode({
         state: bystander,
+        prompt: "Read the unused route.",
         policy: LockPolicy,
         trigger: TriggerRule.when(unused),
       });
@@ -309,7 +301,8 @@ for (const withhold of [false, true]) {
         .addEdge(sender, r, numeric)
         .addEdge(sender, b, unused);
       ports.connect(graph, r);
-      await execution.run();
+      await stepUntil(execution, () => O.isSome(graph.result(r)));
+      assert.equal(graph.available().has(r), withhold);
 
       // The info response guarantees a second request after Pi processes its steering queue.
       assert.equal(recipient.contexts.length, 2);
@@ -333,13 +326,11 @@ for (const withhold of [false, true]) {
 
 for (const strategy of STRATEGIES) {
   describe(strategy, () => {
-    test("a dependent's parent result is not injected: priming loses nothing and its staged prompt runs unchanged", async () => {
+    test("a dependent's parent result is not injected: priming loses nothing and its registered prompt runs unchanged", async () => {
       const upstream = new MockAgent({
-        prompt: "produce",
         runs: [yieldsThen(0, "upstream result")],
       });
       const dependent = new MockAgent({
-        prompt: "use it",
         runs: [yieldsThen(2, "dependent done")],
       });
       const graphPorts = terminalPorts();
@@ -350,19 +341,20 @@ for (const strategy of STRATEGIES) {
       );
       const graph = graphContext.graph;
       const edge = answerEdge("upstream->dependent");
-      const u = graph.addNode({
-        state: upstream,
-        policy: LockPolicy,
-        description: "upstream",
-        trigger: TriggerRule.always(),
-      });
+      const work = chatEdge("use-result");
+      const u = addPromptRun(graph, upstream, "upstream", "produce");
       const d = graph.addNode({
         state: dependent,
+        prompt: "use it",
         policy: LockPolicy,
         description: "dependent",
-        trigger: TriggerRule.when(edge),
+        trigger: TriggerRule.allOf(TriggerEntry.on(edge), TriggerEntry.on(work)),
       });
-      graph.addEdge(u, d, edge);
+      graph.addEdge(u, d, edge).addEdge(graph.source.id, d, work);
+      graph.emit(
+        graph.source.id,
+        Message.create(work, assignment("use the result")),
+      );
 
       graphPorts.connect(graph, d);
       assert.deepEqual([...graph.available().keys()], [u]);
@@ -371,7 +363,9 @@ for (const strategy of STRATEGIES) {
       assert.ok(O.isSome(graph.result(u)));
       await graphContext.step(); // primes the dependent: no frame, input kept
       assert.equal(graph.getNode(d)!.status, "running");
-      assert.equal(dependent.status, "ready");
+      assert.equal(dependent.status, "idle");
+      assert.ok(graph.available().has(d));
+      assert.ok(!dependent.calls.some(({ method }) => method === "stagePrompt"));
       assert.deepEqual(dependent.requests, []);
       assert.deepEqual(dependent.history, []);
       await graphContext.run();
@@ -386,9 +380,8 @@ for (const strategy of STRATEGIES) {
       assert.ok(O.isSome(result) && textOf(result.value) === "dependent done");
     });
 
-    test("a node re-armed through its value self-edge is not available until its trigger fires again", async () => {
+    test("a re-armed node with a retained self-edge waits for its next assignment", async () => {
       const member = new MockAgent({
-        prompt: "round 1",
         runs: [yieldsThen(0, "round 1 done"), yieldsThen(0, "round 2 done")],
       });
       const assignment = chatEdge("assignment");
@@ -403,7 +396,7 @@ for (const strategy of STRATEGIES) {
           yield [
             Message.create(
               assignment,
-              Task.create({ kind: "prompt", text: "go", spec: "" }),
+              Task.create({ kind: "prompt", text: "round 1", spec: "" }),
             ),
           ];
           return assistant("fed");
@@ -411,6 +404,11 @@ for (const strategy of STRATEGIES) {
       });
       const worker = graph.addNode({
         state: member,
+        prompt: (view) => {
+          const [work] = from(view, assignment);
+          assert.ok(work?.kind === "prompt");
+          return work.text;
+        },
         policy: LockPolicy,
         trigger: TriggerRule.when(assignment),
       });
@@ -419,17 +417,16 @@ for (const strategy of STRATEGIES) {
 
       await execution.run();
       assert.ok(O.isSome(graph.result(worker)));
-      assert.equal(graph.getNode(worker)!.status, "ready"); // re-armed by the self-edge
+      assert.equal(graph.getNode(worker)!.status, "ready");
       assert.equal(graph.available().has(worker), false); // trigger drained: not schedulable
       assert.deepEqual(requestTexts(member.requests), [["round 1"]]);
 
-      member.stagePrompt("round 2");
-      assert.equal(graph.available().has(worker), false); // a staged prompt alone is no trigger
+      assert.equal(member.status, "idle");
       graph.emit(
         feeder,
         Message.create(
           assignment,
-          Task.create({ kind: "prompt", text: "go again", spec: "" }),
+          Task.create({ kind: "prompt", text: "round 2", spec: "" }),
         ),
       );
       assert.ok(graph.available().has(worker));
@@ -487,14 +484,15 @@ for (const strategy of STRATEGIES) {
         trigger: TriggerRule.always(),
         state: sender,
       });
-      recipient.agent.stagePrompt("Read your inbox.");
       const r = graph.addNode({
         state: recipient.agent,
+        prompt: "Read your inbox.",
         policy: LockPolicy,
         trigger: TriggerRule.when(toRecipient),
       });
       const b = graph.addNode({
         state: bystander,
+        prompt: "Wait for your own delivery.",
         policy: LockPolicy,
         trigger: TriggerRule.when(toBystander),
       });
@@ -534,7 +532,7 @@ for (const strategy of STRATEGIES) {
       assert.ok(O.isSome(result) && textOf(result.value) === "recipient done");
     });
 
-    test("a member with neither a staged nor a received prompt is quiescent", async () => {
+    test("a registered prompt stays idle when its trigger never fires", async () => {
       const idle = new MockAgent({ runs: [yieldsThen(0, "never")] });
       const graphPorts = terminalPorts();
       const graphContext = plainContext(
@@ -545,9 +543,10 @@ for (const strategy of STRATEGIES) {
       const graph = graphContext.graph;
       const idleId = graph.addNode({
         state: idle,
+        prompt: "Wait.",
         policy: LockPolicy,
         description: "idle",
-        trigger: TriggerRule.always(),
+        trigger: TriggerRule.never(),
       });
 
       graphPorts.connect(graph, idleId);
@@ -557,7 +556,7 @@ for (const strategy of STRATEGIES) {
       assert.equal(idle.status, "idle");
     });
 
-    test("a delivery to a member without a prompt waits for a run, not a command", async () => {
+    test("a delivered payload is steered as data into the registered prompt, not run as a command", async () => {
       const edge = chatEdge("sender->member");
       const sender = new Deterministic<Chat, AssistantMessage>(
         async function* () {
@@ -588,20 +587,21 @@ for (const strategy of STRATEGIES) {
       });
       const m = graph.addNode({
         state: member,
+        prompt: "and now",
         policy: LockPolicy,
         description: "member",
         trigger: TriggerRule.when(edge),
       });
       graph.addEdge(s, m, edge);
 
-      graphPorts.connect(graph, s);
-      await graphContext.run();
-
+      graphPorts.connect(graph, m);
+      await stepUntil(graphContext, () => graph.getNode(m)!.status === "running");
       assert.deepEqual(member.requests, []);
+      const result = (await graphContext.run()).get(m);
+      assert.ok(result && textOf(result) === "later");
       assert.equal(member.status, "idle");
-      assert.equal(graph.getNode(m)!.status, "running");
+      assert.equal(graph.getNode(m)!.status, "ready");
       assert.equal(graph.available().size, 0);
-      assert.equal(textOf(await member.prompt("and now")), "later");
       assert.deepEqual(requestTexts(member.requests), [
         [
           "and now",
@@ -619,7 +619,6 @@ for (const strategy of STRATEGIES) {
     for (const stopReason of ["error", "aborted"] as const) {
       test(`a ${stopReason} final message is returned as a node result without closing the member`, async () => {
         const erring = new MockAgent({
-          prompt: "go",
           runs: [
             run([settle(assistant("", stopReason))]),
             yieldsThen(0, "recovered"),
@@ -632,30 +631,35 @@ for (const strategy of STRATEGIES) {
           strategy,
         );
         const graph = graphContext.graph;
+        const work = chatEdge("assignment");
         const id = graph.addNode({
           state: erring,
+          prompt: "go",
           policy: LockPolicy,
-          description: "erring",
-          trigger: TriggerRule.always(),
+          trigger: TriggerRule.when(work),
         });
+        graph.addEdge(graph.source.id, id, work);
+        graph.emit(graph.source.id, Message.create(work, assignment("start")));
 
         graphPorts.connect(graph, id);
         await graphContext.run();
         const result = graph.result(id);
         assert.ok(O.isSome(result) && result.value.stopReason === stopReason);
         assert.equal(erring.status, "idle");
-        assert.equal(textOf(await erring.prompt("still usable")), "recovered");
+        graph.emit(
+          graph.source.id,
+          Message.create(work, assignment("still usable")),
+        );
+        assert.equal(textOf((await graphContext.run()).get(id)!), "recovered");
       });
     }
 
     test("a failed run fails its node with the identical cause and activates no value dependent", async () => {
       const cause = new Error("provider down");
       const failing = new MockAgent({
-        prompt: "go",
         runs: [run([{ step: failed(cause) }])],
       });
       const child = new MockAgent({
-        prompt: "never",
         runs: [yieldsThen(0, "never")],
       });
       const graphPorts = terminalPorts();
@@ -666,14 +670,10 @@ for (const strategy of STRATEGIES) {
       );
       const graph = graphContext.graph;
       const edge = answerEdge("failing->child");
-      const f = graph.addNode({
-        state: failing,
-        policy: LockPolicy,
-        description: "failing",
-        trigger: TriggerRule.always(),
-      });
+      const f = addPromptRun(graph, failing, "failing", "go");
       const c = graph.addNode({
         state: child,
+        prompt: "never",
         policy: LockPolicy,
         description: "child",
         trigger: TriggerRule.when(edge),
@@ -688,11 +688,11 @@ for (const strategy of STRATEGIES) {
       assert.equal(graph.available().size, 0);
       assert.equal(graph.getNode(c)!.status, "ready");
       assert.deepEqual(child.requests, []);
-      assert.equal(child.status, "ready");
+      assert.equal(child.status, "idle");
     });
 
     test("an exhausted transcript fails its node instead of hanging", async () => {
-      const exhausted = new MockAgent({ prompt: "go", runs: [] });
+      const exhausted = new MockAgent({ runs: [] });
       const graphPorts = terminalPorts();
       const graphContext = plainContext(
         graphPorts.source,
@@ -700,12 +700,7 @@ for (const strategy of STRATEGIES) {
         strategy,
       );
       const graph = graphContext.graph;
-      const id = graph.addNode({
-        state: exhausted,
-        policy: LockPolicy,
-        description: "exhausted",
-        trigger: TriggerRule.always(),
-      });
+      const id = addPromptRun(graph, exhausted, "exhausted", "go");
 
       graphPorts.connect(graph, id);
       const error = await graphContext.run().catch((thrown: unknown) => thrown);
@@ -716,7 +711,6 @@ for (const strategy of STRATEGIES) {
 
     test("a member closed before its run settles fails its node as closed", async () => {
       const member = new MockAgent({
-        prompt: "go",
         runs: [yieldsThen(1, "never")],
       });
       const graphPorts = terminalPorts();
@@ -726,12 +720,7 @@ for (const strategy of STRATEGIES) {
         strategy,
       );
       const graph = graphContext.graph;
-      const id = graph.addNode({
-        state: member,
-        policy: LockPolicy,
-        description: "member",
-        trigger: TriggerRule.always(),
-      });
+      const id = addPromptRun(graph, member, "member", "go");
 
       graphPorts.connect(graph, id);
       await graphContext.step(); // prime
@@ -747,17 +736,12 @@ for (const strategy of STRATEGIES) {
       );
     });
 
-    test("a reused member runs its constructor prompt in one graph and an explicitly staged prompt in the next", async () => {
+    test("a reused member runs each graph's registered prompt with only that graph's inputs", async () => {
       const upstream = new MockAgent({
-        prompt: "produce",
         runs: [yieldsThen(0, "context")],
       });
       const seen: ParentView<Chat, AssistantMessage>[] = [];
       const member = new MockAgent({
-        prompt: (inputs) => {
-          seen.push(inputs);
-          return "round one";
-        },
         runs: [yieldsThen(1, "first"), yieldsThen(0, "second")],
       });
       const firstPorts = terminalPorts();
@@ -768,19 +752,25 @@ for (const strategy of STRATEGIES) {
       );
       const first = firstContext.graph;
       const edge = answerEdge("upstream->member");
-      const upstreamId = first.addNode({
-        state: upstream,
-        policy: LockPolicy,
-        description: "upstream",
-        trigger: TriggerRule.always(),
-      });
+      const work = chatEdge("use-context");
+      const upstreamId = addPromptRun(first, upstream, "upstream", "produce");
       const firstId = first.addNode({
         state: member,
+        prompt: (inputs) => {
+          seen.push(inputs);
+          return "round one";
+        },
         policy: LockPolicy,
         description: "member",
-        trigger: TriggerRule.when(edge),
+        trigger: TriggerRule.allOf(TriggerEntry.on(edge), TriggerEntry.on(work)),
       });
-      first.addEdge(upstreamId, firstId, edge);
+      first
+        .addEdge(upstreamId, firstId, edge)
+        .addEdge(first.source.id, firstId, work);
+      first.emit(
+        first.source.id,
+        Message.create(work, assignment("use the context")),
+      );
 
       firstPorts.connect(first, firstId);
       assert.deepEqual([...first.available().keys()], [upstreamId]);
@@ -788,6 +778,7 @@ for (const strategy of STRATEGIES) {
       const firstResult = first.result(firstId);
       assert.ok(O.isSome(firstResult) && textOf(firstResult.value) === "first");
       assert.equal(seen.length, 1);
+      assert.deepEqual(seen[0]!.values.get(edge.id), assistant("context"));
 
       const secondPorts = terminalPorts();
       const secondContext = plainContext(
@@ -796,15 +787,9 @@ for (const strategy of STRATEGIES) {
         strategy,
       );
       const second = secondContext.graph;
-      member.stagePrompt((inputs) => {
+      const secondId = addPromptRun(second, member, "member", (inputs) => {
         seen.push(inputs);
         return "round two";
-      });
-      const secondId = second.addNode({
-        state: member,
-        policy: LockPolicy,
-        description: "member",
-        trigger: TriggerRule.always(),
       });
       secondPorts.connect(second, secondId);
       await secondContext.run();
@@ -819,41 +804,46 @@ for (const strategy of STRATEGIES) {
       assert.deepEqual(userTexts(member.history), ["round one", "round two"]);
     });
 
-    test("staging over a staged prompt is busy and preserves the original stage", async () => {
-      const member = new MockAgent({
-        prompt: "staged",
-        runs: [yieldsThen(0, "staged result")],
+    for (const status of ["ready", "suspended"] as const) {
+      test(`a prepared ${status} member fails busy without replacing or advancing its run`, async () => {
+        const member = new MockAgent({
+          prompt: "staged",
+          runs: [yieldsThen(status === "ready" ? 0 : 1, "staged result")],
+        });
+        if (status === "suspended") {
+          const first = await member.next();
+          assert.equal(first.value?.kind, "yield");
+        }
+        const requests = [...member.requests];
+        let otherCalls = 0;
+        const ports = terminalPorts();
+        const context = plainContext(ports.source, ports.sink, strategy);
+        const graph = context.graph;
+        const id = addPromptRun(graph, member, "member", () => {
+          otherCalls++;
+          return "other";
+        });
+        ports.connect(graph, id);
+        assert.ok(graph.available().has(id));
+        await context.step();
+        assert.equal(member.status, status);
+        await assert.rejects(context.step(), (error) =>
+          error instanceof DataflowNodeError &&
+          error.error instanceof JuncoAgentError &&
+          error.error.code === "busy",
+        );
+        assert.ok(O.isNone(graph.result(id)));
+        assert.deepEqual(member.requests, requests);
+        assert.equal(member.status, status);
+        const prepared = await member.next();
+        assert.ok(
+          prepared.value?.kind === "settled" &&
+            textOf(prepared.value.message) === "staged result",
+        );
+        assert.deepEqual(userTexts(member.history), ["staged"]);
+        assert.equal(otherCalls, 0);
       });
-      let otherCalls = 0;
-      assert.throws(
-        () =>
-          member.stagePrompt(() => {
-            otherCalls++;
-            return "other";
-          }),
-        (error: unknown) =>
-          error instanceof JuncoAgentError && error.code === "busy",
-      );
-      assert.equal(member.status, "ready");
-      const graphPorts = terminalPorts();
-      const graphContext = plainContext(
-        graphPorts.source,
-        graphPorts.sink,
-        strategy,
-      );
-      const graph = graphContext.graph;
-      const id = graph.addNode({
-        state: member,
-        policy: LockPolicy,
-        trigger: TriggerRule.always(),
-      });
-      graphPorts.connect(graph, id);
-      await graphContext.run();
-      const result = graph.result(id);
-      assert.ok(O.isSome(result) && textOf(result.value) === "staged result");
-      assert.deepEqual(userTexts(member.history), ["staged"]);
-      assert.equal(otherCalls, 0);
-    });
+    }
 
     test("a prompt callback sees the delivered inputs once, after priming, while messages are steered", async () => {
       const notes = chatEdge("notes->agent");
@@ -861,21 +851,10 @@ for (const strategy of STRATEGIES) {
       const seedMessage = assistant("seed");
       const note: Task = { kind: "prompt", ...full("note", "agent#1") };
       const seen: [unknown, unknown][] = [];
-      const receiver = await member(
-        [
-          call("yield", { reason: "later" }, "yield-later"),
-          fauxAssistantMessage("done"),
-        ],
-        {
-          prompt: (inputs) => {
-            seen.push([
-              inputs.messages.get(notes.id),
-              inputs.values.get(seed.id),
-            ]);
-            return "Use note with seed";
-          },
-        },
-      );
+      const receiver = await member([
+        call("yield", { reason: "later" }, "yield-later"),
+        fauxAssistantMessage("done"),
+      ]);
       const graphPorts = terminalPorts();
       const graphContext = policyContext(
         graphPorts.source,
@@ -898,6 +877,10 @@ for (const strategy of STRATEGIES) {
       const notesId = inert(graph, { id: NodeId.create("notes") });
       const agentId = graph.addNode({
         state: receiver.agent,
+        prompt: (inputs) => {
+          seen.push([inputs.messages.get(notes.id), inputs.values.get(seed.id)]);
+          return "Use note with seed";
+        },
         id: NodeId.create("agent"),
         policy: LockPolicy,
         trigger: TriggerRule.allOf(
@@ -920,6 +903,11 @@ for (const strategy of STRATEGIES) {
       );
       assert.equal(seen.length, 0);
       assert.equal(receiver.faux.state.callCount, 0);
+      assert.equal(receiver.agent.status, "idle");
+      assert.ok(graph.available().has(agentId));
+      await stepUntil(graphContext, () => receiver.agent.status === "suspended");
+      assert.equal(graph.available().get(agentId)?.continuationOnly, true);
+      assert.equal(seen.length, 1);
 
       await graphContext.run();
       assert.deepEqual(seen, [[[note], seedMessage]]);
@@ -937,11 +925,7 @@ for (const strategy of STRATEGIES) {
 
     test("a prompt callback's throw fails its node with the identical cause before any request", async () => {
       const cause = new Error("no prompt");
-      const thrower = await member([fauxAssistantMessage("never")], {
-        prompt: () => {
-          throw cause;
-        },
-      });
+      const thrower = await member([fauxAssistantMessage("never")]);
       const graphPorts = terminalPorts();
       const graphContext = plainContext(
         graphPorts.source,
@@ -950,10 +934,8 @@ for (const strategy of STRATEGIES) {
       );
       const graph = graphContext.graph;
       closers.push(() => graph.close());
-      const id = graph.addNode({
-        state: thrower.agent,
-        policy: LockPolicy,
-        trigger: TriggerRule.always(),
+      const id = addPromptRun(graph, thrower.agent, "thrower", () => {
+        throw cause;
       });
 
       graphPorts.connect(graph, id);
@@ -967,7 +949,6 @@ for (const strategy of STRATEGIES) {
 
     test("an explicit step is registered unchanged, a step-less coroutine runs itself, and a step-less unsupported or bare graph spec is rejected", async () => {
       const mock = new MockAgent({
-        prompt: "unused",
         runs: [yieldsThen(0, "never")],
       });
       const graphPorts = terminalPorts();
@@ -990,7 +971,7 @@ for (const strategy of STRATEGIES) {
       await graphContext.run();
       const result = graph.result(id);
       assert.ok(O.isSome(result) && textOf(result.value) === "custom");
-      assert.equal(mock.status, "ready");
+      assert.equal(mock.status, "idle");
       assert.deepEqual(mock.requests, []);
 
       const coroutine = new Deterministic<Chat, AssistantMessage>(
@@ -1040,32 +1021,36 @@ for (const strategy of STRATEGIES) {
       }
     });
 
-    test("one shared availability predicate holds ready agent, coroutine and graph nodes until released", async () => {
-      let admitted = false;
-      const shared: NodeOptions<Chat, AssistantMessage> = {
-        trigger: TriggerRule.always(),
-        is_available: (_view, triggered) => admitted && triggered,
-      };
+    test("empty release edges park agent, coroutine and graph nodes until work arrives", async () => {
+      const toAgent = chatEdge("release-agent");
+      const toCoroutine = chatEdge("release-coroutine");
+      const toGraph = chatEdge("release-graph");
+      const toConsumer = chatEdge("release-consumer");
+      const innerWork = chatEdge("inner-work");
       const agent = new MockAgent({
-        prompt: "go",
         runs: [yieldsThen(1, "agent done")],
       });
       const inner = new MockAgent({
-        prompt: "inner",
         runs: [yieldsThen(0, "inner done")],
       });
       const childPorts = terminalPorts();
       const childContext = plainContext(
-        childPorts.source,
+        new Source<Chat, AssistantMessage>(
+          (view) =>
+            from(view, toGraph).map((task) => Message.create(innerWork, task)),
+          { id: childPorts.source.id, schema: TaskSchema },
+        ),
         childPorts.sink,
         strategy,
       );
       const child = childContext.graph;
       const innerId = child.addNode({
         state: inner,
+        prompt: "inner",
         policy: LockPolicy,
-        trigger: TriggerRule.always(),
+        trigger: TriggerRule.when(innerWork),
       });
+      child.addEdge(child.source.id, innerId, innerWork);
       childPorts.connect(child, innerId);
       let entered = false;
       const coroutine = new Deterministic<Chat, AssistantMessage>(
@@ -1086,28 +1071,37 @@ for (const strategy of STRATEGIES) {
       const graph = graphContext.graph;
       const fromAgent = answerEdge("agent->consumer");
       const a = graph.addNode({
-        ...shared,
+        prompt: "go",
+        trigger: TriggerRule.when(toAgent),
         policy: LockPolicy,
         state: agent,
         id: NodeId.create("agent"),
       });
       const d = graph.addNode({
-        ...shared,
+        trigger: TriggerRule.when(toCoroutine),
         id: NodeId.create("coroutine"),
         state: coroutine,
       });
       const g = graph.addNode({
-        ...shared,
+        trigger: TriggerRule.when(toGraph),
         id: NodeId.create("graph"),
         state: childContext,
       });
-      consumer.stagePrompt("consume");
       const c = graph.addNode({
         state: consumer,
+        prompt: "consume",
         policy: LockPolicy,
-        trigger: TriggerRule.when(fromAgent),
+        trigger: TriggerRule.allOf(
+          TriggerEntry.on(fromAgent),
+          TriggerEntry.on(toConsumer),
+        ),
       });
       graph.addEdge(a, c, fromAgent);
+      const releases = [
+        [a, toAgent], [d, toCoroutine], [g, toGraph], [c, toConsumer],
+      ] as const;
+      for (const [target, edge] of releases)
+        graph.addEdge(graph.source.id, target, edge);
 
       graphPorts.connect(graph, c);
       assert.equal(graph.available().size, 0);
@@ -1116,11 +1110,12 @@ for (const strategy of STRATEGIES) {
         [agent.requests, inner.requests, consumer.requests],
         [[], [], []],
       );
-      assert.equal(agent.status, "ready");
+      assert.equal(agent.status, "idle");
       assert.equal(entered, false);
       assert.ok([a, d, g, c].every((id) => O.isNone(graph.result(id))));
 
-      admitted = true;
+      for (const [, edge] of releases)
+        graph.emit(graph.source.id, Message.create(edge, assignment("begin")));
       await graphContext.run();
 
       const texts = [a, d, g, c].map((id) => {
@@ -1222,11 +1217,9 @@ for (const strategy of STRATEGIES) {
         trigger: TriggerRule.always(),
         state: source,
       });
-      receiver.agent.stagePrompt(
-        "Inspect info, then work through your messages.",
-      );
       const agentId = graph.addNode({
         state: receiver.agent,
+        prompt: "Inspect info, then work through your messages.",
         id: NodeId.create("agent"),
         policy: LockPolicy,
         trigger: TriggerRule.allOf(
@@ -1381,6 +1374,7 @@ for (const strategy of STRATEGIES) {
       closers.push(() => graph.close());
       const fromF = chatEdge("F->P");
       const fromFQ = chatEdge("F->Q");
+      const fromFR = chatEdge("F->R");
       const feeder = graph.addNode({
         id: NodeId.create("F"),
         trigger: TriggerRule.always(),
@@ -1388,23 +1382,22 @@ for (const strategy of STRATEGIES) {
           yield [
             Message.create(fromF, { kind: "prompt", ...full("work", "TP") }),
             Message.create(fromFQ, { kind: "prompt", ...full("work", "TQ") }),
+            Message.create(fromFR, assignment("Inspect your route.")),
           ];
           return assistant("fed");
         }, LockPolicy),
       });
-      const ids = [p, q, r].map((agent, index) => {
-        agent.agent.stagePrompt("Report along your message route.");
-        return graph.addNode({
-          state: agent.agent,
-          id: NodeId.create(["P", "Q", "R"][index]!),
+      const ids = (
+        [["P", p, fromF], ["Q", q, fromFQ], ["R", r, fromFR]] as const
+      ).map(([id, { agent }, edge]) =>
+        graph.addNode({
+          id: NodeId.create(id),
+          state: agent,
+          prompt: "Report along your message route.",
           policy: LockPolicy,
-          trigger: [
-            TriggerRule.when(fromF),
-            TriggerRule.when(fromFQ),
-            TriggerRule.always(),
-          ][index]!,
-        });
-      });
+          trigger: TriggerRule.when(edge),
+        }),
+      );
       const toP = chatEdge("P->sink");
       const toQ = chatEdge("Q->sink");
       const sinkP = sink(graph, toP, "sinkP");
@@ -1412,6 +1405,7 @@ for (const strategy of STRATEGIES) {
       graph
         .addEdge(feeder, ids[0]!, fromF)
         .addEdge(feeder, ids[1]!, fromFQ)
+        .addEdge(feeder, ids[2]!, fromFR)
         .addEdge(ids[0]!, sinkP.id, toP)
         .addEdge(ids[1]!, sinkQ.id, toQ);
 
@@ -1515,14 +1509,15 @@ for (const strategy of STRATEGIES) {
       const graph = graphContext.graph;
       closers.push(() => graph.close());
       const a = inert(graph, { id: NodeId.create("A") });
-      b.agent.stagePrompt("Inspect your routes.");
       const bId = graph.addNode({
         state: b.agent,
+        prompt: "Inspect your routes.",
         policy: LockPolicy,
-        trigger: TriggerRule.always(),
+        trigger: TriggerRule.when(ab1),
       });
       const dId = graph.addNode({
         state: d,
+        prompt: "Wait for data.",
         policy: LockPolicy,
         trigger: TriggerRule.when(bd),
       });
@@ -1559,6 +1554,7 @@ for (const strategy of STRATEGIES) {
         registeredNodeContexts.get(graph.getNode(id)!)!.info();
 
       graphPorts.connect(graph, bId);
+      graph.emit(a, Message.create(ab1, assignment("Inspect the graph.")));
       await stepUntil(graphContext, () => b.agent.status === "suspended");
       // While B is paused, add a route to the live graph.
       const e = inert(graph);
@@ -1705,13 +1701,16 @@ test("a collectionless real agent uses its node's policy", async () => {
   const graph = graphContext.graph;
   try {
     const id = NodeId.create("free");
-    agent.stagePrompt("go");
+    const work = chatEdge("free-work");
     graph.addNode({
       state: agent,
+      prompt: "go",
       id,
       policy: EmptyPolicy,
-      trigger: TriggerRule.always(),
+      trigger: TriggerRule.when(work),
     });
+    graph.addEdge(graph.source.id, id, work);
+    graph.emit(graph.source.id, Message.create(work, assignment("begin")));
     graphPorts.connect(graph, id);
     const result = await graphContext.run();
     assert.equal(contentText(result.get(id)!.content), "collectionless-ok");
@@ -1807,13 +1806,17 @@ describe("edge schemas reach each agent's messaging tools", () => {
     const toX = Edge.message("P->x", NumberSchema);
     const toY = Edge.message("Q->y", StringSchema);
     const [pId, qId] = [p, q].map(({ agent }, index) => {
-      agent.stagePrompt("Send along your route.");
-      return graph.addNode({
+      const work = Edge.message(`start-${index}`, NumberSchema);
+      const id = graph.addNode({
         id: NodeId.create(["P", "Q"][index]!),
         state: agent,
+        prompt: "Send along your route.",
         policy: LockPolicy,
-        trigger: TriggerRule.always(),
+        trigger: TriggerRule.when(work),
       });
+      graph.addEdge(graph.source.id, id, work);
+      graph.emit(graph.source.id, Message.create(work, index));
+      return id;
     });
     const x = collector(graph, toX, "x");
     const y = collector(graph, toY, "y");
@@ -1862,10 +1865,10 @@ describe("edge schemas reach each agent's messaging tools", () => {
         return assistant("fed");
       }, LockPolicy),
     });
-    a.agent.stagePrompt("Read, then send.");
     const aId = graph.addNode({
       id: NodeId.create("A"),
       state: a.agent,
+      prompt: "Read, then send.",
       policy: LockPolicy,
       trigger: TriggerRule.when(feed),
     });
@@ -1965,15 +1968,15 @@ describe("edge schemas reach each agent's messaging tools", () => {
         ["A", a, toA],
         ["B", b, toB],
       ] as const
-    ).map(([id, { agent }, edge]) => {
-      agent.stagePrompt("Work on your task.");
-      return graph.addNode({
+    ).map(([id, { agent }, edge]) =>
+      graph.addNode({
         id: NodeId.create(id),
         state: agent,
+        prompt: "Work on your task.",
         policy: LockPolicy,
         trigger: TriggerRule.when(edge),
-      });
-    });
+      }),
+    );
     const c = collector(graph, toC, "C");
     graph
       .addEdge(source, aId!, toA)
@@ -2020,10 +2023,10 @@ describe("edge schemas reach each agent's messaging tools", () => {
       task("T1", "do X", "X works"),
       task("T2", "do Y", "Y works"),
     ]);
-    a.agent.stagePrompt("Work on your tasks.");
     const aId = graph.addNode({
       id: NodeId.create("A"),
       state: a.agent,
+      prompt: "Work on your tasks.",
       policy: LockPolicy,
       trigger: TriggerRule.when(toA),
     });

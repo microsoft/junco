@@ -11,6 +11,7 @@ import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import {
   DataflowDefinitionError,
   Edge,
+  Message,
   NodeId,
   type NodeIdType,
   Sink,
@@ -29,6 +30,7 @@ import {
   TaskSchema,
 } from "../src/index.ts";
 import {
+  addPromptRun,
   assistant,
   plainContext,
   resultText,
@@ -92,12 +94,13 @@ const node = (agent: MockAgent, id: string) => ({
   state: agent,
   policy: LockPolicy,
   description: id,
+  prompt: id,
   trigger: TriggerRule.always(),
 });
 
 /**
- * Available a=40, b=41, f=20; c=39 with an unsatisfied trigger; d=70 whose availability rejects;
- * e=90 completed by the graph before the others were added.
+ * Available a=40, b=41, f=20; c=39 waits for input; d=70 has a never trigger;
+ * e=90 consumed its only assignment before the others were added.
  */
 async function compactionFixture() {
   const graphPorts = terminalPorts();
@@ -109,46 +112,41 @@ async function compactionFixture() {
   const graph = graphContext.graph;
   const finished = assistant("e done");
   const e = member(90 - estimateTokens(user("e")) - estimateTokens(finished), {
-    prompt: "e",
     runs: [run([settle(finished)])],
   });
-  const eId = graph.addNode(node(e, "e"));
+  const eId = addPromptRun(graph, e, "e");
   graphPorts.connect(graph, eId);
   await graphContext.run();
   assert.equal(resultText(graph, eId), "e done");
   assert.equal(await e.context_size(), 90);
 
-  const staged = (tokens: number, name: string) =>
+  const scripted = (tokens: number, name: string) =>
     member(tokens, {
-      prompt: name,
       runs: [run([settle(assistant(`${name} done`))])],
     });
   const agents = {
-    a: staged(40, "a"),
-    b: staged(41, "b"),
-    c: staged(39, "c"),
-    d: staged(70, "d"),
+    a: scripted(40, "a"),
+    b: scripted(41, "b"),
+    c: scripted(39, "c"),
+    d: scripted(70, "d"),
     e,
-    f: staged(20, "f"),
+    f: scripted(20, "f"),
   };
   const ids = {
-    a: graph.addNode(node(agents.a, "a")),
-    b: graph.addNode(node(agents.b, "b")),
+    a: addPromptRun(graph, agents.a, "a"),
+    b: addPromptRun(graph, agents.b, "b"),
   } as Record<keyof typeof agents, NodeIdType>;
   const never = Edge.message<typeof TaskSchema, AssistantMessage>(
     "d->c",
     TaskSchema,
   );
   ids.c = graph.addNode({
-    id: NodeId.create("c"),
-    state: agents.c,
-    policy: LockPolicy,
-    description: "c",
+    ...node(agents.c, "c"),
     trigger: TriggerRule.when(never),
   });
-  ids.d = graph.addNode({ ...node(agents.d, "d"), is_available: () => false });
+  ids.d = graph.addNode({ ...node(agents.d, "d"), trigger: TriggerRule.never() });
   ids.e = eId;
-  ids.f = graph.addNode(node(agents.f, "f"));
+  ids.f = addPromptRun(graph, agents.f, "f");
   graph.addEdge(ids.d, ids.c, never);
   assert.deepEqual([...graph.available().keys()], [ids.a, ids.b, ids.f]);
   return { graph, graphContext, agents, ids };
@@ -186,7 +184,7 @@ describe("policy selection", () => {
           changed ? 1 : 0,
           `requests of ${key}`,
         );
-        // No staged prompt was started and no message was sent.
+        // Compaction must not start any new prompt run.
         assert.equal(agent.requests.length, key === "e" ? 1 : 0);
       }
       assert.deepEqual([...graph.available().keys()], [ids.a, ids.b, ids.f]);
@@ -286,9 +284,8 @@ describe("policy boundaries", () => {
         "parallel",
       );
       const graph = graphContext.graph;
-      // Staged prompts make both members available.
-      const full = member(90, { prompt: "go" });
-      const unknown = member(90, { prompt: "go" }, window);
+      const full = member(90);
+      const unknown = member(90, {}, window);
       const fullId = graph.addNode(node(full, "full"));
       graphPorts.connect(graph, fullId);
       graph.addNode(node(unknown, "unknown"));
@@ -326,18 +323,16 @@ describe("policy boundaries", () => {
     );
     const graph = graphContext.graph;
     const available = member(90, {
-      prompt: "go",
       runs: [yieldsThen(0, "done")],
     });
     // Without a model it could not be measured at all.
     const hidden = new Measured({
-      prompt: "go",
       history: seeded(90),
       runs: [],
     });
     const availableId = graph.addNode(node(available, "available"));
     graphPorts.connect(graph, availableId);
-    graph.addNode({ ...node(hidden, "hidden"), is_available: () => false });
+    graph.addNode({ ...node(hidden, "hidden"), trigger: TriggerRule.never() });
     assert.equal(
       await JuncoGraph.compact(graph, "more-than-forty-available"),
       undefined,
@@ -357,16 +352,14 @@ describe("policy boundaries", () => {
         return super.context_size();
       }
     }
-    const readiness = { early: true, late: false };
     const early = new Gated({
-      prompt: "go",
       history: seeded(90),
       models: [model(100)],
       model: { provider: "mock", modelId: "mock" },
       maintenance: [COMPACTED],
-      runs: [],
+      runs: [yieldsThen(0, "early done")],
     });
-    const late = member(90, { prompt: "go" });
+    const late = member(90);
     const graphPorts = terminalPorts();
     const graphContext = plainContext(
       graphPorts.source,
@@ -374,19 +367,22 @@ describe("policy boundaries", () => {
       "parallel",
     );
     const graph = graphContext.graph;
-    const earlyId = graph.addNode({
-      ...node(early, "early"),
-      is_available: () => readiness.early,
-    });
-    graph.addNode({
+    const earlyId = addPromptRun(graph, early, "early");
+    const release = Edge.message<typeof TaskSchema, AssistantMessage>("release", TaskSchema);
+    const lateId = graph.addNode({
       ...node(late, "late"),
-      is_available: () => readiness.late,
+      trigger: TriggerRule.when(release),
     });
+    graph.addEdge(graph.source.id, lateId, release);
     graphPorts.connect(graph, earlyId);
     const compaction = JuncoGraph.compact(graph, "more-than-forty-available");
     await measuring.promise;
-    readiness.early = false;
-    readiness.late = true;
+    await graphContext.step(); // prime early
+    await graphContext.step(); // consume its only assignment
+    graph.emit(graph.source.id, Message.create(release, {
+      kind: "prompt", text: "start", taskId: "late", spec: "", deps: [], history: [],
+    }));
+    assert.ok(!graph.available().has(earlyId) && graph.available().has(lateId));
     gate.resolve();
     assert.equal(await compaction, undefined);
     assert.equal(await early.context_size(), 1);
@@ -402,12 +398,11 @@ describe("policy boundaries", () => {
     );
     const graph = graphContext.graph;
     const held = member(50, {
-      prompt: "hold",
       runs: [yieldsThen(1, "held done")],
     });
     const idle = member(50);
-    const heldId = graph.addNode(node(held, "held"));
-    graph.addNode(node(idle, "idle"));
+    const heldId = addPromptRun(graph, held, "held", "hold");
+    graph.addNode({ ...node(idle, "idle"), trigger: TriggerRule.never() });
     graphPorts.connect(graph, heldId);
     for (let windows = 0; held.status !== "suspended"; windows++) {
       assert.ok(windows < 8, "member never yielded");
@@ -478,7 +473,6 @@ describe("policy boundaries", () => {
      */
     const addSkipped = (graph: JuncoGraph) => {
       const inner = new Measured({
-        prompt: "inner",
         history: seeded(90),
         models: [model(100)],
         model: { provider: "mock", modelId: "mock" },
@@ -492,7 +486,7 @@ describe("policy boundaries", () => {
         "parallel",
       );
       const child = childContext.graph;
-      const innerId = child.addNode(node(inner, "inner"));
+      const innerId = addPromptRun(child, inner, "inner");
       const coroutine = new Deterministic<typeof TaskSchema, AssistantMessage>(
         async function* () {
           started.add(coroutine);
@@ -544,15 +538,13 @@ describe("policy boundaries", () => {
       const nested = addSkipped(graph);
       const { childId, coroutineId } = nested;
       const full = member(90, {
-        prompt: "full",
         runs: [yieldsThen(0, "full done")],
       });
       const small = member(20, {
-        prompt: "small",
         runs: [yieldsThen(0, "small done")],
       });
-      const fullId = graph.addNode(node(full, "full"));
-      const smallId = graph.addNode(node(small, "small"));
+      const fullId = addPromptRun(graph, full, "full");
+      const smallId = addPromptRun(graph, small, "small");
       graphPorts.connect(graph, fullId);
       assert.equal(graph.available().size, 4, name);
       assert.equal(await JuncoGraph.compact(graph, name), undefined, name);

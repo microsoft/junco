@@ -34,6 +34,7 @@ test("triggerInputs: `all` reads every rule edge whole, `any` reads only the fir
         view,
         trigger: conjunction,
         satisfied: [a, b],
+        continuationOnly: false,
         status,
       }),
     ],
@@ -42,14 +43,14 @@ test("triggerInputs: `all` reads every rule edge whole, `any` reads only the fir
       [b, "all"],
     ],
   );
-  // Atomicity: a partially satisfied `all` reads nothing. Only a started actor kept available by
-  // its own hook can be admitted in that state.
+  // A continuation can be admitted before the next atomic join is ready.
   assert.deepEqual(
     [
       ...triggerInputs({
         view,
         trigger: conjunction,
         satisfied: [a],
+        continuationOnly: true,
         status: "running",
       }),
     ],
@@ -66,13 +67,14 @@ test("triggerInputs: `all` reads every rule edge whole, `any` reads only the fir
         view,
         trigger: disjunction,
         satisfied: [b, a],
+        continuationOnly: false,
         status,
       }),
     ],
     [[b, "all"]],
   );
   assert.deepEqual(
-    [...triggerInputs({ view, trigger: disjunction, satisfied: [], status })],
+    [...triggerInputs({ view, trigger: disjunction, satisfied: [], status, continuationOnly: false })],
     [],
   );
 });

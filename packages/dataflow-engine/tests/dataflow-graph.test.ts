@@ -27,12 +27,15 @@ import type {
 } from "../src/index.ts";
 import {
   admitToolCall,
+  ConstFanin,
+  ConstFanout,
   DataflowDefinitionError,
   DataflowGraph,
   DataflowNodeError,
   Edge,
   EdgeId,
   EmitOnce,
+  FinalMessages,
   from,
   Message,
   NodeId,
@@ -59,10 +62,11 @@ type Graph = DataflowGraph<void, N, string, never>;
 const newGraph = (): Graph =>
   new DataflowGraph<void, N, string, never>(Width.create(1), UNBOUNDED);
 
-test("a value self-edge re-arms its node: each return re-resolves outputs and the node runs again until its availability declines", async () => {
+test("a value self-edge re-arms its node and each return replaces retained outputs", async () => {
   const graph = newGraph();
   const execution = context({ graph, scheduler: parallel() });
   const seed = Edge.message<N, string>("seed", NumberSchema);
+  const release = Edge.message<N, string>("release", NumberSchema);
   const loop = Edge.value("loop", StringSchema);
   const out = Edge.value("out", StringSchema);
   const tap = Edge.value("tap", StringSchema);
@@ -76,9 +80,7 @@ test("a value self-edge re-arms its node: each return re-resolves outputs and th
   );
   const aId = graph.addNode({
     state: undefined,
-    trigger: TriggerRule.anyOf(TriggerEntry.on(seed), TriggerEntry.on(loop)),
-    is_available: (_view, triggered) =>
-      triggered && (graph.getNode(aId)!.status === "running" || primes < 3),
+    trigger: TriggerRule.when(seed),
     step: async function* () {
       primes++;
       const view = yield [];
@@ -87,9 +89,7 @@ test("a value self-edge re-arms its node: each return re-resolves outputs and th
   });
   const bId = graph.addNode({
     state: undefined,
-    trigger: TriggerRule.when(out),
-    is_available: (_view, triggered) =>
-      triggered && O.toUndefined(graph.result(aId)) === "3",
+    trigger: TriggerRule.allOf(TriggerEntry.on(out), TriggerEntry.on(release)),
     step: async function* () {
       const view = yield [];
       return view.values.get(out.id)!;
@@ -106,9 +106,18 @@ test("a value self-edge re-arms its node: each return re-resolves outputs and th
   });
   graph
     .addEdge(source, aId, seed)
+    .addEdge(source, bId, release)
     .addEdge(aId, aId, loop)
     .addEdge(aId, bId, out)
     .addEdge(aId, cId, tap);
+  await execution.run();
+  assert.equal(graph.results().get(cId), "1");
+  for (const n of [2, 3]) {
+    graph.emit(source, Message.create(seed, n));
+    await execution.run();
+  }
+  assert.equal(graph.getNode(aId)!.status, "ready");
+  graph.emit(source, Message.create(release, 1));
   const results = await execution.run();
   assert.equal(primes, 3);
   assert.equal(results.get(aId), "3");
@@ -776,48 +785,40 @@ test("the scheduler sizes each read: a pair-reading plan drains an `all` trigger
   assert.deepEqual(batches, [[1, 2], [3, 4], [5]]);
 });
 
-test("a depth threshold lives in `is_available`: the gate waits for three, then reads them at once", async () => {
+test("an accumulator publishes one batch after its third input", async () => {
   const feed = Edge.message<N, string>("feed", NumberSchema);
+  const output = Edge.message<N, string>("batch", NumberSchema);
   const graph = newGraph();
   const execution = context({ graph, scheduler: parallel() });
-  const fires: number[][] = [];
-
-  const srcId = graph.addNode({
+  const batches: number[][] = [];
+  const source = graph.addNode(new StepNode<void, N, string>(() => [], {
+    state: undefined, trigger: TriggerRule.never(),
+  }));
+  const gather = graph.addNode({
     state: undefined,
-    trigger: TriggerRule.always(),
-    step: async function* (): NodeGenerator<N, string> {
-      yield [Message.create(feed, 1)];
-      yield [Message.create(feed, 2)];
-      yield [Message.create(feed, 3)];
-      return "src";
+    trigger: TriggerRule.when(feed),
+    async *step() {
+      const pending: number[] = [];
+      while (pending.length < 3) pending.push(...from(yield [], feed));
+      return new FinalMessages(pending.map((n) => Message.create(output, n)));
     },
   });
-  const gateId = graph.addNode(
-    new StepNode<void, N, string>(
-      (_state, view) => {
-        fires.push([...from(view, feed)]);
-        return [];
-      },
-      {
-        state: undefined,
-        trigger: TriggerRule.when(feed),
-        // What `TriggerEntry.on(feed, 3)` used to say. The trigger only knows "has something"; a deeper threshold
-        // is the node's own business, and the probe view aliases the live queue.
-        is_available: (view) => (view.messages.get(feed.id)?.length ?? 0) >= 3,
-      },
-    ),
-  );
-  graph.addEdge(srcId, gateId, feed);
-
-  await execution.run();
-  // One firing, not three: the gate stayed unavailable at depth 1 and 2.
-  assert.deepEqual(fires, [[1, 2, 3]]);
+  const sink = graph.addNode(new StepNode<void, N, string>((_, view) => {
+    batches.push([...from(view, output)]);
+    return [];
+  }, { state: undefined, trigger: TriggerRule.when(output) }));
+  graph.addEdge(source, gather, feed).addEdge(gather, sink, output);
+  for (const n of [1, 2, 3]) {
+    assert.deepEqual(batches, []);
+    graph.emit(source, Message.create(feed, n));
+    await execution.run();
+  }
+  assert.deepEqual(batches, [[1, 2, 3]]);
   assert.deepEqual(queued(feed), []);
 });
 
-test("the graph evaluates triggers before availability: unfired and finished nodes never reach the planner", async () => {
+test("unfired and finished nodes never reach the planner", async () => {
   const empty = Edge.message<N, string>("empty", NumberSchema);
-  const unfed = Edge.message<N, string>("unfed", NumberSchema);
   const planned: string[][] = [];
   const graph = new DataflowGraph<void, N, string, never>(UNBOUNDED, UNBOUNDED);
   const execution = context({
@@ -827,7 +828,6 @@ test("the graph evaluates triggers before availability: unfired and finished nod
       return parallel()(snapshot);
     },
   });
-  const hooked: boolean[] = [];
   const src = graph.addNode(
     new EmitOnce<void, N, string>(() => [], "src", {
       id: NodeId.create("src"),
@@ -849,19 +849,7 @@ test("the graph evaluates triggers before availability: unfired and finished nod
       trigger: TriggerRule.never(),
     }),
   );
-  const observed = graph.addNode(
-    new StepNode<void, N, string>(() => [], {
-      id: NodeId.create("observed"),
-      state: undefined,
-      trigger: TriggerRule.when(unfed),
-      is_available: (_view, triggered) => {
-        hooked.push(triggered);
-        return false;
-      },
-    }),
-  );
   graph.addEdge(src, waiting, empty);
-  graph.addEdge(src, observed, unfed);
 
   assert.deepEqual(
     [...graph.available()].map(([id, { status }]) => [id, status]),
@@ -878,29 +866,57 @@ test("the graph evaluates triggers before availability: unfired and finished nod
   assert.deepEqual(planned, [["src"], ["src"]]);
   assert.deepEqual(graph.result(src), O.some("src"));
   assert.equal(graph.available().size, 0);
-  assert.ok(hooked.length > 0 && hooked.every((triggered) => !triggered));
-  for (const id of [waiting, idle, observed]) {
+  for (const id of [waiting, idle]) {
     assert.equal(graph.getNode(id)!.status, "ready");
   }
 });
 
-test("every trigger edge is validated even when the availability hook would refuse the node", () => {
-  const unwired = Edge.message<N, string>("unwired", NumberSchema);
+test("native registrations, builders and ports reject obsolete options without reading them", () => {
+  const base = {
+    id: NodeId.create("legacy"),
+    schema: NumberSchema,
+    state: undefined,
+    trigger: TriggerRule.always(),
+    ret: "done",
+    // biome-ignore lint/correctness/useYield: this body must never be registered.
+    async *step() { return "done"; },
+  };
+  const legacy = {
+    ...base,
+    get is_available(): never { return assert.fail("obsolete option was read"); },
+  };
   const graph = newGraph();
-  let consulted = 0;
-  graph.addNode(
+  const list = Edge.message("list", Type.Array(NumberSchema));
+  for (const options of [legacy, { ...base, is_available: undefined }]) {
+    for (const build of [
+      () => graph.addNode(options),
+      () => new StepNode(() => [], options),
+      () => new EmitOnce(() => [], "done", options),
+      () => new ConstFanout(1, [], options),
+      () => new ConstFanin<void, N, string>([], list, options),
+      () => new Source(() => [], options),
+      () => new Sink(options.step, options),
+    ]) assert.throws(build, { name: "DataflowDefinitionError", message: /trigger/ });
+  }
+  assert.equal(graph.getNode(base.id), undefined);
+});
+
+test("a missing later trigger edge is validated even when the first operand is empty", () => {
+  const unwired = Edge.message<N, string>("unwired", NumberSchema);
+  const empty = Edge.message<N, string>("empty", NumberSchema);
+  const graph = newGraph();
+  const src = graph.addNode(new StepNode<void, N, string>(() => [], {
+    state: undefined, trigger: TriggerRule.never(),
+  }));
+  const dst = graph.addNode(
     new StepNode<void, N, string>(() => [], {
       state: undefined,
-      trigger: TriggerRule.when(unwired),
-      is_available: () => {
-        consulted += 1;
-        return false;
-      },
+      trigger: TriggerRule.allOf(TriggerEntry.on(empty), TriggerEntry.on(unwired)),
     }),
   );
+  graph.addEdge(src, dst, empty);
 
   assert.throws(() => graph.available(), DataflowDefinitionError);
-  assert.equal(consulted, 0);
 });
 
 /** Concrete matrix fixture: one lexical plan per evaluation, with no policy binding. */
@@ -1165,7 +1181,8 @@ test("resolveInputs keeps an `all` trigger atomic for a live actor: a lone reple
   const e2 = Edge.message<N, string>("e2", NumberSchema);
   const execution = scripted(
     [
-      [["P"], ["X"]],
+      [["P"]],
+      [["X"]],
       [["X", "X"], ["P"]],
     ],
     (_entry, live) => triggerInputs(live),
@@ -1183,18 +1200,21 @@ test("resolveInputs keeps an `all` trigger atomic for a live actor: a lone reple
       return "p";
     },
   });
+  const record = recorder([e1, e2], seen);
   const x = graph.addNode(
-    new StepNode<void, N, string>(recorder([e1, e2], seen), {
+    new StepNode<void, N, string>((state, view) => {
+      record(state, view);
+      return view.messages.has(e2.id) ? { resume: [] } : [];
+    }, {
       id: NodeId.create("X"),
       state: undefined,
       trigger: TriggerRule.allOf(TriggerEntry.on(e1), TriggerEntry.on(e2)),
-      // An active actor stays resumable even when its trigger is drained.
-      is_available: () => true,
     }),
   );
   graph.addEdge(p, x, e1);
   graph.addEdge(p, x, e2);
 
+  await execution.step();
   await execution.step();
   await execution.step();
   assert.deepEqual(seen, [
@@ -1924,7 +1944,7 @@ test("a StepNode reads the registered node's current state on every resumed acti
   assert.deepEqual(recorded, [6]);
 });
 
-test("observations detach native containers, preserve borrowed payloads, and never probe readiness", async () => {
+test("observations detach native containers, preserve borrowed payloads, and never advance bodies", async () => {
   type State = { label: string };
   const PayloadSchema = Type.Object({ value: Type.Number() });
   type Payload = typeof PayloadSchema;
@@ -1940,13 +1960,14 @@ test("observations detach native containers, preserve borrowed payloads, and nev
   assert.equal(graph.observe().version, 0);
   const state = { label: "source" };
   const payload = { value: 7 };
-  let probes = 0;
+  let started = 0;
   const source = graph.addNode({
     id: NodeId.create("source"),
     description: "",
     state,
     trigger: TriggerRule.always(),
     step: async function* (): NodeGenerator<Payload, Result> {
+      started++;
       yield [];
       return undefined;
     },
@@ -1955,10 +1976,6 @@ test("observations detach native containers, preserve borrowed payloads, and nev
     id: NodeId.create("target"),
     state: { label: "target" },
     trigger: TriggerRule.never(),
-    is_available: () => {
-      probes += 1;
-      return false;
-    },
     step: async function* (): NodeGenerator<Payload, Result> {
       yield [];
       return { text: "unreachable" };
@@ -1976,7 +1993,7 @@ test("observations detach native containers, preserve borrowed payloads, and nev
   const before = graph.observe();
   assert.equal(before.version, beforeEmit.version + 1);
   assert.equal(graph.observe(), before);
-  assert.equal(probes, 0);
+  assert.equal(started, 0);
   assert.deepEqual([...before.nodes.keys()], [source, target]);
   assert.equal(before.nodes.get(source)?.description, "");
   assert.equal(before.nodes.get(source)?.state, state);
@@ -2018,6 +2035,7 @@ test("observations detach native containers, preserve borrowed payloads, and nev
   assert.equal(graph.observe().version, version);
   graph.available();
   graph.results();
+  assert.equal(started, 0);
   assert.equal(graph.observe().version, version);
   const reports: (readonly NodeIdType[])[] = [];
   await assert.rejects(
@@ -2598,8 +2616,6 @@ test("schemas: a return failing any outbound value edge publishes nothing and ke
   const id = graph.addNode({
     state: undefined,
     trigger: TriggerRule.always(),
-    is_available: (_view, triggered) =>
-      graph.getNode(id)!.status === "running" || (triggered && runs < 2),
     step: async function* () {
       runs++;
       yield [];
@@ -2613,7 +2629,8 @@ test("schemas: a return failing any outbound value edge publishes nothing and ke
     }),
   );
   graph.addEdge(id, id, loop).addEdge(id, dst, wide);
-  await assert.rejects(() => execution.run(), DataflowDefinitionError);
+  for (let turn = 0; turn < 3; turn++) await execution.step();
+  await assert.rejects(() => execution.step(), DataflowDefinitionError);
   assert.equal(runs, 2);
   assert.deepEqual(graph.result(id), O.some(1));
   const view = graph.observe().inputs;
@@ -2695,13 +2712,53 @@ test("schemas: Source and Sink admission are atomic and keep identity", () => {
   assert.equal(drained[0], good);
 });
 
-test("Source: an availability gate holds FIFO deliveries back without dropping them", async () => {
+test("Source credits admit one queued delivery and survive priming or an omitted read", async () => {
+  const graph = new DataflowGraph<Source<N, never> | undefined, N, never, never>(
+    Width.create(1), UNBOUNDED,
+  );
+  const credit = Edge.message<N, never>("credit", NumberSchema);
+  const output = Edge.message<N, never>("output", NumberSchema);
+  const input = EdgeId.create("input");
+  const source = new Source<N, never>(
+    (view) => (view.messages.get(input) ?? []).map((n) => Message.create(output, n)),
+    { id: NodeId.create("src"), schema: NumberSchema, trigger: TriggerRule.when(credit) },
+  );
+  const src = graph.addNode(source);
+  const peer = graph.addNode({
+    state: undefined,
+    trigger: TriggerRule.never(),
+    step: async function* () { throw new Error("unreachable"); },
+  });
+  graph.addEdge(peer, src, credit).addEdge(src, peer, output);
+  graph.emit(peer, Message.create(credit, 1));
+  assert.equal(graph.available().has(src), false);
+
+  const advance = (inputs: Map<EdgeIdType, MessageSchedule>) =>
+    graph.evaluate((execute) => execute([[{ id: src, inputs }]]));
+  const reads = new Map<EdgeIdType, MessageSchedule>([[credit.id, 1]]);
+  source.enqueue({ messages: new Map([[input, [2, 3]]]), values: new Map() });
+  const head = source.peek();
+  await advance(reads);
+  assert.equal(source.peek(), head);
+  assert.deepEqual(queued(output), []);
+  await assert.rejects(advance(new Map()), DataflowDefinitionError);
+  assert.equal(source.peek(), head);
+  assert.deepEqual(queued(credit), [1]);
+
+  await advance(reads);
+  assert.deepEqual(queued(output), [2, 3]);
+  assert.deepEqual(queued(credit), []);
+  assert.equal(source.peek(), undefined);
+  source.enqueue({ messages: new Map([[input, [4]]]), values: new Map() });
+  assert.equal(graph.available().has(src), false);
+});
+
+test("Source credits hold each successive FIFO delivery until its release", async () => {
   type Port = Source<typeof NumberSchema, never>;
   const input = EdgeId.create("in");
   const out = Edge.message<typeof NumberSchema, never>("out", NumberSchema);
   const routed: number[][] = [];
-  const gated: boolean[] = [];
-  let open = true;
+  const credit = Edge.message<typeof NumberSchema, never>("release", NumberSchema);
   const source: Port = new Source<typeof NumberSchema, never>(
     (view) => {
       const batch = [...(view.messages.get(input) ?? [])];
@@ -2711,10 +2768,7 @@ test("Source: an availability gate holds FIFO deliveries back without dropping t
     {
       id: NodeId.create("src"),
       schema: NumberSchema,
-      is_available: (_view, triggered) => {
-        gated.push(triggered);
-        return open;
-      },
+      trigger: TriggerRule.when(credit),
     },
   );
   const graph = new DataflowGraph<
@@ -2737,20 +2791,23 @@ test("Source: an availability gate holds FIFO deliveries back without dropping t
       }
     },
   });
-  graph.addEdge(src, dst, out);
+  graph.addEdge(src, dst, out).addEdge(dst, src, credit);
 
   assert.equal(graph.available().has(src), false);
-  assert.deepEqual(gated, []);
-  open = false;
   source.enqueue({ messages: new Map([[input, [1, 2]]]), values: new Map() });
   source.enqueue({ messages: new Map([[input, [3]]]), values: new Map() });
   const first = source.peek();
   await execution.run();
   assert.deepEqual([routed, received], [[], []]);
   assert.equal(source.peek(), first);
-  assert.ok(gated.length > 0 && gated.every(Boolean));
 
-  open = true;
+  graph.emit(dst, Message.create(credit, 1));
+  await execution.run();
+  assert.deepEqual(routed, [[1, 2]]);
+  assert.deepEqual(received, [1, 2]);
+  assert.deepEqual(source.peek()?.messages.get(input), [3]);
+  assert.equal(graph.available().has(src), false);
+  graph.emit(dst, Message.create(credit, 1));
   await execution.run();
   assert.deepEqual(routed, [[1, 2], [3]]);
   assert.deepEqual(received, [1, 2, 3]);
@@ -2876,8 +2933,6 @@ test("probes: every accepted return is observed per value edge after delivery, r
   const id = graph.addNode({
     state: undefined,
     trigger: TriggerRule.always(),
-    is_available: (_view, triggered) =>
-      graph.getNode(id)!.status === "running" || (triggered && runs < 2),
     step: async function* () {
       runs++;
       yield [];
@@ -2891,7 +2946,7 @@ test("probes: every accepted return is observed per value edge after delivery, r
     }),
   );
   graph.addEdge(id, id, loop).addEdge(id, dst, out);
-  await execution.run();
+  for (let turn = 0; turn < 4; turn++) await execution.step();
   assert.equal(runs, 2);
   assert.deepEqual(seen, [
     ["loop", 5, O.some(5), O.some(5)],

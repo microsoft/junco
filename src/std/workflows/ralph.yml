@@ -1,6 +1,5 @@
-# Ralph: one agent revises its complete answer for a fixed number of rounds, or until a
-# synchronous success check accepts a draft. The feedback edge Ralph->Ralph is the loop; rounds,
-# success and prompts are code:
+# Ralph revises one ordered assignment in a single session. Its controller publishes
+# only the last fixed round or the first draft accepted by the success check:
 #   JuncoGraph.fromYaml(workflows.ralph, { cwd, scheduler: () => schedules.parallel(),
 #     ladder, ...schedules.ralph({ rounds: 3 }) });   // or schedules.ralph({ until })
 # Feed the objectives on route `assignment`, one prompt message each in delivery order (one
@@ -8,18 +7,40 @@
 graph:
   name: Ralph
   source:
+    trigger: { any: [ingress-open, ingress-ack] }
     routes:
       assignment: ["$source~>Ralph"]
+  sink:
+    returns: Ralph
+    trigger: { all: ["Ralph->$sink", ralph-accepted] }
   nodes:
+    IngressOpen:
+      kind: emit
+      text: Admit the assignment.
+      spec: One source delivery.
+    RalphControl:
+      kind: code
+      trigger: { any: ["$source~>Ralph", ralph-complete] }
     Ralph:
       description: Revises its complete answer each round; only the final round reaches $sink.
-      trigger:
-        any: ["$source~>Ralph", "Ralph->Ralph"]
+      trigger: "RalphControl~>Ralph"
+      prompt: >-
+        On the first round, achieve the objectives in the following task messages, in order.
+        On phase "revise", take another try at the ordered objectives, building on your last
+        answer in this session. On phase "retry", the previous attempt ended with a provider
+        error: continue the same round from where you left off. Focus on depth: finish
+        objectives well rather than attempting more of them. Return the complete answer.
   edges:
-    - from: $source
-      to: Ralph
+    - from: IngressOpen
+      to: $source
+      id: ingress-open
       kind: message
-      schema:
+      schema: { type: object }
+    - from: $source
+      to: RalphControl
+      id: "$source~>Ralph"
+      kind: message
+      schema: &task
         type: object
         required: [kind, text]
         properties:
@@ -34,8 +55,23 @@ graph:
                 type: { const: image }
                 data: { type: string }
                 mimeType: { type: string }
-    - from: Ralph
+    - from: RalphControl
       to: Ralph
+      kind: message
+      schema:
+        anyOf:
+          - *task
+          - type: object
+            required: [phase, round, objectives]
+            properties:
+              phase: { enum: [retry, revise] }
+              round: { type: integer, minimum: 1 }
+              objectives: { type: array, items: { type: string } }
+    - from: Ralph
+      to: RalphControl
+      kind: message
+      on: return
+      id: ralph-complete
       schema: &assistant
         type: object
         required: [role, content, stopReason]
@@ -63,3 +99,13 @@ graph:
     - from: Ralph
       to: $sink
       schema: *assistant
+    - from: RalphControl
+      to: $sink
+      id: ralph-accepted
+      kind: message
+      schema: &signal { type: boolean, const: true }
+    - from: RalphControl
+      to: $source
+      id: ingress-ack
+      kind: message
+      schema: *signal

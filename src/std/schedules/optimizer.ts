@@ -28,10 +28,9 @@ import {
   EdgeId,
   Message,
   type NodeGenerator,
-  NodeId,
+  FinalMessages,
   type ParentView,
 } from "dataflow-engine";
-import { JuncoAgent } from "junco-agent";
 import { roundRobin } from "junco-scheduler";
 import { type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
@@ -186,7 +185,6 @@ const SOL: LadderRung = {
 };
 const MARKER = "junco-profile-optimizer:";
 const GRACE_MS = 5_000;
-const EDITOR = NodeId.create("Editor");
 const EDGES = {
   initial: "initial-state",
   feedback: "feedback-state",
@@ -1265,20 +1263,19 @@ class OptimizerController {
 
   /** Evaluate's decision for one inbound state. */
   async advance(
-    graph: JuncoGraph<TSchema, unknown>,
     input: OptimizationState,
   ): Promise<Route> {
     if (input.stop !== null)
       throw new Error("Evaluate received a stopped state");
     try {
-      if (input.history.length === 0) return await this.#baseline(graph, input);
+      if (input.history.length === 0) return await this.#baseline(input);
       const last = input.history.at(-1);
       if (last?.kind !== "edit")
         throw new Error("Evaluate expects an edit outcome after the baseline");
       if (!last.accepted)
         return last.error?.startsWith(PROVIDER_FAILURE)
           ? await this.#terminal(input, { kind: "failed", reason: last.error })
-          : await this.#stage(graph, input);
+          : await this.#stage(input);
       const axis = input.request.axes[input.axisIndex] as Axis;
       const measured = await this.#measure(
         input,
@@ -1291,7 +1288,7 @@ class OptimizerController {
         return await this.#terminal(state, measured.stop);
       const { trial } = measured;
       // An execution or measurement error retries the same axis from the anchor.
-      if (trial.stats === null) return await this.#stage(graph, state);
+      if (trial.stats === null) return await this.#stage(state);
       const reference = state.anchor.stats;
       if (reference === null) throw new Blocked(unmeasured("incumbent"));
       if (trial.feasible && improves(state.request, reference, trial.stats))
@@ -1314,8 +1311,8 @@ class OptimizerController {
           : [...state.explored, axis],
       };
       return state.axisIndex < state.request.axes.length
-        ? await this.#stage(graph, state)
-        : await this.#completeCycle(graph, state);
+        ? await this.#stage(state)
+        : await this.#completeCycle(state);
     } catch (error) {
       if (!(error instanceof Blocked)) throw error;
       const latest = this.#session.latest;
@@ -1380,23 +1377,12 @@ class OptimizerController {
     context,
   }) => {
     const out = context.#edgeOf(edges, EDGES.initial);
-    let emitted = false;
-    return {
-      state: new Deterministic<TSchema, unknown>(
-        async function* (): NodeGenerator<TSchema, unknown> {
-          emitted = true;
-          yield [Message.create(out, context.#session.initial)];
-          // Parked by is_available; never resumed.
-          return context.#session.initial;
-        },
-        policy,
-      ),
-      is_available: () => !emitted,
-    };
+    return new Deterministic<TSchema, unknown>(async function* () {
+      return new FinalMessages([Message.create(out, context.#session.initial)]);
+    }, policy);
   };
 
   readonly evaluate: DeterministicNode<OptimizerController> = ({
-    graph,
     edges,
     policy,
     context,
@@ -1411,116 +1397,95 @@ class OptimizerController {
       Edge<TSchema, unknown>,
       Edge<TSchema, unknown>,
     ];
-    return {
-      state: new Deterministic<TSchema, unknown>(
-        async function* (): NodeGenerator<TSchema, unknown> {
-          let inputs = yield [];
-          while (true) {
-            const state = context.#onlyState(inputs, schema, [
-              EDGES.initial,
-              EDGES.feedback,
-            ]);
-            const next = await context.advance(graph, state);
-            inputs = yield next.route === "final"
-              ? [Message.create(final, next.state)]
-              : [
-                  Message.create(assignment, next.state),
-                  Message.create(awaiting, next.state),
-                ];
-          }
-        },
-        policy,
-      ),
-    };
+    return new Deterministic<TSchema, unknown>(
+      async function* (): NodeGenerator<TSchema, unknown> {
+        let inputs = yield [];
+        while (true) {
+          const state = context.#onlyState(inputs, schema, [
+            EDGES.initial,
+            EDGES.feedback,
+          ]);
+          const next = await context.advance(state);
+          inputs = yield next.route === "final"
+            ? [Message.create(final, next.state)]
+            : [
+                Message.create(assignment, next.state),
+                Message.create(awaiting, next.state),
+              ];
+        }
+      },
+      policy,
+    );
   };
 
   readonly feedback: DeterministicNode<OptimizerController> = ({
-    graph,
     edges,
     policy,
     context,
   }) => {
-    const schema = context.#edgeOf(edges, EDGES.initial).schema;
+    const schema = context.#edgeOf(edges, EDGES.awaiting).schema;
     const out = context.#edgeOf(edges, EDGES.feedback);
-    const awaitingId = EdgeId.create(EDGES.awaiting);
-    /** The queued ticket's turn settled: the editor re-armed and its agent idle. */
-    const settled = (view: View): boolean => {
-      const turn = context.#turn;
-      const [queued, ...rest] = view.messages.get(awaitingId) ?? [];
-      if (turn === undefined || rest.length > 0 || !Value.Check(schema, queued))
-        return false;
-      if ((queued as OptimizationState).editTicket !== turn.ticket)
-        return false;
-      const node = graph.getNode(EDITOR);
-      const agent = node?.state;
-      return (
-        node?.status === "ready" &&
-        agent instanceof JuncoAgent &&
-        agent.status === "idle"
-      );
-    };
-    return {
-      state: new Deterministic<TSchema, unknown>(
-        async function* (): NodeGenerator<TSchema, unknown> {
-          let inputs = yield [];
-          while (true) {
-            const state = context.#onlyState(inputs, schema, [EDGES.awaiting]);
-            const turn = context.#turn;
-            if (turn === undefined || state.editTicket !== turn.ticket)
-              throw new Error(
-                "Feedback received a state for an inactive ticket",
-              );
-            context.#turn = undefined;
-            const { receipt } = turn;
-            let error: string | null = null;
-            const result: unknown = inputs.values.get(
-              EdgeId.create(EDGES.complete),
+    const complete = EdgeId.create(EDGES.complete);
+    return new Deterministic<TSchema, unknown>(
+      async function* (): NodeGenerator<TSchema, unknown> {
+        let inputs = yield [];
+        while (true) {
+          const state = context.#onlyState(inputs, schema, [EDGES.awaiting]);
+          const turn = context.#turn;
+          if (turn === undefined || state.editTicket !== turn.ticket)
+            throw new Error(
+              "Feedback received a state for an inactive ticket",
             );
-            try {
-              finalText(result, "Editor");
-            } catch (failure) {
-              const provider =
-                typeof result === "object" &&
-                result !== null &&
-                "stopReason" in result &&
-                (result.stopReason === "error" ||
-                  result.stopReason === "aborted");
-              error = provider
-                ? `${PROVIDER_FAILURE}: ${message(failure)}`
-                : message(failure);
-            }
-            if (receipt === undefined)
-              error ??=
-                "the editor turn settled without a successful edit_tuning";
-            const edit: Edit = {
-              kind: "edit",
-              ticket: turn.ticket,
-              axis: turn.axis,
-              beforeHash: turn.baseHash,
-              afterHash: receipt?.afterHash ?? null,
-              source: receipt?.source ?? null,
-              reason: receipt?.reason ?? "",
-              accepted: receipt !== undefined && error === null,
-              error,
-            };
-            // The optimizer owns a written file even when the turn is rejected, so it can restore it.
-            const next: OptimizationState = {
-              ...state,
-              current:
-                receipt === undefined
-                  ? state.current
-                  : context.#edited(state.current, receipt),
-              editTicket: null,
-              history: [...state.history, edit],
-            };
-            await context.#session.checkpoint(next);
-            inputs = yield [Message.create(out, next)];
+          const results = inputs.messages.get(complete);
+          if (results?.length !== 1)
+            throw new Error("Feedback requires exactly one editor settlement");
+          const [result] = results;
+          context.#turn = undefined;
+          const { receipt } = turn;
+          let error: string | null = null;
+          try {
+            finalText(result, "Editor");
+          } catch (failure) {
+            const provider =
+              typeof result === "object" &&
+              result !== null &&
+              "stopReason" in result &&
+              (result.stopReason === "error" ||
+                result.stopReason === "aborted");
+            error = provider
+              ? `${PROVIDER_FAILURE}: ${message(failure)}`
+              : message(failure);
           }
-        },
-        policy,
-      ),
-      is_available: (view, triggered) => triggered && settled(view),
-    };
+          if (receipt === undefined)
+            error ??=
+              "the editor turn settled without a successful edit_tuning";
+          const edit: Edit = {
+            kind: "edit",
+            ticket: turn.ticket,
+            axis: turn.axis,
+            beforeHash: turn.baseHash,
+            afterHash: receipt?.afterHash ?? null,
+            source: receipt?.source ?? null,
+            reason: receipt?.reason ?? "",
+            accepted: receipt !== undefined && error === null,
+            error,
+          };
+          // The optimizer owns a written file even when the turn is rejected, so it can restore it.
+          const next: OptimizationState = {
+            ...state,
+            current:
+              receipt === undefined
+                ? state.current
+                : context.#edited(state.current, receipt),
+            editTicket: null,
+            history: [...state.history, edit],
+          };
+          await context.#session.checkpoint(next);
+          inputs = yield [Message.create(out, next)];
+        }
+      },
+      policy,
+    );
   };
 
   readonly finalNode: DeterministicNode<OptimizerController> = ({
@@ -1528,19 +1493,17 @@ class OptimizerController {
     policy,
     context,
   }) => {
-    const schema = context.#edgeOf(edges, EDGES.initial).schema;
-    return {
-      state: new Deterministic<TSchema, unknown>(
-        async function* (): NodeGenerator<TSchema, unknown> {
-          const inputs = yield [];
-          const state = context.#onlyState(inputs, schema, [EDGES.terminal]);
-          if (state.stop === null)
-            throw new Error("Final requires a stopped state");
-          return state;
-        },
-        policy,
-      ),
-    };
+    const schema = context.#edgeOf(edges, EDGES.terminal).schema;
+    return new Deterministic<TSchema, unknown>(
+      async function* (): NodeGenerator<TSchema, unknown> {
+        const inputs = yield [];
+        const state = context.#onlyState(inputs, schema, [EDGES.terminal]);
+        if (state.stop === null)
+          throw new Error("Final requires a stopped state");
+        return state;
+      },
+      policy,
+    );
   };
 
   #edgeOf(edges: ReadonlyMap<string, Edge<TSchema, unknown>>, id: string) {
@@ -1696,7 +1659,6 @@ class OptimizerController {
 
   /** Arm the next editor turn on the anchor's bytes and route the same ticketed state to Editor and Feedback. */
   async #stage(
-    graph: JuncoGraph<TSchema, unknown>,
     input: OptimizationState,
   ): Promise<Route> {
     const session = this.#session;
@@ -1704,14 +1666,6 @@ class OptimizerController {
     if (halted !== undefined) return this.#terminal(input, halted);
     const state = await session.restoreAnchor(input);
     const axis = state.request.axes[state.axisIndex] as Axis;
-    const node = graph.getNode(EDITOR);
-    const agent = node?.state;
-    if (
-      !(agent instanceof JuncoAgent) ||
-      node?.status !== "ready" ||
-      agent.status !== "idle"
-    )
-      throw new Error("the editor is not idle and ready for a new assignment");
     const ticket = randomUUID();
     const next: OptimizationState = { ...state, editTicket: ticket };
     this.#turn = {
@@ -1721,7 +1675,6 @@ class OptimizerController {
       busy: false,
       receipt: undefined,
     };
-    agent.stagePrompt(this.#prompt(next, ticket, axis));
     await session.checkpoint(next);
     return { state: next, route: "editor" };
   }
@@ -1731,7 +1684,6 @@ class OptimizerController {
   }
 
   async #baseline(
-    graph: JuncoGraph<TSchema, unknown>,
     input: OptimizationState,
   ): Promise<Route> {
     const { request } = input;
@@ -1775,12 +1727,11 @@ class OptimizerController {
       },
       stableValues: this.#window(state, trial),
     };
-    return this.#stage(graph, state);
+    return this.#stage(state);
   }
 
   /** A completed all-axis cycle: confirm when every predicate holds, else remeasure and continue. */
   async #completeCycle(
-    graph: JuncoGraph<TSchema, unknown>,
     input: OptimizationState,
   ): Promise<Route> {
     let state = input;
@@ -1861,7 +1812,7 @@ class OptimizerController {
       },
       stableValues: trial.feasible ? this.#window(state, trial) : [],
     };
-    return this.#stage(graph, state);
+    return this.#stage(state);
   }
 
   /** All requested stop predicates at the anchor, after an all-axis cycle without promotion. */
@@ -1882,14 +1833,6 @@ class OptimizerController {
     return [...state.stableValues, ...this.#runValues(trial)].slice(
       -plateau.window,
     );
-  }
-
-  #prompt(state: OptimizationState, ticket: string, axis: Axis): string {
-    return [
-      `Optimization turn ${ticket}: tune the ${axis} region (cycle ${state.cycle}).`,
-      "Read the complete optimization state in the user message that follows (edge editor-assignment, JSON { id, payload }), then call read_target,",
-      `then edit_tuning with ticket "${ticket}" and axis "${axis}". Finish with one sentence.`,
-    ].join(" ");
   }
 
   /** `current` with `receipt`'s region written: the optimizer owns those bytes. */
@@ -2113,21 +2056,6 @@ class OptimizerCampaign implements SessionServices {
           Evaluate: controller.evaluate,
           Feedback: controller.feedback,
           Final: controller.finalNode,
-        },
-        available: {
-          // Resumes started work; otherwise needs its assignment and a staged prompt.
-          Editor:
-            ({ graph }) =>
-            (_view, triggered) => {
-              const node = graph.getNode(EDITOR);
-              if (node?.status === "running") return true;
-              const agent = node?.state;
-              return (
-                triggered &&
-                agent instanceof JuncoAgent &&
-                agent.status === "ready"
-              );
-            },
         },
         context: controller,
         signal,

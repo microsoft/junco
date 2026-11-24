@@ -2,15 +2,16 @@ import type { Static, TSchema } from "typebox";
 import type { Edge } from "./edges.js";
 import type { NodeId } from "./identity.js";
 import type {
-  AvailabilityFn,
   ErrorFn,
   Message,
   Node,
   NodeGenerator,
   NodeSpec,
+  NodeYield,
   ParentView,
   StepFn,
 } from "./node.js";
+import { rejectLegacyAvailability } from "./node.js";
 import type { TriggerRule } from "./trigger.js";
 
 /** Shared empty result for `from`. Safe to alias: the return type is a readonly array. */
@@ -40,15 +41,15 @@ export class StepNode<S, N extends TSchema, T> implements NodeSpec<S, N, T> {
   declare readonly id?: NodeId;
   declare readonly description?: string;
   declare readonly trigger: TriggerRule<N, T>;
-  declare readonly is_available?: AvailabilityFn<N, T>;
   declare readonly on_error?: ErrorFn<S, N, T>;
   declare readonly state: S;
   readonly step: StepFn<S, N, T>;
 
   constructor(
-    fn: (state: S, view: ParentView<N, T>) => Message<N>[],
+    fn: (state: S, view: ParentView<N, T>) => NodeYield<N>,
     options: Omit<NodeSpec<S, N, T>, "step">,
   ) {
+    rejectLegacyAvailability(options);
     Object.assign(this, options);
     // Annotated explicitly so the `never` return inferred from `while (true)` cannot fight `T`.
     this.step = async function* (this: Node<S, N, T>): NodeGenerator<N, T> {
@@ -69,7 +70,6 @@ export class EmitOnce<S, N extends TSchema, T> implements NodeSpec<S, N, T> {
   declare readonly id?: NodeId;
   declare readonly description?: string;
   declare readonly trigger: TriggerRule<N, T>;
-  declare readonly is_available?: AvailabilityFn<N, T>;
   declare readonly on_error?: ErrorFn<S, N, T>;
   declare readonly state: S;
   readonly step: () => NodeGenerator<N, T>;
@@ -79,9 +79,10 @@ export class EmitOnce<S, N extends TSchema, T> implements NodeSpec<S, N, T> {
     ret: T,
     options: Omit<NodeSpec<S, N, T>, "step">,
   ) {
+    rejectLegacyAvailability(options);
     Object.assign(this, options);
     this.step = async function* (): NodeGenerator<N, T> {
-      yield batch();
+      yield { resume: batch() };
       return ret;
     };
   }

@@ -656,48 +656,34 @@ const NUMERIC_YAML = (description = "Reports peak concurrency.") => `graph:
 
 const NUMERIC_CODE = (terminal = "peak", quality = "0.95") => `let active = 0;
 let peak = 0;
-const worker: syntax.DeterministicNode = ({ policy }) => ({
-  state: new Deterministic(async function* () {
-    yield [];
-    active++;
-    peak = Math.max(peak, active);
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    } finally {
-      active--;
-    }
-    return 1;
-  }, policy),
-});
+const worker: syntax.DeterministicNode = ({ policy }) => new Deterministic(async function* () {
+  yield [];
+  active++;
+  peak = Math.max(peak, active);
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  } finally {
+    active--;
+  }
+  return 1;
+}, policy);
 const CODE: Record<string, syntax.DeterministicNode> = {
-  Seed: ({ edges, policy }) => {
-    let emitted = false;
-    return {
-      state: new Deterministic(async function* () {
-        emitted = true;
-        yield ["Seed~>A", "Seed~>B"].map((id) => graph.Message.create(edges.get(id)!, 1));
-        return 1;
-      }, policy),
-      is_available: () => !emitted,
-    };
-  },
+  Seed: ({ edges, policy }) => new Deterministic(async function* () {
+    return new graph.FinalMessages(["Seed~>A", "Seed~>B"].map((id) => graph.Message.create(edges.get(id)!, 1)));
+  }, policy),
   A: worker,
   B: worker,
-  Quality: ({ policy }) => ({
-    state: new Deterministic(async function* () {
-      const view = yield [];
-      if (view.values.get("A->Quality") !== 1 || view.values.get("B->Quality") !== 1)
-        throw new Error("Quality requires both inputs");
-      return ${quality};
-    }, policy),
-  }),
-  Terminal: ({ policy }) => ({
-    state: new Deterministic(async function* () {
-      const view = yield [];
-      if (view.values.get("quality") !== ${quality}) throw new Error("quality check failed");
-      return ${terminal};
-    }, policy),
-  }),
+  Quality: ({ policy }) => new Deterministic(async function* () {
+    const view = yield [];
+    if (view.values.get("A->Quality") !== 1 || view.values.get("B->Quality") !== 1)
+      throw new Error("Quality requires both inputs");
+    return ${quality};
+  }, policy),
+  Terminal: ({ policy }) => new Deterministic(async function* () {
+    const view = yield [];
+    if (view.values.get("quality") !== ${quality}) throw new Error("quality check failed");
+    return ${terminal};
+  }, policy),
 };`;
 
 const SCHED = {
@@ -1088,24 +1074,20 @@ function checkCoordinates(state: State, log: EditorLog): void {
 
 // --- numeric convergence -------------------------------------------------------------------------
 
+/** Check the on-disk ticket and trial directories while the successful tool result awaits settlement. */
+async function holdSettlement(target: {sessionDir: string}, info: Info) {
+  const before = await runDirs(target.sessionDir);
+  await sleep(300);
+  const checkpoint = await readState(target.sessionDir);
+  assert.equal(await runDirs(target.sessionDir), before);
+  assert.equal(checkpoint.editTicket, info.ticket);
+  assert.ok(!edits(checkpoint).some((edit) => edit.ticket === info.ticket));
+}
+
 async function numericScenario(dir: string): Promise<void> {
   const target = await prepare(dir, numericTarget());
   await chmod(target.ts, 0o640);
   const log: EditorLog = { states: [] };
-  const delays: { runsUnchanged: boolean; feedbackWaited: boolean }[] = [];
-  /** Hold settlement after the patch returned: no child may start and Feedback may not consume it. */
-  const holdSettlement = async (_results: readonly Result[], info: Info) => {
-    const before = await runDirs(target.sessionDir);
-    await sleep(300);
-    const checkpoint = await readState(target.sessionDir);
-    const recorded = edits(checkpoint).some(
-      (edit) => edit.ticket === info.ticket,
-    );
-    delays.push({
-      runsUnchanged: (await runDirs(target.sessionDir)) === before,
-      feedbackWaited: checkpoint.editTicket === info.ticket && !recorded,
-    });
-  };
   const { models, editor, editorRung } = await editorRuntime([
     ...editorTurn({ axis: "scheduler", source: SCHED.roundRobin }, log),
     ...editorTurn({ axis: "limits" }, log),
@@ -1113,12 +1095,12 @@ async function numericScenario(dir: string): Promise<void> {
       {
         axis: "limits",
         source: limits("{ memoryBytes: 1 }"),
-        afterEdit: holdSettlement,
+        afterEdit: (_, info) => holdSettlement(target, info),
       },
       log,
     ),
     ...editorTurn(
-      { axis: "scheduler", source: SCHED.choose, afterEdit: holdSettlement },
+      { axis: "scheduler", source: SCHED.choose, afterEdit: (_, info) => holdSettlement(target, info) },
       log,
     ),
     ...editorTurn(
@@ -1204,10 +1186,6 @@ async function numericScenario(dir: string): Promise<void> {
       "baseline,candidate,candidate,remeasure,candidate",
     ],
   );
-  assert.deepEqual(delays, [
-    { runsUnchanged: true, feedbackWaited: true },
-    { runsUnchanged: true, feedbackWaited: true },
-  ]);
   // Editor usage is recorded apart from the deterministic target, which records no tokens.
   const usage = summarize(
     await readProfile(join(target.sessionDir, "optimizer.jsonl")),
@@ -1281,6 +1259,7 @@ async function costResultScenario(dir: string): Promise<void> {
       ...editorTurn(
         {
           axis: "scheduler",
+          afterEdit: (_, info) => holdSettlement(target, info),
           source:
             "const optimizerScheduler = (_label: string) => schedules.roundRobin(undefined, 2);\n",
         },
@@ -1355,12 +1334,14 @@ async function costResultScenario(dir: string): Promise<void> {
 const TOKEN_YAML = `graph:
   name: ReportTarget
   nodes:
+    Assignment: { kind: emit, text: Write the status report., spec: A completed status report. }
     Writer:
       prompt: Write the status report.
-      trigger: always
+      trigger: "Assignment~>Writer"
     Quality: { kind: code }
     Terminal: { kind: code }
   edges:
+    - { from: Assignment, to: Writer, kind: message, schema: { type: object } }
     - { from: Writer, to: Quality, schema: { type: object } }
     - { id: quality, from: Quality, to: Terminal, schema: { type: number } }
     - { id: done, from: Terminal, to: $sink, schema: { type: number } }
@@ -1390,28 +1371,24 @@ models.registerNativeProvider(targetModels.provider);
 `;
 
 const TOKEN_CODE = `const CODE: Record<string, syntax.DeterministicNode> = {
-  Quality: ({ policy }) => ({
-    state: new Deterministic(async function* () {
-      const view = yield [];
-      const report = view.values.get("Writer->Quality") as { content: Parameters<typeof contentText>[0] };
-      let quality = Number(/quality=([0-9.]+)/.exec(contentText(report.content))?.[1]);
-      if (profile.directory !== undefined) {
-        // Synthetic flake for the fixture: the first confirmation batch reads lower quality.
-        const state = JSON.parse(await readFile(join(profile.directory, "..", "..", "state.json"), "utf8"));
-        const phases = state.history.filter((item) => item.kind === "trial").map((item) => item.phase);
-        if (phases.at(-1) === "confirmation" && phases.filter((phase) => phase === "confirmation").length === 1)
-          quality = 0.85;
-      }
-      return quality;
-    }, policy),
-  }),
-  Terminal: ({ policy }) => ({
-    state: new Deterministic(async function* () {
-      const view = yield [];
-      if (typeof view.values.get("quality") !== "number") throw new Error("missing quality");
-      return 1;
-    }, policy),
-  }),
+  Quality: ({ policy }) => new Deterministic(async function* () {
+    const view = yield [];
+    const report = view.values.get("Writer->Quality") as { content: Parameters<typeof contentText>[0] };
+    let quality = Number(/quality=([0-9.]+)/.exec(contentText(report.content))?.[1]);
+    if (profile.directory !== undefined) {
+      // Synthetic flake for the fixture: the first confirmation batch reads lower quality.
+      const state = JSON.parse(await readFile(join(profile.directory, "..", "..", "state.json"), "utf8"));
+      const phases = state.history.filter((item) => item.kind === "trial").map((item) => item.phase);
+      if (phases.at(-1) === "confirmation" && phases.filter((phase) => phase === "confirmation").length === 1)
+        quality = 0.85;
+    }
+    return quality;
+  }, policy),
+  Terminal: ({ policy }) => new Deterministic(async function* () {
+    const view = yield [];
+    if (typeof view.values.get("quality") !== "number") throw new Error("missing quality");
+    return 1;
+  }, policy),
 };`;
 
 const ladderOf = (med: string) =>

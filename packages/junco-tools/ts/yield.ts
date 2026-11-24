@@ -8,12 +8,19 @@ import {
 } from "./profile-recorder.js";
 
 const yieldParameters = Type.Object(
-  { reason: Type.String({ minLength: 1 }) },
+  {
+    reason: Type.String({ minLength: 1 }),
+    waitForInput: Type.Optional(
+      Type.Literal(true, {
+        description: "Wait for the graph node's input trigger before resuming.",
+      }),
+    ),
+  },
   { additionalProperties: false },
 );
 
-/** Details of a completed `yield` call: the reason the model gave. */
-export type YieldToolDetails = { readonly reason: string };
+/** A completed explicit yield, optionally parked until the next graph input. */
+export type YieldToolDetails = { readonly reason: string; readonly waitForInput?: true };
 
 /** Tools this module created. Only these are scheduling primitives; a same-named tool is not. */
 const yieldTools = new WeakSet<object>();
@@ -61,7 +68,7 @@ export const YieldTool: new (
           const { reason } = params;
           return {
             content: [{ type: "text", text: reason }],
-            details: { reason },
+            details: params.waitForInput ? { reason, waitForInput: params.waitForInput } : { reason },
           };
         },
       );

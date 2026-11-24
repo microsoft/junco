@@ -225,6 +225,8 @@ export type LaneScript = {
 
 /** What one scripted lane observed. */
 export type LaneLog = {
+  /** First request: the registered role prompt and this lane's delivered assignment. */
+  proposerInput: string[];
   /** Names of the original launch's handles. */
   handles: string[];
   submitErrors: string[];
@@ -263,6 +265,7 @@ export async function scriptedLane(
   extraTools: readonly AgentTool[] = [],
 ): Promise<ScriptedLane> {
   const log: LaneLog = {
+    proposerInput: [],
     handles: [],
     submitErrors: [],
     forbidden: [],
@@ -356,6 +359,7 @@ export async function scriptedLane(
     const prompt = texts[0] ?? "";
     if (prompt.startsWith("You are a read-only researcher"))
       return researcher(context, prompt);
+    if (!log.proposerInput.length) log.proposerInput.push(...texts);
     if (!started) {
       if (
         latestResults(context).some(
@@ -374,13 +378,14 @@ export async function scriptedLane(
           errorMessage: "proposer exploded",
         });
       await script.barrier?.();
+      const { taskId, spec } = JSON.parse(log.proposerInput[1]!.split("\n\nTask: ").at(-1)!);
       return toolTurn(
         call("send", {
           id: `summary:${work.rank}`,
           payload: `Proposer ${work.rank}: callers reconciled; research launched`,
           handoff: "summary",
-          task: "summary",
-          spec: "summary",
+          task: taskId,
+          spec,
         }),
         call("task", {}),
       );
@@ -480,9 +485,9 @@ export async function scriptedLane(
     (context: Context) => {
       log.judgeCalls++;
       script.onJudge?.();
-      // The staged proposal prompt precedes the delivered summaries.
-      log.judgeInputs.push(userTexts(context.messages));
-      log.received.push(...userTexts(context.messages).slice(1));
+      const messages = userTexts(context.messages);
+      log.judgeInputs.push(messages);
+      log.received.push(...messages.filter((text) => text.startsWith('{"id":"summary:')));
       if (script.skipVerdict) return fauxAssistantMessage("verdict omitted");
       return toolTurn(call("judge_refactor", script.verdict ?? allPass));
     },

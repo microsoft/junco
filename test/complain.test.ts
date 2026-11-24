@@ -107,10 +107,10 @@ function wire(
     trigger: trigger.TriggerRule.always(),
     state: source,
   });
-  member.stagePrompt("Follow the request in the user message that follows.");
   const workerId = flow.addNode({
     ...(id === undefined ? {} : { id }),
     state: member,
+    prompt: "Follow the request in the user message that follows.",
     policy: LockPolicy,
     trigger: trigger.TriggerRule.when(edge),
   });
@@ -359,12 +359,13 @@ describe("complaints through real graphs", () => {
 
   test("a spec registered in two graphs records one complaint", async () => {
     const member = await worker("shared spec");
-    member.stagePrompt("go");
+    const start = graph.Edge.message("start", TaskSchema);
     const spec = {
       id: graph.NodeId.create("shared"),
       state: member,
       policy: LockPolicy,
-      trigger: trigger.TriggerRule.always(),
+      prompt: "go",
+      trigger: trigger.TriggerRule.when(start),
     };
     const { execution: aContext, ports: aPorts } = newGraph();
     const a = aContext.graph;
@@ -373,6 +374,9 @@ describe("complaints through real graphs", () => {
     const id = a.addNode(spec);
     b.addNode(spec);
     aPorts.connect(a, id);
+    a.addEdge(a.source.id, id, start);
+    b.addEdge(b.source.id, id, graph.Edge.message("start", TaskSchema));
+    a.emit(a.source.id, graph.Message.create(start, input));
     bPorts.connect(b, id);
     const results = await aContext.run();
     assert.equal(resultText(results, id), "continued");
