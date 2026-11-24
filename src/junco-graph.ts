@@ -60,9 +60,7 @@ import {
   rethrowControllerFailure,
   unseenValues,
 } from "./node-policy.js";
-import { build, type FromYamlOptions } from "./syntax/build.js";
-import { parse } from "./syntax/parse.js";
-import type { JuncoDocument } from "./syntax/schema.js";
+import { buildYaml, type FromYamlOptions } from "./syntax/build.js";
 import { TuiTracer } from "./tui-tracer.js";
 
 type NestedContext<N extends TSchema, T> = SchedulerContext<
@@ -129,7 +127,7 @@ const recorderMismatch = (): TypeError =>
   new TypeError("ProfileRecorder instance mismatch");
 
 /** Rejects two recorders of different sessions; an absent one matches anything. */
-function checkRecorder(
+export function checkRecorder(
   expected: { readonly root: object } | undefined,
   actual: { readonly root: object } | undefined,
 ): void {
@@ -414,7 +412,7 @@ export class JuncoGraph<
 
   /**
    * The workflow a YAML document (text or parsed object) and its config define; see `syntax`.
-   * Prepared agents transfer ownership at entry, including when parsing fails. Its schemas are
+   * Supplied sessions transfer ownership at entry, including when parsing fails. Its schemas are
    * loaded at runtime, so its domains are `TSchema`/`unknown`; consumers narrow with `Value.Check`.
    */
   static async fromYaml<C = unknown>(
@@ -429,29 +427,7 @@ export class JuncoGraph<
       JuncoGraph<TSchema, unknown>
     >
   > {
-    const { params, sourceName } = config;
-    let doc: JuncoDocument;
-    try {
-      doc = parse(source, { params, sourceName });
-    } catch (error) {
-      // Explicit release, last first: Node 22 has no AsyncDisposableStack or SuppressedError.
-      const failures: unknown[] = [];
-      const agents = [...new Set(Object.values(config.agents ?? {}))];
-      for (const instance of agents.reverse()) {
-        try {
-          await instance[Symbol.asyncDispose]();
-        } catch (failure) {
-          failures.push(failure);
-        }
-      }
-      if (failures.length)
-        throw new AggregateError(
-          [error, ...failures],
-          "YAML parsing failed and agent cleanup failed",
-        );
-      throw error;
-    }
-    return build(doc, config);
+    return buildYaml(source, config);
   }
 
   /**
@@ -1116,8 +1092,7 @@ export class JuncoGraph<
     const requests: (() => unknown)[] = [];
     const gates = new Set<Promise<void>>();
     const seenGraphs = new Set<object>();
-    /** Each resource reached, and whether any registration of it is graph-owned. */
-    const resources = new Map<Resource, boolean>();
+    const resources = new Set<Resource>();
     const joined = new Set<Promise<void>>();
     const stack: AnyGraph[] = [this];
     for (let graph = stack.pop(); graph !== undefined; graph = stack.pop()) {
@@ -1140,25 +1115,19 @@ export class JuncoGraph<
       const children: AnyGraph[] = [];
       graph.forEachNode((_, node) => {
         const state = node.state;
-        const policy = nodePolicies.get(node.step);
         if (state instanceof JuncoGraph) children.push(state);
         else if (
           state instanceof JuncoAgent ||
           state instanceof MockAgent ||
           state instanceof Deterministic
         )
-          resources.set(
-            state,
-            resources.get(state) === true ||
-              policy?.agentOwnership !== "caller",
-          );
+          resources.add(state);
       });
       for (let index = children.length - 1; index >= 0; index--)
         stack.push(children[index]);
     }
-    // Graph ownership dominates whatever the traversal order; caller-owned agents are only aborted.
-    for (const [member, owned] of resources) {
-      if (kind === "close" && owned)
+    for (const member of resources) {
+      if (kind === "close")
         requests.push(() => member[Symbol.asyncDispose]());
       else if (member instanceof Deterministic)
         requests.push(() => member.abort(reason));

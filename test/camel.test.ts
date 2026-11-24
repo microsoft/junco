@@ -1,15 +1,11 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import type {
-  AgentTool,
-  PromptTemplate,
-  Skill,
-} from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
-import { graph, JuncoGraph, MockAgent, schedules, tracer } from "junco";
-import type { TSchema } from "typebox";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { type AssistantMessage, type Context, contentText, fauxAssistantMessage as assistant } from "@earendil-works/pi-ai";
+import { agent, graph, JuncoGraph, schedules, tools, tracer } from "junco";
 import {
   BOB_QUERY,
   type CamelContext,
@@ -18,10 +14,9 @@ import {
   Interpreter,
   USER,
 } from "../examples/camel/camel.ts";
-import { assistant, run, settle } from "./deterministic-support.ts";
+import { userTexts } from "./deterministic-support.ts";
+import { copyTreeNative, offlineLadder } from "./support.ts";
 
-type YamlMock = MockAgent<Skill, PromptTemplate, AgentTool, TSchema, unknown>;
-const cwd = fileURLToPath(new URL("../", import.meta.url));
 const source = readFileSync(
   new URL("../examples/camel/camel.yml", import.meta.url),
   "utf8",
@@ -67,7 +62,20 @@ const bobReply = assistant(
 
 async function build(plan: AssistantMessage, reply = bobReply) {
   const context: CamelContext = { inbox: INBOX, sent: [] };
-  const mocks = new Map<string, YamlMock>();
+  const requests: Record<"PLLM" | "QLLM", Context[]> = { PLLM: [], QLLM: [] };
+  const ladder = await offlineLadder((context) => {
+    const [prompt] = userTexts(context.messages);
+    if (prompt?.startsWith("Write the plan")) {
+      requests.PLLM.push(context);
+      return plan;
+    }
+    assert.ok(prompt?.startsWith("Parse the untrusted data"));
+    requests.QLLM.push(context);
+    return reply;
+  });
+  await using setup = new AsyncDisposableStack();
+  const cwd = setup.adopt(await mkdtemp(join(tmpdir(), "camel-")), (p) => rm(p, { recursive: true, force: true }));
+  const collection = setup.adopt(await tools.ToolCollection.create(cwd, { native: await copyTreeNative(), sandbox: "always" }), (c) => c.close());
   const execution = await JuncoGraph.fromYaml(source, {
     cwd,
     scheduler: () => schedules.parallel(),
@@ -75,23 +83,20 @@ async function build(plan: AssistantMessage, reply = bobReply) {
     code: { Interpreter, Executor },
     context,
     params: { query: BOB_QUERY },
-    createAgent: async (spec) => {
-      const mock: YamlMock = new MockAgent({
-        runs: [
-          run([
-            settle(spec.node === "PLLM" ? plan : reply, { drain: ["steer"] }),
-          ]),
-        ],
-      });
-      mocks.set(spec.node, mock);
-      return mock;
-    },
+    collection, ladder,
   });
-  return { execution, context, mocks };
+  setup.defer(() => execution.graph.close());
+  for (const id of ["PLLM", "QLLM"]) {
+    const member = execution.graph.getNode(graph.NodeId.create(id))!.state;
+    assert.ok(member instanceof agent.JuncoAgent);
+    assert.deepEqual(member.getTools(), [], `${id} must not receive any tool`);
+  }
+  const owned = setup.move();
+  return { execution, context, requests, close: () => owned.disposeAsync() };
 }
 
 test("reminder to Bob is granted and sent", async () => {
-  const { execution, context, mocks } = await build(reminderPlan);
+  const { execution, context, requests, close } = await build(reminderPlan);
   try {
     const results = await execution.run();
     const outcome = results.get(execution.graph.sink.id) as {
@@ -116,26 +121,26 @@ test("reminder to Bob is granted and sent", async () => {
         sender: USER,
       },
     );
-    const request = mocks.get("QLLM")!.requests.at(-1)!.messages.at(-1)!;
+    const request = requests.QLLM.at(-1)!.messages.at(-1)!;
     assert.equal(request.role, "user");
     if (request.role !== "user")
       throw new Error("expected quarantined user request");
     assert.ok(contentText(request.content).includes("bob.wilson@example.com"));
     assert.ok(contentText(request.content).includes("have_enough_information"));
-    assert.equal(mocks.get("PLLM")!.requests.length, 1);
-    assert.equal(mocks.get("QLLM")!.requests.length, 1);
-    const plannerInput = mocks.get("PLLM")!.requests[0]!.messages.at(-1)!;
+    assert.equal(requests.PLLM.length, 1);
+    assert.equal(requests.QLLM.length, 1);
+    const plannerInput = requests.PLLM[0]!.messages.at(-1)!;
     assert.ok(plannerInput.role === "user" && contentText(plannerInput.content).startsWith(`${BOB_QUERY}\n\nTask: `));
-    for (const request of mocks.get("PLLM")!.requests)
+    for (const request of requests.PLLM)
       for (const message of request.messages)
         assert.ok(!JSON.stringify(message).includes("bob.wilson@example.com"));
   } finally {
-    await execution.graph.close();
+    await close();
   }
 });
 
 test("forwarding the email body to the extracted address is denied", async () => {
-  const { execution, context } = await build(forwardPlan);
+  const { execution, context, close } = await build(forwardPlan);
   try {
     const results = await execution.run();
     const outcome = results.get(execution.graph.sink.id) as {
@@ -157,12 +162,12 @@ test("forwarding the email body to the extracted address is denied", async () =>
     ]);
     assert.equal(context.sent.length, 0);
   } finally {
-    await execution.graph.close();
+    await close();
   }
 });
 
 test("a quarantined answer without enough information fails the run", async () => {
-  const { execution, context } = await build(
+  const { execution, context, close } = await build(
     reminderPlan,
     assistant('{"address":"","have_enough_information":false}'),
   );
@@ -178,6 +183,6 @@ test("a quarantined answer without enough information fails the run", async () =
     );
     assert.equal(context.sent.length, 0);
   } finally {
-    await execution.graph.close();
+    await close();
   }
 });

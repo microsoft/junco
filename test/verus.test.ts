@@ -1,4 +1,4 @@
-import { describe, test } from "bun:test";
+import { afterAll, describe, test } from "bun:test";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -8,6 +8,8 @@ import {
   type Context,
   contentText,
   fauxAssistantMessage,
+  type FauxResponseFactory,
+  type FauxResponseStep,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
 import {
@@ -20,18 +22,19 @@ import {
   prepareVerusSource,
   runVerusLoop,
   type VerusRole,
-  VerusRound,
   type VerusWorkspace,
 } from "../examples/verus/verus.ts";
-import { agent, syntax, tracer } from "../src/index.ts";
+import { agent, graph, schedules, syntax, tools, tracer } from "../src/index.ts";
 import { userTexts } from "./deterministic-support.ts";
-import { leaf, nativeOptions, waitingTool } from "./support.ts";
+import { copyTreeNative, fauxRuntime, waitingTool } from "./support.ts";
 
 const TIMEOUT_MS = 10_000;
+const seed = await mkdtemp(join(tmpdir(), "junco-verus-"));
+afterAll(() => rm(seed, { recursive: true, force: true }));
 const workspace: VerusWorkspace = {
   source: "/original/max.rs",
-  outputDir: "/output",
-  target: "/output/max.rs",
+  outputDir: seed,
+  target: join(seed, "max.rs"),
   spec: "max_u32 returns an argument greater than or equal to both inputs, without preconditions.",
   rustFiles: ["max.rs"],
   cargoManifests: [],
@@ -56,6 +59,36 @@ const latestInput = (context: Context): string => userTexts(context.messages).at
 function rootCause(error: unknown): unknown {
   while (error instanceof DataflowNodeError) error = error.cause;
   return error;
+}
+
+type Scripts = Record<VerusRole, readonly FauxResponseStep[]>;
+/** The YAML system prompt, not parallel request order, selects each persistent role's script. */
+async function runScript(scripts: Scripts, tool: AgentTool, observer: tracer.DataflowTracer, signal?: AbortSignal, maxTokens?: number) {
+  const roles = ["Verifier", "Reviewer", "Cleanup"] as const;
+  const next = { Verifier: 0, Reviewer: 0, Cleanup: 0 };
+  const { models, faux } = await fauxRuntime([], "faux", [{ id: "verus", maxTokens }]);
+  const respond: FauxResponseFactory = (context, ...rest) => {
+    const system = context.messages.filter(m => m.role === "system").map(m =>
+      typeof m.content === "string" ? m.content : contentText(m.content)).join("\n");
+    const role = roles.find(role => system.includes(`You are ${role}`));
+    if (!role) throw new Error("Unknown Verus role");
+    const answer = scripts[role][next[role]++];
+    if (!answer) throw new Error(`Unexpected ${role} turn`);
+    faux.appendResponses([respond]);
+    return typeof answer === "function" ? answer(context, ...rest) : answer;
+  };
+  faux.setResponses([respond]);
+  const ladder = new schedules.ModelLadder(models, schedules.uniformLadder({ model: "faux/verus" }));
+  await using resources = new AsyncDisposableStack();
+  const native = await copyTreeNative();
+  const collections = new Map<graph.NodeIdType, tools.ToolCollection>();
+  for (const role of roles) {
+    const collection = await tools.ToolCollection.create(seed, {
+      native, extend: async () => ({ tools: [tool], close: async () => {} }),
+    });
+    collections.set(graph.NodeId.create(role), resources.adopt(collection, c => c.close()));
+  }
+  await runVerusLoop(workspace, { tools: collections, ladder, tracer: observer, signal });
 }
 
 /** Script compiler/prover feedback without treating proof failures as MCP transport failures. */
@@ -100,19 +133,25 @@ function scriptedVerification(exitCodes: readonly number[]) {
 /** Observe actual settled graph nodes, not model statements that a role completed. */
 class RoleTracer extends tracer.DummyTracer {
   readonly completed: string[] = [];
+  readonly members = new Map<string, Set<unknown>>();
 
   constructor(private readonly onComplete: (role: string) => void = () => {}) {
     super();
   }
 
   override startRun<S, N extends TSchema, T, EH>(
-    _graph: DataflowGraph<S, N, T, EH>,
+    graph: DataflowGraph<S, N, T, EH>,
   ): DataflowRunTrace<N, T> {
     return {
       startNode: (id) => ({
         end: (step) => {
-          if (!step.done) return;
           const role = String(id);
+          if (["Verifier", "Reviewer", "Cleanup"].includes(role)) {
+            if (!step.done) return;
+            const members = this.members.get(role) ?? new Set();
+            members.add(graph.getNode(id)!.state);
+            this.members.set(role, members);
+          } else if (!(role.startsWith("Prepare") && !step.done && Array.isArray(step.value) && step.value.length) && role !== "$sink") return;
           this.completed.push(role);
           this.onComplete(role);
         },
@@ -143,60 +182,35 @@ describe("Verus loop", () => {
           controller.abort(reason);
         }
       });
-      await using verifier = (
-        await leaf(
-          [0, 1, 2].map((round) => (context: Context) => {
-            activated.push("Verifier");
-            verifierPrompts.push(latestInput(context));
-            return fauxAssistantMessage(
-              `max.rs: translated round ${round + 1}`,
-            );
-          }),
-        )
-      ).agent;
-      await using reviewer = (
-        await leaf(
-          [0, 1].flatMap((round) => [
-            () => {
-              activated.push("Reviewer");
-              return verifyCall(`review-${round}`);
-            },
-            (context: Context) => {
-              const result = context.messages
-                .filter((message) => message.role === "toolResult")
-                .at(-1);
-              assert.ok(result && result.role === "toolResult");
-              reviewerResults.push(contentText(result.content));
-              return fauxAssistantMessage(
-                round === 0
-                  ? "max.rs: verification passed; review approved, strengthen membership specification."
-                  : "max.rs: nonzero proof failure: postcondition not satisfied; retain the strict contract.",
-              );
-            },
-          ]),
-          { tools: [verification.tool] },
-        )
-      ).agent;
-      await using cleanup = (
-        await leaf(
-          [0, 1].map((round) => (context: Context) => {
-            activated.push("Cleanup");
-            cleanupPrompts.push(latestInput(context));
-            return fauxAssistantMessage(
-              `max.rs: cleanup round ${round + 1}; preserve both lower-bound obligations.`,
-            );
-          }),
-        )
-      ).agent;
-      await assert.rejects(
-        runVerusLoop(
-          workspace,
-          { Verifier: verifier, Reviewer: reviewer, Cleanup: cleanup },
-          controller.signal,
-          observer,
-        ),
-        (error: unknown) => rootCause(error) === reason,
-      );
+      const verifier: FauxResponseFactory = (context) => {
+        activated.push("Verifier");
+        verifierPrompts.push(latestInput(context));
+        assert.equal(userTexts(context.messages).filter(text => text.startsWith("Translate or repair the current output")).length, verifierPrompts.length);
+        if (verifierPrompts.length === 2)
+          assert.ok(context.messages.some(m => m.role === "assistant" && contentText(m.content).includes("translated round 1")));
+        return fauxAssistantMessage(`max.rs: translated round ${verifierPrompts.length}`);
+      };
+      const scripts: Scripts = {
+        Verifier: [verifier, verifier],
+        Reviewer: [0, 1].flatMap(round => [
+          () => { activated.push("Reviewer"); return verifyCall(`review-${round}`); },
+          (context: Context) => {
+            const result = context.messages.at(-1);
+            assert.ok(result?.role === "toolResult");
+            reviewerResults.push(contentText(result.content));
+            return fauxAssistantMessage(round === 0
+              ? "max.rs: verification passed; review approved, strengthen membership specification."
+              : "max.rs: nonzero proof failure: postcondition not satisfied; retain the strict contract.");
+          },
+        ]),
+        Cleanup: [0, 1].map(round => (context: Context) => {
+          activated.push("Cleanup");
+          cleanupPrompts.push(latestInput(context));
+          return fauxAssistantMessage(`max.rs: cleanup round ${round + 1}; preserve both lower-bound obligations.`);
+        }),
+      };
+      await assert.rejects(runScript(scripts, verification.tool, observer, controller.signal),
+        (error: unknown) => rootCause(error) === reason);
       const expected = [
         "Verifier",
         "Reviewer",
@@ -205,17 +219,12 @@ describe("Verus loop", () => {
         "Reviewer",
         "Cleanup",
       ];
-      // The first output sink completes before the next round; cancellation at the second
-      // Cleanup prevents that round's sink from being admitted.
       assert.deepEqual(observer.completed, [
-        "VerifierAssignment",
         "Verifier",
         "PrepareReviewer",
         "Reviewer",
         "PrepareCleanup",
         "Cleanup",
-        "$sink",
-        "VerifierAssignment",
         "Verifier",
         "PrepareReviewer",
         "Reviewer",
@@ -232,8 +241,12 @@ describe("Verus loop", () => {
         verifierPrompts[1]!,
         /cleanup round 1; preserve both lower-bound obligations/,
       );
-      for (const member of [verifier, reviewer, cleanup])
-        assert.notEqual(member.status, "closed");
+      for (const role of ["Verifier", "Reviewer", "Cleanup"]) {
+        const members = observer.members.get(role)!;
+        assert.equal(members.size, 1, `${role} was replaced between rounds`);
+        const [member] = members;
+        assert.ok(member instanceof agent.JuncoAgent && member.status === "closed");
+      }
     },
     TIMEOUT_MS,
   );
@@ -245,43 +258,15 @@ describe("Verus loop", () => {
       let reviewerActivations = 0;
       let cleanupActivations = 0;
       const observer = new RoleTracer();
-      await using verifier = (
-        await leaf(
-          [
-            verifyCall("writer-check"),
-            fauxAssistantMessage("max.rs: writer verified the translation."),
-          ],
-          { tools: [verification.tool] },
-        )
-      ).agent;
-      await using reviewer = (
-        await leaf(
-          [
-            () => {
-              reviewerActivations++;
-              return fauxAssistantMessage(
-                "max.rs: looks verified; no independent tool invocation.",
-              );
-            },
-          ],
-          { tools: [verification.tool] },
-        )
-      ).agent;
-      await using cleanup = (
-        await leaf([
-          () => {
-            cleanupActivations++;
-            return fauxAssistantMessage("must not activate");
-          },
-        ])
-      ).agent;
       await assert.rejects(
-        runVerusLoop(
-          workspace,
-          { Verifier: verifier, Reviewer: reviewer, Cleanup: cleanup },
-          undefined,
-          observer,
-        ),
+        runScript({
+          Verifier: [verifyCall("writer-check"), fauxAssistantMessage("max.rs: writer verified the translation.")],
+          Reviewer: [() => {
+            reviewerActivations++;
+            return fauxAssistantMessage("max.rs: looks verified; no independent tool invocation.");
+          }],
+          Cleanup: [() => { cleanupActivations++; return fauxAssistantMessage("must not activate"); }],
+        }, verification.tool, observer),
         (error: unknown) =>
           rootCause(error) instanceof Error &&
           (rootCause(error) as Error).message ===
@@ -291,7 +276,6 @@ describe("Verus loop", () => {
       assert.equal(reviewerActivations, 1);
       assert.equal(cleanupActivations, 0);
       assert.deepEqual(observer.completed, [
-        "VerifierAssignment",
         "Verifier",
         "PrepareReviewer",
         "Reviewer",
@@ -301,74 +285,37 @@ describe("Verus loop", () => {
   );
 
   test(
-    "assignment gates execute in the graph and sample the baseline before Reviewer starts",
+    "the two preparation gates attach the current assignment and each exact upstream report",
     async () => {
-      let runs = 7;
-      const samples: number[] = [];
-      let assignment: string;
-      await using verifier = (
-        await leaf([(context: Context) => {
-          const work = JSON.parse(latestInput(context));
-          assert.equal(work.id, "VerifierAssignment~>Verifier");
-          assert.ok(work.payload.includes(workspace.spec));
-          assert.ok(work.payload.includes(workspace.outputDir));
-          assignment = work.payload;
+      const verification = scriptedVerification([0]);
+      const controller = new AbortController();
+      const reason = new Error("one round complete");
+      const observer = new RoleTracer(role => { if (role === "Cleanup") controller.abort(reason); });
+      let assignment = "";
+      await assert.rejects(runScript({
+        Verifier: [(context: Context) => {
+          const text = latestInput(context);
+          assignment = text.split("\n\nTask: ")[0]!;
+          assert.ok(assignment.includes(workspace.spec));
+          assert.ok(assignment.includes(workspace.outputDir));
           return fauxAssistantMessage("max.rs: translation ready.");
-        }])
-      ).agent;
-      await using reviewer = (
-        await leaf([
-          (context: Context) => {
-            assert.deepEqual(samples, [7]);
-            const work = JSON.parse(latestInput(context));
-            assert.equal(work.id, "PrepareReviewer~>Reviewer");
-            assert.equal(work.payload.assignment, assignment);
-            assert.equal(syntax.finalText(work.payload.report, "Verifier"), "max.rs: translation ready.");
-            runs++;
-            return fauxAssistantMessage("max.rs: independent review ready.");
-          },
-        ])
-      ).agent;
-      await using cleanup = (
-        await leaf([
-          (context: Context) => {
-            assert.deepEqual(samples, [7, 8]);
-            const work = JSON.parse(latestInput(context));
-            assert.equal(work.id, "PrepareCleanup~>Cleanup");
-            assert.equal(work.payload.assignment, assignment);
-            assert.equal(syntax.finalText(work.payload.report, "Reviewer"), "max.rs: independent review ready.");
-            return fauxAssistantMessage("max.rs: cleanup ready.");
-          },
-        ])
-      ).agent;
-      const round = await VerusRound.create(
-        workspace,
-        {
-          Verifier: verifier,
-          Reviewer: reviewer,
-          Cleanup: cleanup,
-        },
-        {
-          runs: () => {
-            samples.push(runs);
-            return runs;
-          },
-        },
-        undefined,
-        new RoleTracer(),
-      );
-      await using graph = round.execution.graph;
-      assert.deepEqual([...graph.available().keys()], ["VerifierAssignment"]);
-      assert.equal(verifier.status, "idle");
-      assert.deepEqual(samples, []);
-      assert.equal(reviewer.status, "idle");
-      assert.equal(cleanup.status, "idle");
-      const results = await round.execution.run();
-      assert.deepEqual(samples, [7, 8]);
-      assert.equal(
-        syntax.finalText(results.get(round.cleanupId), "Cleanup"),
-        "max.rs: cleanup ready.",
-      );
+        }],
+        Reviewer: [(context: Context) => {
+          const work = JSON.parse(latestInput(context));
+          assert.equal(work.id, "PrepareReviewer~>Reviewer");
+          assert.equal(work.payload.assignment.trimEnd(), assignment.trimEnd());
+          assert.equal(syntax.finalText(work.payload.report, "Verifier"), "max.rs: translation ready.");
+          return verifyCall("fresh-review");
+        }, fauxAssistantMessage("max.rs: independent review ready.")],
+        Cleanup: [(context: Context) => {
+          const work = JSON.parse(latestInput(context));
+          assert.equal(work.id, "PrepareCleanup~>Cleanup");
+          assert.equal(work.payload.assignment.trimEnd(), assignment.trimEnd());
+          assert.equal(syntax.finalText(work.payload.report, "Reviewer"), "max.rs: independent review ready.");
+          return fauxAssistantMessage("max.rs: cleanup ready.");
+        }],
+      }, verification.tool, observer, controller.signal), (error: unknown) => rootCause(error) === reason);
+      assert.deepEqual(verification.observed, [0]);
     },
     TIMEOUT_MS,
   );
@@ -379,42 +326,13 @@ describe("Verus loop", () => {
       const verification = scriptedVerification([0]);
       let cleanupActivations = 0;
       const observer = new RoleTracer();
-      await using verifier = (
-        await leaf(
-          [0, 1].map(() => fauxAssistantMessage("max.rs: translation ready.")),
-        )
-      ).agent;
-      await using reviewer = (
-        await leaf(
-          [
-            verifyCall("first-round-only"),
-            fauxAssistantMessage("max.rs: independently verified first round."),
-            fauxAssistantMessage(
-              "max.rs: reusing the prior round's diagnostics.",
-            ),
-          ],
-          { tools: [verification.tool] },
-        )
-      ).agent;
-      await using cleanup = (
-        await leaf([
-          () => {
-            cleanupActivations++;
-            return fauxAssistantMessage("max.rs: first cleanup ready.");
-          },
-        ])
-      ).agent;
       await assert.rejects(
-        runVerusLoop(
-          workspace,
-          {
-            Verifier: verifier,
-            Reviewer: reviewer,
-            Cleanup: cleanup,
-          },
-          undefined,
-          observer,
-        ),
+        runScript({
+          Verifier: [0, 1].map(() => fauxAssistantMessage("max.rs: translation ready.")),
+          Reviewer: [verifyCall("first-round-only"), fauxAssistantMessage("max.rs: independently verified first round."),
+            fauxAssistantMessage("max.rs: reusing the prior round's diagnostics.")],
+          Cleanup: [() => { cleanupActivations++; return fauxAssistantMessage("max.rs: first cleanup ready."); }],
+        }, verification.tool, observer),
         (error: unknown) => {
           assert.ok(error instanceof DataflowNodeError);
           assert.equal(String(error.nodeId), "PrepareCleanup");
@@ -428,14 +346,11 @@ describe("Verus loop", () => {
       assert.deepEqual(verification.observed, [0]);
       assert.equal(cleanupActivations, 1);
       assert.deepEqual(observer.completed, [
-        "VerifierAssignment",
         "Verifier",
         "PrepareReviewer",
         "Reviewer",
         "PrepareCleanup",
         "Cleanup",
-        "$sink",
-        "VerifierAssignment",
         "Verifier",
         "PrepareReviewer",
         "Reviewer",
@@ -463,51 +378,12 @@ describe("Verus loop", () => {
           const verification = scriptedVerification([0]);
           let reviewerActivations = 0;
           let cleanupActivations = 0;
-          // Pi normalizes below-limit length responses into overflow errors; hit the real output limit.
-          const verifierOptions = await nativeOptions([
-            role === "Verifier"
-              ? invalid.message
-              : fauxAssistantMessage("max.rs: translation ready."),
-          ]);
-          if (role === "Verifier" && invalid.message.stopReason === "length")
-            verifierOptions.options.model.maxTokens = 1;
-          await using verifier = await agent.JuncoAgent.fromResolved({
-            ...verifierOptions.options,
-            systemPrompt: "leaf",
-          });
-          const reviewerOptions = await nativeOptions([
-            () => {
-              reviewerActivations++;
-              return verifyCall("invalid-review");
-            },
-            invalid.message,
-          ]);
-          if (role === "Reviewer" && invalid.message.stopReason === "length")
-            reviewerOptions.options.model.maxTokens = 1;
-          await using reviewer = await agent.JuncoAgent.fromResolved({
-            ...reviewerOptions.options,
-            systemPrompt: "leaf",
-            tools: [verification.tool],
-          });
-          await using cleanup = (
-            await leaf([
-              () => {
-                cleanupActivations++;
-                return fauxAssistantMessage("must not activate");
-              },
-            ])
-          ).agent;
           await assert.rejects(
-            runVerusLoop(
-              workspace,
-              {
-                Verifier: verifier,
-                Reviewer: reviewer,
-                Cleanup: cleanup,
-              },
-              undefined,
-              new RoleTracer(),
-            ),
+            runScript({
+              Verifier: [role === "Verifier" ? invalid.message : fauxAssistantMessage("max.rs: translation ready.")],
+              Reviewer: [() => { reviewerActivations++; return verifyCall("invalid-review"); }, invalid.message],
+              Cleanup: [() => { cleanupActivations++; return fauxAssistantMessage("must not activate"); }],
+            }, verification.tool, new RoleTracer(), undefined, invalid.message.stopReason === "length" ? 1 : undefined),
             (error: unknown) => {
               assert.ok(error instanceof DataflowNodeError);
               assert.equal(
@@ -576,30 +452,12 @@ describe("Verus loop", () => {
           throw new Error("bridge disconnected");
         },
       };
-      await using verifier = (
-        await leaf([fauxAssistantMessage("max.rs: translation ready.")])
-      ).agent;
-      await using reviewer = (
-        await leaf(
-          [
-            verifyCall("failed-diagnostics"),
-            fauxAssistantMessage(
-              "max.rs: review completed despite the failed bridge.",
-            ),
-          ],
-          { tools: [tool] },
-        )
-      ).agent;
-      await using cleanup = (
-        await leaf([fauxAssistantMessage("must not activate")])
-      ).agent;
       await assert.rejects(
-        runVerusLoop(
-          workspace,
-          { Verifier: verifier, Reviewer: reviewer, Cleanup: cleanup },
-          undefined,
-          new RoleTracer(),
-        ),
+        runScript({
+          Verifier: [fauxAssistantMessage("max.rs: translation ready.")],
+          Reviewer: [verifyCall("failed-diagnostics"), fauxAssistantMessage("max.rs: completed despite the failed bridge.")],
+          Cleanup: [],
+        }, tool, new RoleTracer()),
         (error: unknown) =>
           rootCause(error) instanceof Error &&
           /bridge disconnected/.test((rootCause(error) as Error).message),
@@ -639,40 +497,11 @@ describe("Verus loop", () => {
       };
       const activated: VerusRole[] = [];
       const observer = new RoleTracer();
-      await using verifier = (
-        await leaf(
-          [0, 1].map(() => () => {
-            activated.push("Verifier");
-            return fauxAssistantMessage("max.rs: translation ready.");
-          }),
-        )
-      ).agent;
-      await using reviewer = (
-        await leaf(
-          [
-            () => {
-              activated.push("Reviewer");
-              return verifyCall("blocked-review");
-            },
-            fauxAssistantMessage("must not report after cancellation"),
-          ],
-          { tools: [verify] },
-        )
-      ).agent;
-      await using cleanup = (
-        await leaf([
-          () => {
-            activated.push("Cleanup");
-            return fauxAssistantMessage("must not activate");
-          },
-        ])
-      ).agent;
-      const running = runVerusLoop(
-        workspace,
-        { Verifier: verifier, Reviewer: reviewer, Cleanup: cleanup },
-        controller.signal,
-        observer,
-      ).then(
+      const running = runScript({
+        Verifier: [() => { activated.push("Verifier"); return fauxAssistantMessage("max.rs: translation ready."); }],
+        Reviewer: [() => { activated.push("Reviewer"); return verifyCall("blocked-review"); }],
+        Cleanup: [() => { activated.push("Cleanup"); return fauxAssistantMessage("must not activate"); }],
+      }, verify, observer, controller.signal).then(
         () => undefined,
         (error: unknown) => error,
       );
@@ -692,8 +521,6 @@ describe("Verus loop", () => {
         assert.equal(runs, 0);
         assert.deepEqual(activated, ["Verifier", "Reviewer"]);
         assert.ok(!observer.completed.includes("Cleanup"));
-        for (const member of [verifier, reviewer, cleanup])
-          assert.notEqual(member.status, "closed");
       } finally {
         controller.abort(reason);
         hold.release();

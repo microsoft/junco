@@ -76,14 +76,14 @@ await Bun.write(${JSON.stringify(marker)}, Object.keys(bindings)[0]);
     };
   }
 
-  function check(yaml: string, ts: string) {
+  function check(yaml: string, ts: string, agents: string[] = []) {
     const result = measure("check");
     assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
     const output = JSON.parse(result.stdout);
     assert.equal(output.yamlSha256, sha256(yaml));
     assert.equal(output.tsSha256, sha256(ts));
     assert.match(output.graphHash, /^[a-f0-9]{64}$/);
-    assert.deepEqual(output.agents, []);
+    assert.deepEqual(output.agents, agents);
     assert.equal(existsSync(marker), false, "check executed the target");
     return output;
   }
@@ -100,6 +100,21 @@ await Bun.write(${JSON.stringify(marker)}, Object.keys(bindings)[0]);
   assert.notEqual(variant.tsSha256, baseline.tsSha256);
   assert.notEqual(variant.yamlSha256, baseline.yamlSha256);
   assert.notEqual(variant.graphHash, baseline.graphHash);
+
+  const nestedYaml = `graph:
+  nodes:
+    "Child/One":
+      kind: graph
+      graph:
+        name: DisplayLabel
+        nodes: { Worker: { prompt: "Work" } }
+        edges: [{ from: Worker, to: $sink, schema: {} }]
+  edges: [{ from: "Child/One", to: $sink, schema: {} }]
+`;
+  await archive("nested", nestedYaml, variantTs);
+  await stage("nested");
+  check(nestedYaml, variantTs, ["Child~1One/Worker"]);
+  await stage("binding-variant");
 
   const driftTs = `${variantTs}// outside edit\n`;
   await writeFile(tsPath, driftTs);

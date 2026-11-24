@@ -101,7 +101,8 @@ export type AgenticNode<
           readonly state:
             | JuncoAgent<Skill, PromptTemplate, AgentTool, N, T>
             | MockAgent<Skill, PromptTemplate, AgentTool, N, T>;
-          readonly prompt: string | ((inputs: ParentView<N, T>) => string);
+          /** The registered instruction; `undefined` starts with a staged prompt or a delivered message. */
+          readonly prompt: string | ((inputs: ParentView<N, T>) => string) | undefined;
           readonly step?: never;
           readonly on_error?: never;
           readonly policy: ToolCollection["policy"];

@@ -1,11 +1,9 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
-  type AssistantMessage,
   type Context,
   contentText,
-  type FauxResponseStep,
+  type FauxResponseFactory,
   fauxAssistantMessage,
 } from "@earendil-works/pi-ai";
 import {
@@ -23,10 +21,9 @@ import { Value } from "typebox/value";
 import { goalsPrompt, MixedGraph } from "../examples/mixed/mixed.ts";
 import type { YamlAgent } from "../examples/support.ts";
 import { renderTask } from "../src/agent-node.ts";
-import { AssistantMessageSchema, Deterministic, syntax } from "../src/index.ts";
-import type { AgentSpec } from "../src/syntax/build.ts";
+import { AssistantMessageSchema, Deterministic, JuncoGraph, syntax } from "../src/index.ts";
 import { userTexts } from "./deterministic-support.ts";
-import { nativeOptions } from "./support.ts";
+import { countedCollection, offlineLadder } from "./support.ts";
 
 /** Asserts `rendered` is the Goals task with its `Task.create`-minted UUID, and returns that id. */
 function goalsTaskId(rendered: string): string {
@@ -103,95 +100,51 @@ async function mixedWorkflow(
     Direct: [],
     Reviewer: [],
   };
-  /** Record each fresh user prompt `role` receives, then answer with `response`. */
-  const recording =
-    (role: Role, response: () => AssistantMessage): FauxResponseStep =>
-    (context) => {
-      if (context.messages.at(-1)?.role === "user") {
-        const texts = userTexts(context.messages);
-        if (role === "Ralph" && prompts.Ralph.length === 0) {
-          assert.equal(texts.length, 2);
-          assert.equal(
-            texts[0],
-            "On the first round, achieve the objectives in the following task messages, in order. On phase \"revise\", take another try at the ordered objectives, building on your last answer in this session. On phase \"retry\", the previous attempt ended with a provider error: continue the same round from where you left off. Focus on depth: finish objectives well rather than attempting more of them. Return the complete answer.",
-          );
-          goalsTaskId(texts[1]!);
-        }
-        if (role === "Reviewer") {
-          assert.equal(texts.length, 2);
-          const delivered = JSON.parse(texts[1]!);
-          assert.equal(delivered.id, "ValidateDraft~>Reviewer");
-          assert.ok(Value.Check(AssistantMessageSchema, delivered.payload));
-          assert.equal(contentText(delivered.payload.content), "draft-2");
-        }
-        prompts[role].push(
-          role === "Reviewer" ? texts.join("\n") : latestUserText(context),
-        );
+  const respond: FauxResponseFactory = (context) => {
+    const texts = userTexts(context.messages);
+    const first = texts[0]!;
+    if (first.startsWith("On the first round,")) {
+      if (!prompts.Ralph.length) {
+        assert.equal(texts.length, 2);
+        assert.equal(first, 'On the first round, achieve the objectives in the following task messages, in order. On phase "revise", take another try at the ordered objectives, building on your last answer in this session. On phase "retry", the previous attempt ended with a provider error: continue the same round from where you left off. Focus on depth: finish objectives well rather than attempting more of them. Return the complete answer.');
+        goalsTaskId(texts[1]!);
       }
-      return response();
-    };
-  const ralphResponses = [
-    recording("Ralph", () => fauxAssistantMessage("draft-1")),
-    recording("Ralph", () => {
-      if (failSecond) throw new Error("second Ralph round failed");
-      return fauxAssistantMessage("draft-2");
-    }),
-  ];
-
-  /** Record the delivered objective separately from the staged instruction. */
-  const receiving = (role: Role, answer: string): FauxResponseStep[] => [
-    (context) => {
-      const texts = userTexts(context.messages);
-      assert.equal(texts.length, 2);
-      prompts[role].push(texts[1]!);
-      return fauxAssistantMessage(answer);
-    },
-  ];
-
-  const agents: YamlAgent[] = [];
-  const createAgent = async (spec: AgentSpec) => {
-    const responses =
-      spec.node === "Ralph"
-        ? ralphResponses
-        : spec.node === "Direct"
-          ? receiving("Direct", directAnswer)
-          : [
-              recording("Reviewer", () =>
-                fauxAssistantMessage("Ralph: clearer coverage."),
-              ),
-            ];
-    const { options } = await nativeOptions(responses);
-    const created: YamlAgent = await JuncoAgent.fromResolved({
-      ...options,
-      systemPrompt: spec.systemPrompt,
-      tools: spec.tools as AgentTool[],
-      tool_block: [
-        ...new Set([...(options.tool_block ?? []), ...(spec.tool_block ?? [])]),
-      ],
-    });
-    agents.push(created);
-    return created;
+      prompts.Ralph.push(latestUserText(context));
+      if (failSecond && prompts.Ralph.length === 2) throw new Error("second Ralph round failed");
+      return fauxAssistantMessage(`draft-${prompts.Ralph.length}`);
+    }
+    assert.equal(texts.length, 2);
+    if (first.startsWith("Complete every goal")) {
+      prompts.Direct.push(texts[1]!);
+      return fauxAssistantMessage(directAnswer);
+    }
+    assert.ok(first.startsWith("Goals:"));
+    const delivered = JSON.parse(texts[1]!);
+    assert.equal(delivered.id, "ValidateDraft~>Reviewer");
+    assert.ok(Value.Check(AssistantMessageSchema, delivered.payload));
+    assert.equal(contentText(delivered.payload.content), "draft-2");
+    prompts.Reviewer.push(texts.join("\n"));
+    return fauxAssistantMessage("Ralph: clearer coverage.");
   };
   const inbox = new ReviewerInbox();
-  try {
-    const { execution, reviewerId } = await MixedGraph.create({
-      tracer: inbox,
-      createAgent,
-    });
-    return {
-      execution,
-      reviewerId,
-      agents,
-      prompts,
-      inbox,
-      async [Symbol.asyncDispose]() {
-        await execution.graph.close();
-      },
-    };
-  } catch (error) {
-    await Promise.allSettled(agents.map((created) => created.return()));
-    throw error;
-  }
+  await using setup = new AsyncDisposableStack();
+  const collection = setup.adopt(countedCollection().collection, (c) => c.close());
+  const { execution, reviewerId } = await MixedGraph.create({
+    ladder: await offlineLadder(respond), collection, tracer: inbox,
+  });
+  setup.defer(() => execution.graph.close());
+  const nested = execution.graph.getNode(ralphId)!.state;
+  assert.ok(nested instanceof JuncoGraph);
+  const agents = [
+    nested.getNode(ralphId)!.state,
+    execution.graph.getNode(NodeId.create("Direct"))!.state,
+    execution.graph.getNode(reviewerId)!.state,
+  ].map((member) => {
+    assert.ok(member instanceof JuncoAgent);
+    return member;
+  });
+  const owned = setup.move();
+  return { execution, reviewerId, agents, prompts, inbox, [Symbol.asyncDispose]: () => owned.disposeAsync() };
 }
 
 /** Step the graph until `done`, failing instead of spinning once nothing can run. */

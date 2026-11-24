@@ -3,8 +3,10 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import {
   type AgentTool,
+  BACKGROUND_CONTEXT,
   formatSkillsForSystemPrompt,
   type PromptTemplate,
+  type Session,
   type Skill,
 } from "@earendil-works/pi-agent-core";
 import { contentText } from "@earendil-works/pi-ai";
@@ -12,7 +14,6 @@ import { loadSkillsFromDir } from "@earendil-works/pi-coding-agent";
 import * as graph from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import * as agent from "junco-agent";
-import type * as mcp from "junco-mcp";
 import {
   DEFAULT_MODEL_STRENGTH,
   type Scheduler,
@@ -23,18 +24,19 @@ import { type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { Agentic } from "../agentic.js";
 import { Deterministic } from "../deterministic.js";
-import { JuncoGraph } from "../junco-graph.js";
-import type { MockAgent } from "../mock-agent.js";
+import { checkRecorder, JuncoGraph } from "../junco-graph.js";
 import {
   type AgencyNodeMetadata,
+  checkPolicy,
   context,
   type ModelLadder,
-  type NodePolicy,
   nodePolicies,
   resolveRung,
 } from "../node-policy.js";
 import type * as tracer from "../std/tracer.js";
-import type { ParseOptions } from "./parse.js";
+import { ValidationError } from "./errors.js";
+import { parse, type ParseOptions } from "./parse.js";
+import { JuncoGraphValidator } from "./validator.js";
 import {
   edgeId,
   type EdgeSpec,
@@ -42,9 +44,11 @@ import {
   inboundEdges,
   type JuncoDocument,
   type NodeSpec,
+  nodeKey,
   outboundEdges,
   PLACEHOLDER,
   resolveTrigger,
+  walk,
 } from "./schema.js";
 
 /** YAML schemas are loaded at runtime: their payload/result domains are only known dynamically. */
@@ -63,23 +67,27 @@ type YamlAgent = agent.JuncoAgent<
   TSchema,
   unknown
 >;
-type YamlMockAgent = MockAgent<
-  Skill,
-  PromptTemplate,
-  AgentTool,
-  TSchema,
-  unknown
->;
+type CreateOptions = agent.JuncoAgentCreateOptions<Skill, PromptTemplate, AgentTool, TSchema, unknown>;
+const constructorFields = [
+  "session", "activeToolNames", "streamOptions", "retry", "compaction", "steeringMode",
+  "followUpMode", "toProviderMessages", "entryProjectors", "errorHandler", "tokenMonitor",
+  "loopGuard", "toolSource",
+] as const satisfies readonly (keyof CreateOptions)[];
+const allowedOptions = new Set<string>([...constructorFields, "images", "resources"]);
+
+/** Per-node harness settings; model, placement, permissions and instruction belong to the workflow. */
+export type YamlAgentOptions = Pick<CreateOptions, typeof constructorFields[number] | "images"> & {
+  readonly resources?: Pick<NonNullable<CreateOptions["resources"]>, "promptTemplates">;
+};
 export type AgentSpec = {
   /** The enclosing graph's display label; labels may repeat across nested graphs. */
   readonly graph: string;
   /** The agent's local node ID within its enclosing graph. */
   readonly node: string;
   /** The agent's unique root-relative node path: `Worker`, `Child/Worker`, `Child/Grandchild/Worker`. */
-  readonly path: string;
+  readonly path: graph.NodeIdType;
   readonly systemPrompt?: string;
   readonly tool_block?: readonly string[];
-  readonly tools: (AgentTool | mcp.JuncoMcpTools)[];
   readonly toolSource?: string;
   readonly skills: Skill[];
   readonly cwd: string;
@@ -130,13 +138,13 @@ export type BuildOptions<C = unknown> = {
   >;
   readonly policy?: tools.Policy;
   readonly collection?: tools.ToolCollection;
-  /** Limits/monitoring of the collection build creates; rejected with collection, agents or createAgent. */
+  /** Limits/monitoring of the native fallback collection, when this build creates one. */
   readonly resources?: tools.NativeResourceOptions;
   /** Monitor callback; pair with resources.monitorIntervalMs. Recorders take `recorder` instead. */
   readonly onResourceEvent?: (event: tools.NativeResourceEvent) => void;
   /** `tool_pruning` of the collection build creates; rejected with a supplied collection, like `resources`. */
   readonly tool_pruning?: boolean;
-  /** Failure-loop guard of every agent the build creates (`createJuncoAgent`); `createAgent` receives it as `spec.loopGuard`. */
+  /** Default failure-loop guard for agents without a node override. */
   readonly loopGuard?: agent.LoopGuard;
   /**
    * Samples retained per node and resource at each graph level; zero or omitted means none.
@@ -145,7 +153,7 @@ export type BuildOptions<C = unknown> = {
   readonly measurementWindows?: ReadonlyMap<graph.ResourceKind, number>;
   /** Code-node definitions by node id, exported by the same-named workflow module. */
   readonly code?: Readonly<Record<string, DeterministicNode<C>>>;
-  /** The runtime and the rungs agents may use; required when build creates agents, optional otherwise (model switching only). */
+  /** Runtime and model rungs; required if any graph level declares an agent. */
   readonly ladder?: ModelLadder;
   readonly tracer?: tracer.DataflowTracer;
   /** Profiling session of every graph, agent and created collection; independent of `tracer`. */
@@ -154,26 +162,12 @@ export type BuildOptions<C = unknown> = {
   >;
   /** The root graph's context in `recorder` (default: the recorder's own context). */
   readonly recorderNodeId?: string;
-  readonly tools?: Readonly<Record<string, AgentTool>>;
+  /** Borrowed collections by qualified agent ID. Missing entries use the graph-wide fallback. */
+  readonly tools?: ReadonlyMap<graph.NodeIdType, tools.ToolCollection>;
+  /** A supplied session transfers to the graph at entry, including on parse or preflight failure. */
+  readonly agentOptions?: ReadonlyMap<graph.NodeIdType, YamlAgentOptions>;
   /** Display-ready declaration module path for selected tool registrations. */
   readonly toolSource?: string;
-  /**
-   * Prepared agents keyed by node path (`Worker` or `Child/Worker`), exclusive with createAgent.
-   * Ownership transfers at build entry: failure closes every supplied agent; success leaves
-   * registered agents owned by the graph. Models, tools, skills and system prompts are already
-   * configured on these agents; node prompts still apply.
-   */
-  readonly agents?: Readonly<Record<string, YamlAgent>>;
-  /** Factory agents stay caller-owned on construction failure; `createAgentOwnership` decides on success. */
-  readonly createAgent?: (
-    spec: AgentSpec,
-  ) => Promise<YamlAgent | YamlMockAgent>;
-  /**
-   * Owner of successfully registered factory agents (default `"graph"`, which disposes them on
-   * close). `"caller"`: graph close aborts and joins them but never disposes them, so persistent
-   * agents can serve one graph per round. Requires `createAgent`.
-   */
-  readonly createAgentOwnership?: "graph" | "caller";
   readonly context?: C;
   readonly signal?: AbortSignal;
 };
@@ -223,18 +217,6 @@ async function loadSkill(name: string, path: string): Promise<Skill> {
   };
 }
 
-function builtinTools(blocked: ReadonlySet<string>): AgentTool[] {
-  const defaults: readonly (readonly [string, () => AgentTool])[] = [
-    ["yield", () => new tools.YieldTool()],
-    ["info", () => new tools.InfoTool()],
-    ["send", () => new tools.SendTool()],
-    ["task", () => new tools.TaskTool()],
-  ];
-  return defaults.flatMap(([name, create]) =>
-    blocked.has(name) ? [] : [create()],
-  );
-}
-
 export async function resolveAgents(
   doc: JuncoDocument,
   options: Pick<
@@ -246,13 +228,6 @@ export async function resolveAgents(
   const result: AgentSpec[] = [];
   for (const { id, node, key, label } of walk(doc.graph)) {
     if (!isAgent(node)) continue;
-    const block = node.tool_block ?? [];
-    const blocked = new Set(block);
-    const overlap = (node.tools ?? []).find((name) => blocked.has(name));
-    if (overlap !== undefined)
-      throw new TypeError(
-        `build: node "${key}": tools and tool_block both list "${overlap}"; remove it from either tools or tool_block`,
-      );
     const skills: Skill[] = [];
     for (const name of node.skills ?? []) {
       let skill = loaded.get(name);
@@ -267,20 +242,6 @@ export async function resolveAgents(
       }
       skills.push(skill);
     }
-    const defaults = builtinTools(blocked);
-    const extra = (node.tools ?? []).map((name) => {
-      const tool =
-        options.tools?.[name] ??
-        options.collection?.tools.find((t) => t.name === name) ??
-        defaults.find((t) => t.name === name);
-      if (!tool)
-        throw new TypeError(`build: unknown tool "${name}" for node "${id}"`);
-      if (blocked.has(tool.name))
-        throw new TypeError(
-          `build: node "${key}": tool "${name}" resolves to blocked tool "${tool.name}"; remove it from tools or tool_block`,
-        );
-      return tool;
-    });
     result.push({
       graph: label,
       node: id,
@@ -292,16 +253,10 @@ export async function resolveAgents(
         ]
           .filter(Boolean)
           .join("\n\n") || undefined,
-      tools: [
-        ...defaults.filter(
-          (tool) => !extra.some((selected) => selected.name === tool.name),
-        ),
-        ...extra,
-      ],
-      ...(node.tool_block === undefined ? {} : { tool_block: block }),
+      ...(node.tool_block === undefined ? {} : { tool_block: node.tool_block }),
       skills,
       cwd: options.cwd,
-      collection: options.collection,
+      collection: options.tools?.get(key) ?? options.collection,
       toolSource: options.toolSource,
       ...(options.loopGuard === undefined
         ? {}
@@ -314,48 +269,34 @@ export async function resolveAgents(
 export function createJuncoAgent(
   spec: AgentSpec,
   ladder: ModelLadder,
+  init: Omit<YamlAgentOptions, "images"> = {},
 ): Promise<YamlAgent> {
   const { provider, modelId, thinking } = resolveRung(
     ladder.rungs,
     DEFAULT_MODEL_STRENGTH,
   );
   return agent.JuncoAgent.create({
+    ...Object.fromEntries(constructorFields.filter((key) => Object.hasOwn(init, key)).map((key) => [key, init[key]])),
     provider,
     model: modelId,
     models: ladder.models,
     thinkingLevel: thinking,
     systemPrompt: spec.systemPrompt,
     cwd: spec.cwd,
-    tools: spec.tools,
-    toolSource: spec.toolSource,
+    toolSource: init.toolSource ?? spec.toolSource,
     tool_block: spec.tool_block,
     collection: spec.collection,
     recorder: spec.recorder,
     recorderNodeId: spec.recorderNodeId,
-    loopGuard: spec.loopGuard,
-    ...(spec.skills.length ? { resources: { skills: spec.skills } } : {}),
+    loopGuard: init.loopGuard ?? spec.loopGuard,
+    resources: { skills: spec.skills, promptTemplates: init.resources?.promptTemplates },
   });
 }
 
-/** Every node of `spec` and its nested graphs, depth-first and in declaration order: `key` is the `Child/Node` path, `label` the enclosing graph's name. */
-function* walk(
-  spec: GraphSpec,
-  label = spec.name ?? "graph",
-  path = "",
-): Generator<{ id: string; node: NodeSpec; key: string; label: string }> {
-  for (const [id, node] of Object.entries(spec.nodes)) {
-    const key = path === "" ? id : `${path}/${id}`;
-    yield { id, node, key, label };
-    if (node.kind === "graph")
-      yield* walk(node.graph, node.graph.name ?? id, key);
-  }
-}
 const isAgent = (
   node: NodeSpec,
 ): node is Extract<NodeSpec, { kind?: "agent" }> =>
   node.kind !== "graph" && node.kind !== "emit" && node.kind !== "code";
-const hasAgents = (spec: GraphSpec) =>
-  [...walk(spec)].some(({ node }) => isAgent(node));
 
 /** Edge `id` of `edges`; parse guarantees every referenced edge is declared. */
 function edgeOf(edges: ReadonlyMap<string, Edge>, id: string): Edge {
@@ -526,45 +467,26 @@ async function registerAgent(
   id: string,
   node: Extract<NodeSpec, { kind?: "agent" }>,
   registration: Registration,
-  key: string,
+  key: graph.NodeIdType,
 ): Promise<void> {
-  const { prompt, promptReturnEdges } = compilePrompt(
-    node.prompt, id, inboundEdges(spec, id),
-  );
-  let instance: YamlAgent | YamlMockAgent;
-  if (c.agents) {
-    const prepared = c.agents.get(key);
-    if (prepared === undefined)
-      throw new graph.DataflowDefinitionError(
-        `junco-syntax: missing prepared agent for node "${key}"`,
-      );
-    instance = prepared;
-  } else {
-    const next = c.specs.next();
-    if (next.done)
-      throw new graph.DataflowDefinitionError(
-        `junco-syntax: no agent spec for node "${key}"`,
-      );
-    const spec = placed(next.value, g, id);
-    if (c.options.createAgent) instance = await c.options.createAgent(spec);
-    else {
-      const { ladder } = c.options;
-      if (ladder === undefined)
-        throw new graph.DataflowDefinitionError(
-          "junco-syntax: a ladder is required to create agents; pass ladder or createAgent",
-        );
-      const created = await createJuncoAgent(spec, ladder);
-      c.acquired.push(created);
-      instance = created;
-    }
-  }
+  const compiled = node.prompt === undefined ? undefined : compilePrompt(node.prompt, id, inboundEdges(spec, id));
+  const specForNode = c.specs.get(key)!;
+  const init = c.agentOptions.get(key);
+  const creating = createJuncoAgent({
+    ...specForNode, collection: specForNode.collection ?? c.collection, recorder: g.recorder, recorderNodeId: id,
+  }, c.options.ladder!, init);
+  if (init?.session !== undefined) c.sessions.delete(init.session);
+  const instance = await creating;
+  c.acquired.push(instance);
+  c.options.signal?.throwIfAborted();
+  if (compiled) instance.stagePrompt(compiled.prompt, { images: init?.images });
   const registered = g.addNode({
     ...registration,
-    prompt,
+    prompt: compiled?.prompt,
     state: instance,
     policy: c.policy,
   });
-  // Until commit, rollback disposes acquired agents itself; factory agents stay borrowed.
+  c.acquired.pop(); // The graph, not rollback's unregistered list, now owns the agent.
   const step = g.getNode(registered)?.step;
   const policy = step && nodePolicies.get(step);
   if (policy === undefined)
@@ -572,20 +494,8 @@ async function registerAgent(
       "invalid_state",
       `Node "${id}" has no policy`,
     );
-  if (promptReturnEdges.size) policy.promptReturnEdges = promptReturnEdges;
-  policy.agentOwnership = "caller";
-  c.borrowed.push(policy);
+  if (compiled) policy.promptReturnEdges = compiled.promptReturnEdges;
 }
-
-/** `spec` at node `id` of `g`, carrying `g`'s recorder view when it records. */
-const placed = (
-  spec: AgentSpec,
-  g: JuncoGraph<TSchema, unknown>,
-  id: string,
-): AgentSpec =>
-  g.recorder === undefined
-    ? spec
-    : { ...spec, recorder: g.recorder, recorderNodeId: id };
 
 async function buildGraph(
   c: Construction,
@@ -638,7 +548,7 @@ async function buildGraph(
     const outbound = outboundEdges(spec, id)
       .filter((e) => e.kind === "message" && e.on !== "return")
       .map((e) => edgeOf(edges, edgeId(e)));
-    const key = path === "" ? id : `${path}/${id}`;
+    const key = nodeKey(path, id);
     const registration: Registration = {
       id: graph.NodeId.create(id),
       description: node.description,
@@ -710,7 +620,8 @@ async function buildGraph(
 }
 
 async function rollback(
-  c: Pick<Construction, "acquired" | "partialRoots">,
+  c: Pick<Construction, "acquired" | "partialRoots" | "sessions">,
+  creator: tools.ToolCollection | undefined,
   error: unknown,
 ): Promise<never> {
   const failures: unknown[] = [];
@@ -730,6 +641,18 @@ async function rollback(
       for (const error of errors)
         if (!failures.includes(error)) failures.push(error);
     }
+  }
+  for (const session of c.sessions) {
+    try {
+      await session.close(BACKGROUND_CONTEXT);
+    } catch (failure) {
+      failures.push(failure);
+    }
+  }
+  try {
+    await creator?.close();
+  } catch (failure) {
+    failures.push(failure);
   }
   if (failures.length)
     throw new AggregateError(
@@ -784,22 +707,18 @@ function compilePrompt(text: string, node: string, inbound: readonly EdgeSpec[])
   return { prompt, promptReturnEdges };
 }
 
-const codeIds = (spec: GraphSpec) =>
-  [...walk(spec)].flatMap(({ id, node }) => (node.kind === "code" ? [id] : []));
-
 /** Per-build state shared by every graph level; agents/graphs here are released on failure. */
 type Construction = {
   readonly options: BuildOptions;
   readonly policy: tools.Policy;
   readonly collection: tools.ToolCollection | undefined;
-  readonly specs: Iterator<AgentSpec>;
-  readonly agents: ReadonlyMap<string, YamlAgent> | undefined;
-  /** Owned agents in acquisition order, plus any code state not yet adopted by a graph. */
+  readonly specs: ReadonlyMap<graph.NodeIdType, AgentSpec>;
+  readonly agentOptions: ReadonlyMap<graph.NodeIdType, YamlAgentOptions>;
+  readonly sessions: Set<Session>;
+  /** Code or agent states not yet registered with a graph. */
   readonly acquired: AsyncDisposable[];
   /** Graphs not yet adopted by a parent. */
   readonly partialRoots: Set<JuncoGraph<TSchema, unknown>>;
-  /** Graphs borrow registered agents until the build commits. */
-  readonly borrowed: NodePolicy[];
 };
 type Registration = {
   readonly id: graph.NodeIdType;
@@ -808,68 +727,84 @@ type Registration = {
   readonly trigger: graph.TriggerRule<TSchema, unknown>;
 };
 
-function validateAgents(
-  spec: GraphSpec,
-  agents: ReadonlyMap<string, YamlAgent>,
-): void {
-  if (new Set(agents.values()).size !== agents.size)
-    throw new graph.DataflowDefinitionError(
-      "junco-syntax: agents must not assign the same agent to multiple node paths",
-    );
-  const unused = new Set(agents.keys());
-  for (const { key, node } of walk(spec)) {
-    if (!isAgent(node)) continue;
-    if (!agents.has(key))
-      throw new graph.DataflowDefinitionError(
-        `junco-syntax: missing prepared agent for node "${key}"`,
-      );
-    if (!unused.delete(key))
-      throw new graph.DataflowDefinitionError(
-        `junco-syntax: duplicate prepared agent node path "${key}"`,
-      );
-  }
-  if (unused.size)
-    throw new graph.DataflowDefinitionError(
-      `junco-syntax: unused prepared agents: ${[...unused].join(", ")}`,
-    );
-}
-
-export async function build<C = unknown>(
+export function build<C = unknown>(
   doc: JuncoDocument,
   options: BuildOptions<C>,
 ): Promise<Execution> {
-  const agents =
-    options.agents === undefined
-      ? undefined
-      : new Map(Object.entries(options.agents));
-  const owned = {
-    acquired: agents ? [...new Set(agents.values())] : [],
-    partialRoots: new Set<JuncoGraph<TSchema, unknown>>(),
-  };
-  let creates: boolean;
-  let policy: tools.Policy;
+  return construct(() => doc, options);
+}
+
+export function buildYaml<C>(source: string | object, options: FromYamlOptions<C>): Promise<Execution> {
+  return construct(() => parse(source, options), options);
+}
+
+async function construct<C>(document: () => JuncoDocument, options: BuildOptions<C>): Promise<Execution> {
+  const sessions = new Set<Session>();
+  const acquired: AsyncDisposable[] = [];
+  const partialRoots = new Set<JuncoGraph<TSchema, unknown>>();
+  let created: tools.ToolCollection | undefined;
   try {
+    let duplicate = false;
+    for (const init of options.agentOptions?.values?.() ?? []) {
+      const session = init?.session;
+      if (session === undefined) continue;
+      if (sessions.has(session)) duplicate = true;
+      sessions.add(session);
+    }
+    if (duplicate)
+      throw new graph.DataflowDefinitionError("junco-syntax: cannot assign the same session to multiple agent paths");
+    options.signal?.throwIfAborted();
+    for (const name of ["agents", "createAgent", "createAgentOwnership"])
+      if (name in options)
+        throw new graph.DataflowDefinitionError(`junco-syntax: ${name} is no longer supported; YAML owns its agents`);
     if ("available" in options)
       throw new graph.DataflowDefinitionError(
         "junco-syntax: available is no longer supported; declare admission with trigger",
       );
-    if (agents && options.createAgent !== undefined)
-      throw new graph.DataflowDefinitionError(
-        "junco-syntax: agents and createAgent are mutually exclusive",
-      );
-    if (
-      options.createAgentOwnership !== undefined &&
-      options.createAgent === undefined
-    )
-      throw new graph.DataflowDefinitionError(
-        "junco-syntax: createAgentOwnership requires createAgent",
-      );
-    if (agents) validateAgents(doc.graph, agents);
-    creates =
-      !options.collection &&
-      !options.createAgent &&
-      !agents &&
-      hasAgents(doc.graph);
+    const doc = document();
+    const maps = {
+      ...(options.tools === undefined ? {} : { tools: { map: options.tools } }),
+      ...(options.agentOptions === undefined ? {} : { agentOptions: { map: options.agentOptions } }),
+    };
+    if (options.tools !== undefined || options.agentOptions !== undefined)
+      JuncoGraphValidator.validateNodeMaps(doc, maps);
+    const policy = options.policy ?? tools.LockPolicy;
+    checkPolicy(policy, options.collection);
+    checkRecorder(options.recorder, options.collection?.recorder);
+    const members = new Map<graph.NodeIdType, Extract<NodeSpec, { kind?: "agent" }>>();
+    for (const { id, node, key } of walk(doc.graph)) {
+      if (isAgent(node)) members.set(key, node);
+      else if (node.kind === "code" && options.code?.[id] === undefined)
+        throw new graph.DataflowDefinitionError(`junco-syntax: code node "${id}" has no definition in options.code`);
+    }
+    for (const [name, { map }] of Object.entries(maps))
+      for (const key of map.keys())
+        if (!members.has(key))
+          throw new ValidationError({ code: "node-map", path: `/options/${name}`,
+            message: `"${key}" is not an agent`, help: "configure only agent node paths" });
+    for (const [key, collection] of options.tools ?? []) {
+      if (!(collection instanceof tools.ToolCollection))
+        throw new TypeError(`junco-syntax: tools for "${key}" must be a ToolCollection`);
+      checkPolicy(policy, collection);
+      checkRecorder(options.recorder, collection.recorder);
+    }
+    const agentOptions = new Map<graph.NodeIdType, YamlAgentOptions>();
+    for (const [key, init] of options.agentOptions ?? []) {
+      if (typeof init !== "object" || init === null || Array.isArray(init))
+        throw new TypeError(`junco-syntax: agentOptions for "${key}" must be an object`);
+      for (const field of Object.keys(init))
+        if (!allowedOptions.has(field))
+          throw new TypeError(`junco-syntax: unsupported agentOptions field "${field}" for "${key}"`);
+      if (init.resources !== undefined && (init.resources === null || typeof init.resources !== "object" ||
+        Array.isArray(init.resources) || Object.keys(init.resources).some((field) => field !== "promptTemplates")))
+        throw new TypeError(`junco-syntax: only resources.promptTemplates may be configured for "${key}"`);
+      if (init.images?.length && members.get(key)?.prompt === undefined)
+        throw new TypeError(`junco-syntax: images for "${key}" require a YAML prompt`);
+      agentOptions.set(key, { ...init, session: init.session });
+    }
+    if (members.size && options.ladder === undefined)
+      throw new graph.DataflowDefinitionError("junco-syntax: a ladder is required for agent nodes");
+    const creates = options.collection === undefined && members.size > (options.tools?.size ?? 0);
     if (
       !creates &&
       (options.resources !== undefined || options.onResourceEvent !== undefined)
@@ -881,75 +816,29 @@ export async function build<C = unknown>(
       throw new graph.DataflowDefinitionError(
         "junco-syntax: tool_pruning applies to the collection build creates; open the supplied collection with { tool_pruning: true } instead",
       );
-    for (const id of codeIds(doc.graph))
-      if (options.code?.[id] === undefined)
-        throw new graph.DataflowDefinitionError(
-          `junco-syntax: code node "${id}" has no definition in options.code`,
-        );
-    if (
-      hasAgents(doc.graph) &&
-      !agents &&
-      options.createAgent === undefined &&
-      options.ladder === undefined
-    )
-      throw new graph.DataflowDefinitionError(
-        "junco-syntax: a ladder is required to create agents; pass ladder or createAgent",
-      );
-    policy = options.policy ?? tools.LockPolicy;
+    // Skill loading can suspend; retain the grants we just checked, not a caller's mutable Map.
+    const mapped = options.tools === undefined ? undefined : new Map(options.tools);
+    const specs = new Map((await resolveAgents(doc, { ...options, tools: mapped })).map((spec) => [spec.path, spec]));
+    options.signal?.throwIfAborted();
+    if (creates)
+      created = await tools.ToolCollection.create(options.cwd, {
+        policy, recorder: options.recorder, resources: options.resources,
+        onResourceEvent: options.onResourceEvent, tool_pruning: options.tool_pruning,
+        measureMemory: (options.measurementWindows?.get("memory") ?? 0) > 0,
+      });
+    const c: Construction = {
+      options: options as BuildOptions, policy, collection: options.collection ?? created,
+      specs, agentOptions, sessions, acquired, partialRoots,
+    };
+    const execution = await buildGraph(c, doc.graph, doc.graph.name ?? "graph", options.tracer, [], "",
+      options.recorder, options.recorderNodeId);
+    options.signal?.throwIfAborted();
+    // This fallback has no extension; graph leases and agent bindings now hold it.
+    const creator = created;
+    created = undefined;
+    await creator?.close();
+    return execution;
   } catch (error) {
-    return rollback(owned, error);
+    return rollback({ acquired, partialRoots, sessions }, created, error);
   }
-  const construct = async (
-    collection?: tools.ToolCollection,
-  ): Promise<Execution> => {
-    try {
-      const c: Construction = {
-        // Code nodes receive exactly this build's `context`, so erasing `C` is sound.
-        options: options as BuildOptions,
-        policy,
-        collection,
-        specs: (agents
-          ? []
-          : await resolveAgents(doc, { ...options, collection }))[
-          Symbol.iterator
-        ](),
-        agents,
-        ...owned,
-        borrowed: [],
-      };
-      const execution = await buildGraph(
-        c,
-        doc.graph,
-        doc.graph.name ?? "graph",
-        options.tracer,
-        [],
-        "",
-        options.recorder,
-        options.recorderNodeId,
-      );
-      if (options.createAgentOwnership !== "caller")
-        for (const policy of c.borrowed) policy.agentOwnership = "graph";
-      return execution;
-    } catch (error) {
-      return rollback(owned, error);
-    }
-  };
-  if (creates)
-    return JuncoGraph.create(
-      options.cwd,
-      {
-        policy,
-        ...(options.recorder ? { recorder: options.recorder } : {}),
-        ...(options.resources ? { resources: options.resources } : {}),
-        ...((options.measurementWindows?.get("memory") ?? 0) > 0
-          ? { measureMemory: true }
-          : {}),
-        ...(options.onResourceEvent
-          ? { onResourceEvent: options.onResourceEvent }
-          : {}),
-        ...(options.tool_pruning ? { tool_pruning: true } : {}),
-      },
-      construct,
-    );
-  return construct(options.collection);
 }

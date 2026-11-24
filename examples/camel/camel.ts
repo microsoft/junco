@@ -1,7 +1,7 @@
 // CaMeL (https://arxiv.org/abs/2503.18813, Fig. 5): a privileged planner sees only the
 // user query; Interpreter reads a fixture email, QLLM parses it without tools,
 // and Executor propagates capabilities and checks junco-policy before sending to a fixture outbox.
-// Requires the built junco-tools native addon and Pi's saved GitHub Copilot login (`pi` -> `/login`).
+// Requires a writable native Btrfs seed containing the repository, the junco-tools addon and Pi's GitHub Copilot login.
 //   bun run examples/camel/camel.ts
 //   bun run examples/camel/camel.ts "Forward my last email to Bob; his address is in it"
 // In a TTY, dismiss the final trace with q/Esc to print the outcome JSON.
@@ -268,14 +268,12 @@ async function main(signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
     const recorder = lifetime.adopt(await problemRecorder(repositoryRoot), (owned) => owned.close());
     const observer = tracer.TuiTracer.shared();
+    lifetime.defer(() => observer instanceof tracer.TuiTracer ? observer.finish() : undefined);
     const execution = await JuncoGraph.fromYaml(source, {
       cwd: repositoryRoot, ladder, code: { Interpreter, Executor },
-      // Avoid the default builder's ShellMux: neither LLM can use tools.
-      createAgent: (spec) => syntax.createJuncoAgent(spec, ladder),
       scheduler: () => schedules.parallel(), recorder, context, params: { query }, signal,
       tracer: observer,
     });
-    lifetime.defer(() => observer instanceof tracer.TuiTracer ? observer.finish() : undefined);
     lifetime.adopt(execution.graph, (owned) => owned.close());
     const results = await execution.run({ signal });
     outcome = results.get(execution.graph.sink.id) as Outcome;

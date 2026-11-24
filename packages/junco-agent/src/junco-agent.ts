@@ -1495,15 +1495,18 @@ export class JuncoAgent<
         recorder,
         run === undefined ? MAINTENANCE_REQUEST : MODEL_REQUEST,
       );
-      if (finish === undefined)
-        return models.streamSimple(model, context, options);
+      // Pi may dispatch outside the activation that admitted this request.
+      const placement = this.#request ?? this.#usagePlacement;
       let stream: AssistantMessageEventStream;
       try {
-        stream = models.streamSimple(model, context, options);
+        stream = placement === undefined || captureUsageContext() === placement.context
+          ? models.streamSimple(model, context, options)
+          : runWithUsageContext(placement.context, () => models.streamSimple(model, context, options));
       } catch (error) {
-        finish("error");
+        finish?.("error");
         throw error;
       }
+      if (finish === undefined) return stream;
       // Observes the final message without consuming the caller's iterator.
       stream.result().then(
         ({ stopReason }) =>
@@ -1930,6 +1933,9 @@ export class JuncoAgent<
       name,
       ...(args === undefined ? {} : { args }),
     });
+  }
+  get stagedPrompt(): AgenticOptions<S, P, T, N, V>["prompt"] {
+    return this.#staged?.text;
   }
   stagePrompt(
     prompt: NonNullable<AgenticOptions<S, P, T, N, V>["prompt"]>,

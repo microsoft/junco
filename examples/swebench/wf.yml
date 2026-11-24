@@ -32,6 +32,7 @@ graph:
     Lead:
       description: Decomposes the issue into three narrow, issue-specific evidence assignments.
       trigger: Input~>Lead
+      tool_block: &no-shell [ast_edit, ast_grep, bash, code_graph, diff, edit, find, grep, read, release, task]
       system: |
         You are the lead engineer of a small team resolving one GitHub issue in an open-source Python
         repository. You have no shell: your teammates investigate in their own sandboxes of the repository
@@ -72,7 +73,7 @@ graph:
     Trace:
       description: Source and caller tracing in its own sandbox; its final answer is the report.
       trigger: Assign~>Trace
-      tools: [bash]
+      tool_block: &sandbox-shell [ast_edit, ast_grep, code_graph, diff, edit, find, grep, read, release, task]
       system: &evidence-system |
         You are a senior engineer gathering evidence about one GitHub issue. Your bash tool runs in your own
         disposable sandbox: the repository at /testbed at the issue's base commit, inside the official
@@ -97,7 +98,7 @@ graph:
     Reproduce:
       description: Reproduction and runnable focused checks in its own sandbox; its final answer is the report.
       trigger: Assign~>Reproduce
-      tools: [bash]
+      tool_block: *sandbox-shell
       system: *evidence-system
       prompt: |
         Read the issue and your assignment in the user message following this prompt.
@@ -118,7 +119,7 @@ graph:
     Contracts:
       description: Compatibility analysis and behaviour matrix in its own sandbox; its final answer is the report.
       trigger: Assign~>Contracts
-      tools: [bash]
+      tool_block: *sandbox-shell
       system: *evidence-system
       prompt: |
         Read the issue and your assignment in the user message following this prompt.
@@ -162,6 +163,7 @@ graph:
         nodes:
           Draft:
             description: Writes the complete plan, and a complete corrected plan for each CheckPlan rejection.
+            tool_block: *no-shell
             trigger:
               any: ["$source~>Draft", "CheckPlan~>Draft"]
             system: |
@@ -238,7 +240,7 @@ graph:
     CandidateA:
       description: Implements candidate assignment A in its own sandbox.
       trigger: Dispatch~>CandidateA
-      tools: [bash]
+      tool_block: *sandbox-shell
       system: &candidate-system |
         You are a senior engineer implementing a fix for one GitHub issue. Your bash tool runs in your own
         sandbox: the repository at /testbed at the issue's base commit, inside the official SWE-bench image
@@ -264,7 +266,7 @@ graph:
     CandidateB:
       description: Implements candidate assignment B in its own sandbox.
       trigger: Dispatch~>CandidateB
-      tools: [bash]
+      tool_block: *sandbox-shell
       system: *candidate-system
       prompt: "Implement your candidate assignment in the user message following this prompt."
 
@@ -297,7 +299,7 @@ graph:
     Integrator:
       description: Reviews the applied patch against the evidence and resolves concrete integration gaps in canonical /testbed.
       trigger: Apply~>Integrator
-      tools: [bash]
+      tool_block: *sandbox-shell
       system: |
         You are the technical lead integrating the selected fix for one GitHub issue. Your bash tool runs in
         the canonical sandbox: the repository at /testbed (official SWE-bench image, `testbed` conda
@@ -327,7 +329,7 @@ graph:
     Verifier:
       description: Independently verifies the final diff in canonical /testbed without changing it.
       trigger: Freeze~>Verifier
-      tools: [bash]
+      tool_block: *sandbox-shell
       system: |
         You are an independent verifier for a fix to one GitHub issue. Your bash tool runs in the canonical
         sandbox: /testbed holds the final patch (official SWE-bench image, `testbed` conda environment, no

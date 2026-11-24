@@ -18,6 +18,7 @@ import {
   rename,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -27,6 +28,7 @@ import {
   type FauxResponseStep,
   fauxAssistantMessage,
   fauxProvider,
+  getCurrentTools,
   fauxToolCall,
   InMemoryCredentialStore,
   type ToolCall,
@@ -888,6 +890,9 @@ function editorTurn(turn: EditorTurn, log: EditorLog): FauxResponseStep[] {
         ]);
   const steps: FauxResponseStep[] = [
     (context) => {
+      const granted = new Set(getCurrentTools(context.messages).map((tool) => tool.name));
+      assert.ok(granted.has("read_target") && granted.has("edit_tuning"));
+      for (const blocked of ["bash", "edit", "read", "release", "task"]) assert.ok(!granted.has(blocked));
       const message = context.messages.at(-1);
       assert.ok(message?.role === "user", "the editor received no assignment");
       const assignment = JSON.parse(
@@ -1337,6 +1342,7 @@ const TOKEN_YAML = `graph:
     Assignment: { kind: emit, text: Write the status report., spec: A completed status report. }
     Writer:
       prompt: Write the status report.
+      tool_block: [read, bash, edit, release, grep, find, ast_grep, ast_edit, diff, code_graph]
       trigger: "Assignment~>Writer"
     Quality: { kind: code }
     Terminal: { kind: code }
@@ -1407,8 +1413,7 @@ async function tokenScenario(dir: string): Promise<void> {
     code: TOKEN_CODE,
     beforeBuild:
       "const ladder = new schedules.ModelLadder(models, optimizerLadder!);",
-    options:
-      'ladder, createAgent: (spec) => syntax.createJuncoAgent({ ...spec, tool_block: [...new Set(["read", "bash", "edit", "release", "grep", "find", "ast_grep", "ast_edit", "diff", "code_graph", ...(spec.tool_block ?? [])])] }, ladder),',
+    options: "ladder,",
     check: "value === 1",
   });
   const log: EditorLog = { states: [] };
@@ -2673,11 +2678,17 @@ process.stderr.write("NODE_BOUNDARY_OK");
 }
 
 const main = async () => {
-  // .junco/ is gitignored scratch space: absent in a clean checkout.
-  await mkdir(join(ROOT, ".junco"), { recursive: true });
-  const root = await mkdtemp(join(ROOT, ".junco", "profile-optimizer-check-"));
+  // Generated children need a dedicated native seed, including when the checkout is on ext4.
+  const base = process.env.JUNCO_BTRFS_TEST_ROOT ?? join(ROOT, ".junco");
+  if (!process.env.JUNCO_BTRFS_TEST_ROOT) await mkdir(base, { recursive: true });
+  const root = await mkdtemp(join(base, "profile-optimizer-check-"));
   let ok = false;
   try {
+    const modules = join(root, "node_modules");
+    await mkdir(modules);
+    await symlink(ROOT, join(modules, "junco"), "dir");
+    for (const dependency of ["dataflow-engine", "@earendil-works"])
+      await symlink(join(ROOT, "node_modules", dependency), join(modules, dependency), "dir");
     await checkMetrics(join(root, "metrics"));
     checkStatistics();
     await boundaryChecks(join(root, "boundaries"));

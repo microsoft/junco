@@ -25,7 +25,8 @@ graph:
               nodes:
                 "0":
                   system: leaf
-                  prompt: Complete the assignment in the following user message.
+                  prompt: Complete the grandchild assignment in the following user message.
+                  tool_block: &native_block [read, bash, edit, release, grep, find, ast_grep, ast_edit, diff, code_graph]
                   description: grandchild member 0
                   trigger: "$source~>0"
               edges:
@@ -69,7 +70,8 @@ graph:
             schema: *assistant
     "1":
       system: leaf
-      prompt: Complete the assignment in the following user message.
+      prompt: Complete the sibling assignment in the following user message.
+      tool_block: *native_block
       description: root member 1
       trigger: Start->1
     Join:

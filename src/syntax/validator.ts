@@ -14,20 +14,24 @@
  * cycles that never descend into the payload are rejected; recursion through `properties`,
  * `items` and other child positions is allowed. The edge factory supplies the root resource ID.
  */
+import type { NodeIdType } from "dataflow-engine";
 import type { TLocalizedValidationError } from "typebox/error";
 import { Format } from "typebox/format";
 import Schema from "typebox/schema";
 import { Value } from "typebox/value";
 import { type Fail, pointer, ValidationError } from "./errors.js";
 import {
+  AgentNodeSchema,
   declaredTrigger,
   type EdgeSpec,
   edgeId,
   type GraphSpec,
   type JuncoDocument,
   JuncoDocumentSchema,
+  nodeKey,
   PLACEHOLDER,
   type TriggerSpec,
+  walk,
 } from "./schema.js";
 
 const list = (items: readonly string[]) =>
@@ -333,14 +337,8 @@ function checkGraphFields(spec: unknown, path: string, fail: Fail): void {
     if (!mapping(node)) continue;
     const at = `${path}/nodes/${pointer(id)}`;
     if (node.kind === "graph") checkGraphFields(node.graph, `${at}/graph`, fail);
-    else if ((node.kind === undefined || node.kind === "agent") &&
-      (typeof node.prompt !== "string" || !node.prompt.trim()))
-      fail(
-        `${at}/prompt`,
-        "agent requires a nonblank prompt",
-        "set prompt to the instruction to execute when the trigger fires",
-        "document",
-      );
+    else if ((node.kind === undefined || node.kind === "agent") && !Value.Check(AgentNodeSchema, node))
+      failTypeBox(Value.Errors(AgentNodeSchema, node), at, "document", fail);
   }
 }
 
@@ -353,11 +351,7 @@ function validate(value: unknown, fail: Fail = reject): JuncoDocument {
   acyclic(value, "", new Set(), fail);
   if (!Value.Check(JuncoDocumentSchema, value)) {
     if (mapping(value)) checkGraphFields(value.graph, "/graph", fail);
-    // A missing prompt in an unused agent branch isn't an error for the declared kind.
-    const errors = Value.Errors(JuncoDocumentSchema, value).filter(
-      (e) => !(e.keyword === "required" && e.params.requiredProperties.includes("prompt")),
-    );
-    failTypeBox(errors, "", "document", fail);
+    failTypeBox(Value.Errors(JuncoDocumentSchema, value), "", "document", fail);
   }
   const doc = value as JuncoDocument;
   /** Identifiers may hold any text except none: reject empty and whitespace-only names. */
@@ -647,7 +641,7 @@ function validate(value: unknown, fail: Fail = reject): JuncoDocument {
         const known = inboundIds.length
           ? `reference one of its inbound edges: ${list(inboundIds)}`
           : `add an edge into "${id}" first`;
-        for (const [, e] of node.prompt.matchAll(PLACEHOLDER))
+        for (const [, e] of node.prompt?.matchAll(PLACEHOLDER) ?? [])
           if (!inboundIds.includes(e ?? ""))
             fail(
               `${nodePath}/prompt`,
@@ -664,19 +658,7 @@ function validate(value: unknown, fail: Fail = reject): JuncoDocument {
               `declare "${name}" in the top-level skills registry, or use one of: ${list(Object.keys(doc.skills ?? {}))}`,
               "reference",
             );
-        const additions = node.tools ?? [];
-        const block = node.tool_block ?? [];
-        unique(additions, `${nodePath}/tools`, `Node "${id}" tools`);
-        unique(block, `${nodePath}/tool_block`, `Node "${id}" tool_block`);
-        const added = new Set(additions);
-        for (const [index, name] of block.entries())
-          if (added.has(name))
-            fail(
-              `${nodePath}/tool_block/${index}`,
-              `Node "${id}": tools and tool_block both list "${name}"`,
-              `remove "${name}" from either tools or tool_block; a tool cannot be both added and blocked`,
-              "node",
-            );
+        unique(node.tool_block ?? [], `${nodePath}/tool_block`, `Node "${id}" tool_block`);
       }
     }
     const sourceEdges = (outgoing.get("$source") ?? []).map(edgeId);
@@ -821,5 +803,29 @@ function validate(value: unknown, fail: Fail = reject): JuncoDocument {
   return doc;
 }
 
+type NodeMaps = Readonly<Record<string, { readonly map: ReadonlyMap<NodeIdType, unknown>; readonly complete?: boolean }>>;
+
+/** Validate config keys against runtime nodes, including both ports at every level. */
+function validateNodeMaps(document: JuncoDocument, maps: NodeMaps): void {
+  const ids = new Set([nodeKey("", "$source"), nodeKey("", "$sink")]);
+  for (const { key, node } of walk(document.graph)) {
+    ids.add(key);
+    if (node.kind === "graph") {
+      ids.add(nodeKey(key, "$source"));
+      ids.add(nodeKey(key, "$sink"));
+    }
+  }
+  for (const [name, { map, complete }] of Object.entries(maps)) {
+    const path = `/options/${pointer(name)}`;
+    if (typeof map?.keys !== "function" || typeof map.has !== "function" || typeof map.get !== "function")
+      reject(path, "Expected a node-indexed map", "pass a Map keyed by qualified node ID", "node-map");
+    const unknown = [...map.keys()].filter((id) => !ids.has(id));
+    const missing = complete === true ? [...ids].filter((id) => !map.has(id)) : [];
+    if (unknown.length || missing.length)
+      reject(path, [unknown.length && `unknown IDs: ${list(unknown)}`, missing.length && `missing IDs: ${list(missing)}`].filter(Boolean).join("; "),
+        "use qualified node IDs relative to the root graph", "node-map");
+  }
+}
+
 /** Validates a decoded Junco document, including nested graphs, before construction. */
-export const JuncoGraphValidator = { validate };
+export const JuncoGraphValidator = { validate, validateNodeMaps };

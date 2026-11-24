@@ -340,7 +340,7 @@ export type AgenticNode<N = Task, T = AssistantMessage> = (
     })
   | (StepLess<N, T> & {
       readonly state: JuncoAgent | MockAgent; // chat wires only
-      readonly prompt: string | ((inputs: ParentView<N,T>) => string);
+      readonly prompt: string | ((inputs: ParentView<N,T>) => string) | undefined;
       readonly step?: never;
       readonly policy: ToolCollection["policy"];
     })
@@ -612,6 +612,7 @@ export interface ToolCollectionOptions {
   sandbox?: "shared" | "always";
   policy?: Policy; // default LockPolicy
   principal?: string;
+  extend?: (collection: ToolCollection) => Promise<{ readonly tools: readonly AgentTool[]; close(): Promise<void> }>;
 }
 
 export class ToolCollection
@@ -803,15 +804,15 @@ export const DiffTool = {
 };
 ```
 
-Prefer `tools.ToolCollection.create(cwd, { policy })`: it builds all eight tools; `read`, `grep`, `edit` share one provenance store. Policies compare by identity: compose once (`tools.Policy.and(tools.LockPolicy, custom)`) and pass that object to the collection and every using node/graph. LSP is separate; `tools.write` and `tools.ls` do not exist.
+Prefer `tools.ToolCollection.create(cwd, { policy })`: its native `read`, `grep` and `edit` share one provenance store. Policies compare by identity: compose once (`tools.Policy.and(tools.LockPolicy, custom)`) and pass that object to the collection and every using node/graph. LSP is separate; `tools.write` and `tools.ls` do not exist.
 
 Tool selection and ownership:
 
-- **Pure prompt/review agents: explicit `tools: []`.** Omitted `tools` acquires the native collection plus coordination tools `task`, `yield`, `send`, `info`; `complain` is a separate enabled default. Arrays replace defaults: senders need `new tools.SendTool()` and usually `new tools.InfoTool()`. Scheduler-delivered input needs no tool. Native tool composition and YAML `tool_block` semantics are unchanged.
-- **Voluntary suspension** requires real `new tools.YieldTool()` in explicit arrays, never a same-named tool. Execution returns only its reason; `JuncoAgent` pauses, plain Pi agents continue. Only this tool pauses voluntarily; `task`, `send`, `info`, `schedule` never pause.
+- **YAML roles:** every role gets one native collection: its `tools` map entry, the graph-wide `collection`, or the builder's shared native default. A pure review role must explicitly exclude unauthorized tools with `tool_block`; neither an omitted map entry nor an empty tool block limits exposure. Custom tools belong in a collection's `extend`, not a YAML list.
+- **Voluntary suspension** uses the default `yield`. Only a real `YieldTool` pauses a Junco agent; `task`, `send`, `info` and `schedule` never pause.
 - **Subagents** require real `new tools.TaskTool()` on a `JuncoAgent`, standalone or graph-registered. Success starts every child immediately in the background, returns handles and continues the run; the caller keeps working. Node state, edges and topology never change. Completed `task_result` reports (`id`, `attempt`, …) arrive as follow-ups; one `task_batch_complete` follows once all launch tasks complete or are ignored. The caller's run (and node result) settles only after it answers every delivered report/marker, in the same run. Children inherit caller model, active tools and registered MCP definitions (fresh servers each), unless tasks specify `model` or narrower `tools`; they resume their own yields and may run their own tasks. For workflow-owned assignments, `await agent.setTaskBatch(input)` then instruct `task({})`: admitted at most once, no copied payload. `agent.setTaskFailurePolicy(...)`: `"ignore"` silently drops failures; `{ retries: n }` (default `n = 0`) retries only the failed task in fresh children, then sends `decisionRequired`. Before finishing, resolve it with `task({ action: "retry" | "ignore", id, attempt })` or get `Task failure decisions required: …`. Failed attempts are closed once; teardown failure and usage-limit exhaustion fail the caller; abort/close of the caller (or its graph) closes running children.
 - **Semantic navigation:** `await tools.LspTool.create(process.cwd(), { readOnly: true, trustedWorkspace: workspaceIsTrusted })` for read-only roles; mutating LSP only for editing roles. `workspaceIsTrusted` must come from explicit user/host approval, never repository configuration or model input. Every action rejects before configuration loading unless it is true. Trust permits repository commands, local binaries and server-side project hooks; `readOnly` only filters actions, not execution. Node and Bun use the native Rust implementation and caller-installed language-server binaries. LSP is not whole-host confinement.
-- **Native coding tools** require the built native addon and existing dedicated Btrfs seed (writable parent, `user_subvol_rm_allowed`). Both `ToolCollection.create` and omitted agent `tools` require it; no ordinary-filesystem fallback. Report missing prerequisites, never silently substitute tools.
+- **Native coding tools** require the built native addon and an existing dedicated Btrfs seed (writable parent, `user_subvol_rm_allowed`). This includes custom-only YAML roles: blocking all native tools does not eliminate the collection. Report missing prerequisites; never substitute host tools.
 - **Ownership.** Explicit arrays are caller-owned. Guard sequential acquisition so later constructor failures close earlier resources. Drain/close graph members first; after all process-wide LSP users finish call `LspTool.shutdown()` once; then close owned collections. Each `ToolCollection` owns its ShellMux/policy; borrowing agents, graphs, coroutines and MCP connections take their own `lease()` and release only that hold, never close the collection. Final release (usually creator `close()` or root graph of `graph.JuncoGraph.create`) closes the mux. Keep resources outside multi-round loops with persistent agents.
 
 ### mcp
@@ -856,8 +857,8 @@ export class McpBuilder {
 ```
 
 - **Declare a server** with `mcp.JuncoMcpTools.add({ name, type: "stdio", command, args })`; chain `.add(...)` for multiple servers. `command` resolves through `PATH`; `args` pass literally, never through a shell. Optional: `cwd` (relative to the connecting agent's `cwd`, must exist inside the seed), `env` (merged over parent environment; `inheritEnv: false` passes only `env`), `stderr`/`onStderr`, `closeTimeoutMs`, `clientOptions` (e.g. `{ requestTimeoutMs: 300_000 }` for slow startup; pi-mcp defaults to 30 seconds). `name` must be nonblank and unique per definition; it supplies `<server>` in tool names.
-- **Pass the definition to an agent factory:** `tools: [servers]`, optionally mixed with concrete tools. Definition starts nothing; each agent connects its own client/server from its `cwd` and closes both on agent close. Subagents reconnect fresh servers from caller-definition snapshots. Use published `mcp__<server>__<tool>` names in `activeToolNames`.
-- **Servers as collection tools:** `McpBuilder.build` returns a `ToolCollection` with the wrappers in `tools`; one server process per collection, closed by `collection.close()`; pass it as `collection` (shared) or per agent via `createAgent`.
+- **Low-level agents:** `JuncoAgent.create` and `fromResolved` can take `tools: [servers]`, optionally mixed with concrete tools. The definition starts nothing; each agent connects its own client/server from its `cwd` and closes them on agent close. Subagents reconnect fresh servers from caller-definition snapshots. Use published `mcp__<server>__<tool>` names in `activeToolNames`.
+- **YAML graphs:** `McpBuilder.build` returns a native `ToolCollection` with one server process per configured server. Pass it as `collection` (shared fallback) or as an entry in `tools`, keyed by qualified `graph.NodeIdType`. Close the graph, then all caller-created collections.
 - **Direct use:** `const connection = await servers.connect({ cwd, signal, collection })`; use `connection.tools`, then `await connection.close()` in `finally`. `signal` cancels acquisition only (`McpAbortError`), stopping already-started servers; returned connections ignore it.
 - **Stdio only.** Each server is an audited job under the supplied collection's ShellMux/policy (requires the native addon and a Btrfs seed containing `cwd`); nonempty definitions without a collection reject with `TypeError`. Effects publish only at server exit; refused publication rejects agent/connection close with `MARSH_POLICY_DENIED`. Replies do not prove publication. Servers snapshot state at startup: another server publishing to a path this server read or wrote makes its close fail, even if it wrote nothing. Prepare shared state before startup; a server kept running across another's publication may not close cleanly.
 
@@ -975,7 +976,7 @@ export function context<N, T, G extends JuncoGraph<N, T, never>>(options: {
 
 `Ladder` is `Readonly<Record<ModelStrengthName, LadderRung>>`; each rung is `{ readonly model: string; readonly thinking?: ThinkingLevel }`. `validateLadder` checks all five model identities. Selected prompt agents receive their rung before execution; omitted thinking means `"off"`. Without a ladder the context leaves models untouched.
 
-`schedules.ModelLadder` pairs `readonly models: ModelRuntime` with `readonly rungs: Ladder`. Its constructor validates all five identities, catalog presence and supported thinking levels; it does not acquire credentials or check entitlement. `syntax.BuildOptions.ladder` takes this pair, with no separate `models` option; `syntax.createJuncoAgent(spec, ladder)` uses its runtime. The low-level `schedules.context({ ladder })` still takes bare `Ladder` rungs because its agents already own runtimes.
+`schedules.ModelLadder` pairs `readonly models: ModelRuntime` with `readonly rungs: Ladder`. Its constructor validates all five identities, catalog presence and supported thinking levels; it does not acquire credentials or check entitlement. YAML builds require `ladder` whenever the hierarchy contains an agent. For manual construction, `syntax.createJuncoAgent(spec, ladder, init?)` uses the paired runtime; the caller owns that agent. The low-level `schedules.context({ ladder })` still takes bare `Ladder` rungs because its agents already own runtimes.
 
 **Stateless model oracle.** `junco-scheduler/agent` exports only `pi`, `PiOptions`, `SchedulerRequest`; `schedules.pi` reexports them for agency callers. `Models`, `Model`, `Api` and stream option types come from `@earendil-works/pi-ai`:
 

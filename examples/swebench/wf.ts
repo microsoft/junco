@@ -123,7 +123,7 @@ type OptimizerLimits = {
 
 // junco-profile-optimizer:start scheduler
 const optimizerScheduler = (_label: string, graphPath: string) =>
-  schedules.strength((_snapshot, id) => optimizerStrengthOf(graphPath === "" ? id : `${graphPath}/${id}`), schedules.parallel());
+  schedules.strength((_snapshot, id) => optimizerStrengthOf(syntax.nodeKey(graphPath, id)), schedules.parallel());
 // junco-profile-optimizer:end scheduler
 // junco-profile-optimizer:start ladder
 const optimizerLadder: schedules.Ladder = { smol: LUNA, low: LUNA, med: HAIKU, high: SONNET, xhigh: SONNET };
@@ -333,6 +333,7 @@ export const profileRun = profile.request !== undefined
   ? { nonce: profile.request.nonce }
   : graphRun !== undefined ? { nonce: graphRun.nonce } : undefined;
 
+const runDocument = profile.withProbes(document);
 /** Seconds each acceptance check may run before it is killed (and counts as failed). */
 export const CHECK_TIMEOUT = 900;
 /** What a reproduction check prints while the bug is present; an import error never contains it. */
@@ -931,10 +932,11 @@ function unfinished(g: JuncoGraph<TSchema, unknown>): string {
 export type RunOptions = Omit<syntax.FromYamlOptions<Host>, "scheduler" | "code" | "context"> & { readonly context: Host };
 
 /** Builds and runs the workflow with the runner's ladder and returns Finish's report. */
-export async function run(config: RunOptions): Promise<string> {
+export async function run(config: RunOptions, observe?: (graph: JuncoGraph<TSchema, unknown>) => void): Promise<string> {
   const context: Context = { ...config.context, race: {} };
-  const execution = await JuncoGraph.fromYaml<Context>(profile.withProbes(document), { ...config, scheduler, code, context });
+  const execution = await JuncoGraph.fromYaml<Context>(runDocument, { ...config, scheduler, code, context });
   try {
+    observe?.(execution.graph);
     await execution.run({ signal: config.signal });
     const terminal = execution.graph.result(execution.graph.sink.id);
     if (terminal._tag !== "Some") throw new Error(`workflow stopped without a terminal report; unfinished: ${unfinished(execution.graph)}`);

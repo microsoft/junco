@@ -17,24 +17,10 @@ import {
   fauxToolCall,
   type ToolCall,
 } from "@earendil-works/pi-ai";
-import { JuncoGraph, schedules, tracer } from "junco";
+import { graph, JuncoGraph, schedules, tracer } from "junco";
 import { JuncoAgent } from "junco-agent";
-import { LockPolicy, type NativeModule, ToolCollection } from "junco-tools";
-import { nativeOptions } from "./support.ts";
-
-// Runtime-built artifact (`bun run build:native:test` in packages/junco-tools); absent until built.
-const native = await import(
-  fileURLToPath(
-    new URL(
-      "../packages/junco-tools/target/native-test/index.js",
-      import.meta.url,
-    ),
-  )
-);
-const copyTree = {
-  ...native,
-  NativeMux: { open: native.NativeMux.openCopyTree.bind(native.NativeMux) },
-} as unknown as NativeModule;
+import { LockPolicy, ToolCollection } from "junco-tools";
+import { copyTreeNative, offlineLadder } from "./support.ts";
 
 const PYTHON =
   "import sys, time\ndata = bytearray(int(sys.argv[1]) * 1024 * 1024)\nfor i in range(0, len(data), 4096):\n    data[i] = 1\ntime.sleep(20)\n";
@@ -52,7 +38,7 @@ type Result = {
 const seen: Record<string, Result[]> = { A: [], B: [] };
 const userMessages: Record<string, string[]> = { A: [], B: [] };
 const tokens: Record<string, number> = { A: 0, B: 0 };
-const agents: Record<string, JuncoAgent> = {};
+const owners = new Set<string>();
 
 /** A faux step that first records `node`'s latest real tool result, then answers via `next`. */
 const step =
@@ -163,7 +149,18 @@ const b = (results: Result[]) => {
       return fauxAssistantMessage("B done");
   }
 };
-const B_SCRIPT = Array.from({ length: 32 }, () => step("B", b));
+const bStep = step("B", b);
+const respond: FauxResponseFactory = (context, ...args) => {
+  const first = context.messages.find((m) => m.role === "user");
+  assert.ok(first);
+  const instruction = typeof first.content === "string" ? first.content : contentText(first.content);
+  if (instruction === "Allocate, wait for A, then map the code graph.")
+    return bStep(context, ...args);
+  assert.equal(instruction, "Allocate, edit src/a.ts, release it, and notify B.");
+  const next = A_SCRIPT.shift();
+  assert.ok(next, "A's script is exhausted");
+  return next(context, ...args);
+};
 
 const root = await mkdtemp(join(tmpdir(), "junco-grafana-live-"));
 const seed = join(root, "seed");
@@ -199,7 +196,7 @@ try {
   const sampled = new Set<string>();
   let started = false;
   const collection = await ToolCollection.create(seed, {
-    native: copyTree,
+    native: await copyTreeNative(),
     policy: LockPolicy,
     sandbox: "always",
     resources: { monitorIntervalMs: 100 },
@@ -222,25 +219,20 @@ try {
       recorder,
       tracer: new tracer.DummyTracer(),
       scheduler: () => schedules.parallel(),
-      createAgent: async (spec) => {
-        const agent = await JuncoAgent.fromResolved({
-          ...(await nativeOptions(spec.node === "A" ? A_SCRIPT : B_SCRIPT))
-            .options,
-          systemPrompt: "leaf",
-          tools: spec.tools,
-          tool_block: spec.tool_block ?? [],
-          collection: spec.collection,
-          recorder: spec.recorder,
-          recorderNodeId: spec.recorderNodeId,
-        });
-        agent.events.on("usage", ({ row }) => {
-          tokens[spec.node]! += row.usage.totalTokens;
-        });
-        agents[spec.node] = agent;
-        return agent;
-      },
+      ladder: await offlineLadder(respond),
     });
     try {
+      const outer = execution.graph.getNode(graph.NodeId.create("nodeId1"))?.state;
+      assert.ok(outer instanceof JuncoGraph);
+      const inner = outer.getNode(graph.NodeId.create("nodeId2"))?.state;
+      assert.ok(inner instanceof JuncoGraph);
+      for (const id of ["A", "B"]) {
+        const member: unknown = inner.getNode(graph.NodeId.create(id))?.state;
+        assert.ok(member instanceof JuncoAgent);
+        assert.ok(member.owner);
+        owners.add(member.owner);
+        member.events.on("usage", ({ row }) => { tokens[id]! += row.usage.totalTokens; });
+      }
       await execution.run();
     } finally {
       await execution.graph.close();
@@ -257,7 +249,7 @@ try {
         false,
         `${node} ${result.name}: ${result.text}`,
       );
-  assert.ok(agents.A && agents.B && agents.A.owner !== agents.B.owner);
+  assert.equal(owners.size, 2);
   assert.equal(
     await readFile(join(seed, "src/a.ts"), "utf8"),
     "export function ping() { return 22; }\n",

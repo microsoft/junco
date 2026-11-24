@@ -4,26 +4,14 @@ import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  AgentTool,
-  PromptTemplate,
-  Skill,
-} from "@earendil-works/pi-agent-core";
+import { contentText, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { DataflowNodeError } from "dataflow-engine";
 import { fitProfiles, parseSamples } from "dataflow-profile";
-import { JuncoGraph, MockAgent, schedules, tracer } from "junco";
+import { graph, JuncoGraph, schedules, syntax, tracer } from "junco";
 import { AssistantMessageSchema } from "junco-agent";
-import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
-import type { AgentSpec } from "../src/syntax/build.ts";
 import { parse } from "../src/syntax/parse.ts";
-import {
-  assistant,
-  failed,
-  run,
-  settle,
-  textOf,
-} from "./deterministic-support.ts";
+import { countedCollection, offlineLadder } from "./support.ts";
 
 const prompt = {
   type: "object",
@@ -72,25 +60,25 @@ const document = () =>
     },
   });
 
-const mock = (transcript: ConstructorParameters<typeof MockAgent>[0]) =>
-  new MockAgent<Skill, PromptTemplate, AgentTool, TSchema, unknown>(transcript);
 const text = (value: unknown) => {
   assert.ok(Value.Check(AssistantMessageSchema, value));
-  return textOf(value);
+  return contentText(value.content);
 };
-const createAgent = async ({ node }: AgentSpec) =>
-  mock({
-    runs: [
-      run([
-        settle(assistant(node === "Worker" ? "WORKER-OUT" : "FINAL-OUT"), {
-          drain: ["steer"],
-        }),
-      ]),
-    ],
-  });
-const options = (cwd: string) => ({
+const options = async (
+  cwd: string,
+  resources: AsyncDisposableStack,
+  final = fauxAssistantMessage("FINAL-OUT"),
+) => ({
   cwd,
-  createAgent,
+  collection: resources.adopt(countedCollection().collection, (c) => c.close()),
+  ladder: await offlineLadder(({ messages }) => {
+    const first = messages.find((m) => m.role === "user");
+    assert.ok(first);
+    const instruction = typeof first.content === "string" ? first.content : contentText(first.content);
+    if (instruction === "work") return fauxAssistantMessage("WORKER-OUT");
+    assert.equal(instruction, "Process the report in the user message following this prompt.");
+    return final;
+  }),
   scheduler: () => schedules.parallel(),
   tracer: new tracer.DummyTracer(),
 });
@@ -100,13 +88,15 @@ test("recorded nested activations fit offline profiles by node path", async () =
   try {
     const path = join(directory, "samples.jsonl");
     const recorder = new tracer.JsonlRecorder({ path, monitored: true });
+    await using resources = new AsyncDisposableStack();
+    resources.defer(() => recorder.close());
     const doc = document();
     const execution = await JuncoGraph.fromYaml(doc, {
-      ...options(directory),
+      ...await options(directory, resources),
       recorder,
       measurementWindows: new Map([["memory", 1]]),
       scheduler: () => (snapshot) => {
-        // Offline monitored rows include zero for these mocks; no native pipeline measured it.
+        // No shell pipelines ran to supply scheduler memory measurements.
         assert.equal(snapshot.measurements.size, 0);
         return { selected: schedules.select(snapshot, snapshot.available) };
       },
@@ -141,8 +131,16 @@ test("recorded nested activations fit offline profiles by node path", async () =
           runtime !== undefined && Number.isFinite(runtime) && runtime >= 0,
         );
         assert.equal(sample.resources.memory, 0);
-        assert.deepEqual(sample.units, { runtime: "ms", memory: "B" });
-        assert.equal(Object.hasOwn(sample.resources, "tokens"), false);
+        if (sample.node === "Final" || sample.node === "Inner/Worker") {
+          const assignment = sample.node === "Final" ? "Inner~>Final" : "$source~>Worker";
+          if (assignment in sample.features) assert.ok((sample.resources.tokens ?? 0) > 0);
+          else assert.equal(sample.resources.tokens, 0);
+          assert.equal(sample.resources.cost, 0);
+          assert.deepEqual(sample.units, { runtime: "ms", memory: "B", tokens: "tok", cost: "USD" });
+        } else {
+          assert.deepEqual(sample.units, { runtime: "ms", memory: "B" });
+          assert.equal(Object.hasOwn(sample.resources, "tokens"), false);
+        }
       }
 
       const { file } = fitProfiles(samples, { fittedAt: "2026-10-20" });
@@ -163,14 +161,19 @@ test("failed activations are excluded while successful activations survive a fai
   try {
     const path = join(directory, "samples.jsonl");
     const recorder = new tracer.JsonlRecorder({ path });
-    const cause = new Error("provider down");
+    await using resources = new AsyncDisposableStack();
+    resources.defer(() => recorder.close());
+    const failure = fauxAssistantMessage("", { stopReason: "error", errorMessage: "provider down" });
+    let cause: unknown;
     const execution = await JuncoGraph.fromYaml(document(), {
-      ...options(directory),
+      ...await options(directory, resources, failure),
       recorder,
-      createAgent: async (spec) =>
-        spec.node === "Final"
-          ? mock({ runs: [run([{ step: failed(cause), drain: ["steer"] }])] })
-          : createAgent(spec),
+      agentOptions: new Map<graph.NodeIdType, syntax.YamlAgentOptions>([
+        [graph.NodeId.create("Final"), { errorHandler: ({ error }) => {
+          cause = error;
+          throw error;
+        } }],
+      ]),
     });
     try {
       await assert.rejects(
@@ -178,7 +181,9 @@ test("failed activations are excluded while successful activations survive a fai
         (error: unknown) =>
           error instanceof DataflowNodeError &&
           error.nodeId === "Final" &&
-          error.error === cause,
+          error.error === cause &&
+          error.error instanceof Error &&
+          error.error.message === "provider down",
       );
       await recorder.flush();
       const samples = parseSamples(readFileSync(path, "utf8"));
@@ -190,7 +195,8 @@ test("failed activations are excluded while successful activations survive a fai
         [{}],
       );
       for (const sample of samples) {
-        assert.deepEqual(sample.units, { runtime: "ms" });
+        const agent = sample.node === "Final" || sample.node === "Inner/Worker";
+        assert.deepEqual(sample.units, agent ? { runtime: "ms", tokens: "tok", cost: "USD" } : { runtime: "ms" });
         assert.equal(Object.hasOwn(sample.resources, "memory"), false);
       }
     } finally {
@@ -207,8 +213,10 @@ test("flush reports an append failure queued at run end", async () => {
   );
   try {
     const recorder = new tracer.JsonlRecorder({ path: directory });
+    await using resources = new AsyncDisposableStack();
+    resources.defer(async () => { await assert.rejects(recorder.close(), { code: "EISDIR" }); });
     const execution = await JuncoGraph.fromYaml(document(), {
-      ...options(directory),
+      ...await options(directory, resources),
       recorder,
     });
     try {

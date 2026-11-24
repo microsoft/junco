@@ -5,7 +5,6 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   type AssistantMessage,
   type Context,
@@ -17,8 +16,7 @@ import {
   type Message,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { graph, schedules, syntax, tools, tracer } from "junco";
-import type { NativeModule } from "junco-tools";
+import { agent, graph, schedules, syntax, tools, tracer } from "junco";
 import {
   createBenchmarkRecorder,
   createContainerMemorySampler,
@@ -27,30 +25,18 @@ import {
   isTestPath,
   ladderOf,
   marshOptions,
-  type Owner,
   type PairRequest,
   pairOutcome,
   parseRequest,
   readContainerMemoryPeak,
   verdicts,
-  type YamlAgent,
 } from "../examples/cooperbench/wf.ts";
 import { userTexts } from "./deterministic-support.ts";
+import { copyTreeNative, countedCollection, offlineLadder } from "./support.ts";
 
 const MODELS = { worker: "faux/worker", leader: "faux/leader" } as const;
 const THINKING = "medium" as const;
-const native = await import(
-  fileURLToPath(
-    new URL(
-      "../packages/junco-tools/target/native-test/index.js",
-      import.meta.url,
-    ),
-  )
-);
-const copyTree = {
-  ...native,
-  NativeMux: { open: native.NativeMux.openCopyTree.bind(native.NativeMux) },
-} as unknown as NativeModule;
+const copyTree = await copyTreeNative();
 
 /** What one agent does next, given its transcript so far; `step` counts its previous model turns. */
 type Script = (
@@ -223,58 +209,38 @@ async function pair(
     models,
     ladderOf(req.models, req.thinking),
   );
-  const owners: Owner[] = [];
-  const leaders = new Map<string, YamlAgent>();
-  const directory = mkdtempSync(join(tmpdir(), "cooperbench-native-"));
-  const collection = await tools.ToolCollection.create(directory, {
-    ...marshOptions,
-    native: copyTree,
-  });
-  const created = await createPair(req, {
-    ladder,
-    tracer: new tracer.DummyTracer(),
-    recorder,
-    signal,
-    collection,
-    cwd: directory,
-    createAgent: async (spec, owner) => {
-      owners.push(owner);
-      // Descendant lifecycle fixtures deliberately enable task; the canonical graph blocks it.
-      const fixtureSpec = Object.keys(scripts).some((name) =>
-        name.startsWith("CHILD-"),
-      )
-        ? { ...spec, tool_block: [] }
-        : spec;
-      const created = await syntax.createJuncoAgent(fixtureSpec, ladder);
-      leaders.set(spec.node, created);
-      return created;
-    },
-  });
-  const closeGraph = created.execution.graph.close.bind(
-    created.execution.graph,
-  );
-  created.execution.graph.close = async () => {
-    try {
-      await closeGraph();
-    } finally {
-      try {
-        await collection.close();
-      } finally {
-        rmSync(directory, { recursive: true, force: true });
-      }
+  const workflow = structuredClone(document);
+  if (Object.keys(scripts).some((key) => key.startsWith("CHILD-"))) {
+    // Only these fixture documents permit delegation; never modify the benchmark definition.
+    for (const name of ["Agent1", "Agent2"]) {
+      const node = workflow.graph.nodes[name]!;
+      assert.ok(node.kind === undefined || node.kind === "agent");
+      node.tool_block = node.tool_block?.filter((tool) => tool !== "task") ?? [];
     }
-  };
-  return { ...created, calls, owners, directory, leaders };
+  }
+  await using setup = new AsyncDisposableStack();
+  const directory = setup.adopt(mkdtempSync(join(tmpdir(), "cooperbench-native-")), (p) => rmSync(p, { recursive: true, force: true }));
+  const collection = setup.adopt(await tools.ToolCollection.create(directory, {
+    ...marshOptions, native: copyTree,
+  }), (c) => c.close());
+  const events: Record<string, unknown>[] = [];
+  const created = await createPair(req, {
+    ladder, tracer: new tracer.DummyTracer(), recorder, signal, collection, cwd: directory,
+    emit: (record) => { events.push(record); },
+  }, workflow);
+  setup.defer(() => created.execution.graph.close());
+  const owned = setup.move();
+  return { ...created, calls, events, directory, close: () => owned.disposeAsync() };
 }
 
 async function closed<T>(
-  execution: { graph: { close(): Promise<void> } },
+  pair: { close(): Promise<void> },
   body: () => Promise<T>,
 ): Promise<T> {
   try {
     return await body();
   } finally {
-    await execution.graph.close();
+    await pair.close();
   }
 }
 const jsonl = (path: string) =>
@@ -365,7 +331,7 @@ test.each([false, true])(
         interrupt.signal,
         recorder,
       );
-      await closed(run.execution, async () => {
+      await closed(run, async () => {
         const running = run.execution.run().catch((error) => {
           if (!interrupt.signal.aborted) throw error;
         });
@@ -374,19 +340,11 @@ test.each([false, true])(
           const deadline = Date.now() + 10_000;
           for (;;) {
             await recorder!.flush().catch(() => undefined);
-            const childUsage = jsonl(
-              join(directory, "profile_events.jsonl"),
-            ).filter(
-              (row) =>
-                row.node_ids.length === 2 &&
-                row.event.kind === "usage" &&
-                row.event.resource === "tokens",
-            );
-            if (childUsage.length === 3) break;
-            assert.ok(
-              Date.now() < deadline,
-              "native child usage was not committed",
-            );
+            const usage = jsonl(join(directory, "profile_events.jsonl"))
+              .filter(({ event }) => event.kind === "usage" && event.resource === "tokens");
+            if (usage.filter(({ node_ids }) => node_ids.length === 2).length === 3) break;
+            if (Date.now() >= deadline)
+              assert.fail(`Expected three native child usage rows, got paths: ${JSON.stringify(usage.map(({ node_ids }) => node_ids))}`);
             await Bun.sleep(1);
           }
         } finally {
@@ -491,7 +449,8 @@ test.each([false, true])(
       expect(
         tokens.reduce((total, row) => total + row.event.usage.totalTokens, 0),
       ).toBeGreaterThan(0);
-      expect(rows.some((row) => row.event.kind === "resource")).toBe(false);
+      // These tools report operations, not per-pipeline memory; no container sampler was started here.
+      expect(rows.filter(({ event }) => event.kind === "resource" || event.operation === "container_memory")).toEqual([]);
       const after = JSON.parse(
         readFileSync(join(directory, "telemetry.json"), "utf8"),
       );
@@ -891,11 +850,12 @@ test("the Architect receives both assignments, teams receive only theirs, and pe
     agent1: { task: `Implement ${SENTINEL.agent1}.` },
     agent2: { task: `Implement ${SENTINEL.agent2}.` },
   });
-  const { execution, calls, owners, stats } = await pair(req, {
+  const run = await pair(req, {
     Agent1: leader("agent1"),
     Agent2: leader("agent2"),
   });
-  await closed(execution, async () => {
+  const { execution, calls, events, stats } = run;
+  await closed(run, async () => {
     const results = await execution.run();
     expect(
       syntax.finalText(results.get(graph.NodeId.create("Agent1")), "Agent1"),
@@ -945,19 +905,48 @@ test("the Architect receives both assignments, teams receive only theirs, and pe
     expect(delivered.split(NOTE[other]).length - 1).toBe(1);
     expect(delivered).not.toContain(NOTE[key]);
   }
-  expect(owners.map((o) => [o.team, o.node_id])).toEqual([
-    ["agent1", "Architect"],
-    ["agent1", "Tester1"],
-    ["agent1", "Implementer1"],
-    ["agent1", "Agent1"],
-    ["agent2", "Tester2"],
-    ["agent2", "Implementer2"],
-    ["agent2", "Agent2"],
-  ]);
+  const owners = new Set(events.map(({ agent_id, node_id }) => `${agent_id}:${node_id}`));
+  expect(owners).toEqual(new Set([
+    "agent1:Architect", "agent1:Tester1", "agent1:Implementer1", "agent1:Agent1",
+    "agent2:Tester2", "agent2:Implementer2", "agent2:Agent2",
+  ]));
 }, 20_000);
 
+test("same-named agents in nested teams emit under separate qualified paths", async () => {
+  const nested = (id: string): syntax.NodeSpec => ({ kind: "graph", graph: {
+    source: { routes: { [`$source~>${id}`]: ["deliver"] } },
+    nodes: { "Worker/Report": { prompt: `Return the ${id} report.` } },
+    edges: [
+      { from: "$source", to: "Worker/Report", kind: "message", id: "deliver", schema: {} },
+      { from: "Worker/Report", to: "$sink", schema: {} },
+    ],
+  } });
+  const workflow: syntax.JuncoDocument = { graph: {
+    source: { routes: { "assignment-1": ["$source~>Team~1"], "assignment-2": ["$source~>Team~2"] } },
+    nodes: { "Team~1": nested("Team~1"), "Team~2": nested("Team~2") },
+    sink: { returns: "Team~1" },
+    edges: [
+      { from: "$source", to: "Team~1", kind: "message", schema: {} },
+      { from: "$source", to: "Team~2", kind: "message", schema: {} },
+      { from: "Team~1", to: "$sink", schema: {} }, { from: "Team~2", to: "$sink", schema: {} },
+    ],
+  } };
+  const ladder = await offlineLadder((context) => done(userTexts(context.messages)[0]!));
+  await using lifetime = new AsyncDisposableStack();
+  const collection = lifetime.adopt(countedCollection().collection, (c) => c.close());
+  const owners = new Set<string>();
+  const { execution, stats } = await createPair(request(), {
+    ladder, collection, tracer: new tracer.DummyTracer(), signal: new AbortController().signal,
+    emit: ({ agent_id, node_id }) => { owners.add(`${agent_id}:${node_id}`); },
+  }, workflow);
+  lifetime.defer(() => execution.graph.close());
+  await execution.run();
+  expect(stats).toEqual({ agents: 2, workers: 0 });
+  expect(owners).toEqual(new Set(["agent1:Team~01/Worker~1Report", "agent2:Team~02/Worker~1Report"]));
+});
+
 test("a late peer note cannot start a second integrator run", async () => {
-  const { execution, calls } = await pair(request(), {
+  const run = await pair(request(), {
     Agent1: steps(() => done("already finished")),
     Agent2: steps(
       () => call("yield", { reason: "still integrating" }),
@@ -975,7 +964,8 @@ test("a late peer note cannot start a second integrator run", async () => {
       },
     ),
   });
-  await closed(execution, async () => {
+  const { execution, calls } = run;
+  await closed(run, async () => {
     const results = await execution.run();
     expect(syntax.finalText(results.get(graph.NodeId.create("Agent1")), "Agent1")).toBe("already finished");
     expect(syntax.finalText(results.get(graph.NodeId.create("Agent2")), "Agent2")).toBe("peer finished");
@@ -985,11 +975,12 @@ test("a late peer note cannot start a second integrator run", async () => {
 }, 20_000);
 
 test("both leaders' own reports decide Submitted: an abnormal member report cannot hide behind the lead's sink result", async () => {
-  const { execution } = await pair(request(), {
+  const run = await pair(request(), {
     Agent1: steps(() => done("Agent1 done")),
     Agent2: steps(() => fauxAssistantMessage("", { stopReason: "length" })),
   });
-  const values = await closed(execution, async () => {
+  const { execution } = run;
+  const values = await closed(run, async () => {
     const results = await execution.run();
     // The sink retains Agent1's report even though Agent2 ended abnormally.
     expect(execution.graph.result(execution.graph.sink.id)._tag).toBe("Some");
@@ -1209,18 +1200,23 @@ test("leaders deny competing writes, keep disjoint files, and release permits ha
     ),
   });
   const drive = async (name: string) => {
-    const agent = run.leaders.get(name)!;
-    if (agent.status === "idle")
-      agent.stagePrompt(`You are ${name}; exercise the ownership boundary.`);
+    const agentState = run.execution.graph.getNode(graph.NodeId.create(name))!.state;
+    assert.ok(agentState instanceof agent.JuncoAgent);
+    const values = new Map([
+      [graph.EdgeId.create(`Architect->${name}`), done("Coordinate file ownership")],
+      [graph.EdgeId.create(`Implementer${name.slice(-1)}->${name}`), done("Ready for review")],
+    ]);
+    if (agentState.status === "idle")
+      agentState.stagePrompt(`You are ${name}; exercise the ownership boundary.`);
     for (;;) {
-      const step = await agent.next({ values: new Map(), messages: new Map() });
+      const step: IteratorResult<agent.AgenticStep, void> = await agentState.next({ values, messages: new Map() });
       assert.equal(step.done, false);
       if (step.value?.kind === "failed") throw step.value.error;
       if (step.value?.kind === "settled")
         return syntax.finalText(step.value.message, name);
     }
   };
-  await closed(run.execution, async () => {
+  await closed(run, async () => {
     expect(await drive("Agent1")).toBe("claimed");
     expect(await drive("Agent2")).toBe(
       "denied competitor; independent write completed",
@@ -1250,7 +1246,8 @@ test("native descendants use the worker model and common thinking, inherit polic
       () => call("release", { file: "owned.txt" }),
       () => done("Agent1 done"),
     ),
-    Agent2: idleLeader,
+    Agent2: steps(() => task("CHILD-peer"), () => done("Agent2 interim"), () => done("Agent2 done")),
+    "CHILD-peer": steps(() => done("peer child completed")),
     "CHILD-worker": steps(
       () => bash("printf overwritten > owned.txt"),
       (context) => {
@@ -1270,11 +1267,20 @@ test("native descendants use the worker model and common thinking, inherit polic
       },
     ),
   });
-  await closed(run.execution, async () => {
+  await closed(run, async () => {
     await run.execution.run();
     expect(childDenied).toBe(true);
     expect(grandchildRead).toBe(true);
-    expect(run.stats.workers).toBe(2);
+    expect(run.stats.workers).toBe(3);
+    for (const [report, team] of [
+      ["child interim", "agent1"], ["grandchild read completed", "agent1"], ["peer child completed", "agent2"],
+    ]) {
+      const reports = run.events.filter(({ type, message }) => {
+        const msg = message as Message | undefined;
+        return type === "message" && msg?.role === "assistant" && contentText(msg.content) === report;
+      });
+      expect(reports.map((r) => r.agent_id)).toEqual([team]);
+    }
     expect(readFileSync(join(run.directory, "owned.txt"), "utf8")).toBe(
       "leader-owned",
     );
@@ -1319,7 +1325,7 @@ test.each([
       ),
       Agent2: idleLeader,
     });
-    await closed(run.execution, () => run.execution.run());
+    await closed(run, () => run.execution.run());
     expect(rejection?.isError).toBe(true);
     expect(rejection?.text).toMatch(/task|unknown tool/i);
     expect(run.calls.some((call) => call.agent === "CHILD-forbidden")).toBe(
@@ -1370,7 +1376,7 @@ test("a failed worker leaves its published data owned; its parent cannot edit or
         }),
     ),
   });
-  await closed(run.execution, async () => {
+  await closed(run, async () => {
     await run.execution.run();
     expect(editDenied).toBe(true);
     expect(releaseDenied).toBe(true);
@@ -1400,7 +1406,7 @@ test("pair completion waits for a live native child even after its leader gives 
       return done("child completed");
     },
   });
-  await closed(run.execution, async () => {
+  await closed(run, async () => {
     let complete = false;
     const running = run.execution.run().finally(() => {
       complete = true;

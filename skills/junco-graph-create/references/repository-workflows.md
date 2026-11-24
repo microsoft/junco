@@ -8,7 +8,7 @@ Record the task, requested scope, output, permissions, parallelism, handoffs and
 
 ## 2. Establish prerequisites
 
-Require Bun, a resolvable public `junco` package and an absolute repository root for validation and execution. Do not require `code_graph` in omp's tool inventory or stop authoring because it is absent. Use omp's available file, search and semantic-navigation tools to inspect README scope, source and interfaces. Do not install anything or invoke `code_graph` through a CLI or host-side substitute; configure it in the relevant Junco agents' YAML `tools:` instead. A failure to resolve a configured tool during build or execution is a runtime prerequisite failure; report it without fabricating graph evidence.
+Require Bun, a resolvable public `junco` package and an absolute repository root. Use omp's available file, search and semantic-navigation tools to inspect README scope, source and interfaces. Do not require `code_graph` in omp, install it or invoke it through a host-side substitute. At execution time, `code_graph` comes from the Junco agent's native collection; block it by name on roles that do not need it. Report missing native seeds or other runtime prerequisites rather than fabricating evidence.
 
 Follow SKILL.md **Model selection** unchanged: catalog, saved credentials, dated official freshness evidence, supported thinking levels and user overrides. Declare the complete five-rung ladder in the paired TypeScript; catalog presence alone does not establish authorization. Report missing prerequisites rather than invent model identities or claim live execution.
 
@@ -50,7 +50,7 @@ Cyclic code does not require cyclic execution. Settle a shared interface first o
 
 ## 7. Author valid YAML directly
 
-Use task-oriented names, brief source-grounded responsibilities, explicit consumable work triggers and registered prompts containing artifact and acceptance requirements, following SKILL.md syntax. Include only permitted tools. A read-only role has no edit, release or change-report instructions; constrain any shell access to read-only operations. Editing roles coordinate shared-file handoffs without claiming exclusive ownership or inventing hard file boundaries beyond the user's restrictions.
+Use task-oriented names, brief source-grounded responsibilities, explicit consumable work triggers and prompts containing artifact and acceptance requirements. Use `tool_block` to exclude every unauthorized default. Read-only roles must not have a writing tool or unrestricted shell; merely asking the model not to edit does not restrict its tools. Map any approved role-specific capabilities to that role's qualified ID. Editing roles coordinate shared-file handoffs without claiming exclusive ownership or inventing hard file boundaries beyond the user's restrictions.
 
 Prefer flat workers unless a requested loop or nested agency needs wrappers. Use the standard Ralph pattern when appropriate. Write valid runtime YAML from the outset: no `files` metadata, post-processing pass, intermediate workflow schema, topology generator or exhaustive repository manifest.
 
@@ -82,7 +82,7 @@ Use width N only at that root and width 1 at every inner level. Each active subt
 
 ## 10. Validate, run when allowed, then report
 
-Run `syntax.parse(source)` and `schedules.validateLadder(ladder)` before agent acquisition. Resolve collection tool names through the existing collection when needed (`syntax.resolveAgents` with the collection), not a new tools adapter. Preserve an offline-only or do-not-run stop condition. Offline parsing does not prove live credentials, agent quality or runtime success.
+Run `syntax.parse(source)` and `schedules.validateLadder(ladder)` before agent acquisition. Use `syntax.resolveAgents(document, { cwd })` for qualified role IDs and skill metadata; it neither opens collections nor verifies tool exposure. Check grants against the actual collection and YAML exclusions before execution. Preserve an offline-only or do-not-run stop condition. Offline parsing does not prove live credentials, agent quality or runtime success.
 
 Adapt SKILL.md's runner with the authored scheduler, verified models/ladder and any exported code nodes. An exported runner must also return the terminal text. This lifecycle helper uses the root sink selection rather than an arbitrary graph root:
 

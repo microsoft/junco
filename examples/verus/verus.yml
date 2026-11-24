@@ -2,10 +2,10 @@
 # Gates and the model ladder are defined in verus.ts.
 graph:
   name: Verus
+  source:
+    routes: { assignment: ["$source~>Verifier"] }
+  sink: { trigger: never }
   nodes:
-    VerifierAssignment:
-      kind: code
-      description: Deliver the workspace, specification and previous feedback once for this round.
     Verifier:
       system: |-
         You are one of exactly three persistent roles in a continuous Verus loop, not an approval gate.
@@ -21,12 +21,12 @@ graph:
         For Cargo, configure each copied package that needs verification with [package.metadata.verus] verify = true and the required vstd dependency, preserving package names. Inspect installed vstd metadata/context through the MCP before adding a dependency; use its exact registry version (version = "=<version>") and retain existing compatible declarations. Missing version metadata is an explicit Cargo-setup diagnostic, never a guessed version. Keep Cargo default features; the copied lockfile may be updated, no --locked requirement.
         Address both previous Reviewer recommendations and Cleanup observations every subsequent cycle. Check translated source with the Verus MCP diagnostics tools; preserve full diagnostics in your report.
       description: "Translate Rust and infer local specifications"
-      trigger: "VerifierAssignment~>Verifier"
+      trigger: "$source~>Verifier"
       prompt: Translate or repair the current output for the delivered assignment and address both feedback reports. Write actual source, then report evidence and unresolved obligations.
     PrepareReviewer:
       kind: code
       description: Validate the Verifier report and sample the per-round Reviewer diagnostics baseline.
-      trigger: "Verifier->PrepareReviewer"
+      trigger: "Verifier~>PrepareReviewer"
     Reviewer:
       system: |-
         You are one of exactly three persistent roles in a continuous Verus loop, not an approval gate.
@@ -46,7 +46,7 @@ graph:
     PrepareCleanup:
       kind: code
       description: Validate the Reviewer report and require fresh diagnostics before preparing Cleanup.
-      trigger: "Reviewer->PrepareCleanup"
+      trigger: "Reviewer~>PrepareCleanup"
     Cleanup:
       system: |-
         You are one of exactly three persistent roles in a continuous Verus loop, not an approval gate.
@@ -63,12 +63,23 @@ graph:
       trigger: "PrepareCleanup~>Cleanup"
       prompt: Use the delivered assignment and current Reviewer report as evidence. Simplify real source and proofs without weakening contracts. Check edits with Verus MCP diagnostics; retain unresolved stronger-spec recommendations for the next Verifier.
   edges:
-    - from: VerifierAssignment
+    - from: $source
       to: Verifier
       kind: message
-      schema: { type: string }
+      schema:
+        type: object
+        required: [kind, text, taskId, spec, deps, history]
+        properties:
+          kind: { const: prompt }
+          text: { type: string }
+          taskId: { type: string }
+          spec: { type: string }
+          deps: { type: array, items: { type: string } }
+          history: { type: array, items: { type: object } }
     - from: Verifier
       to: PrepareReviewer
+      kind: message
+      on: return
       schema: &assistant
         type: object
         required: [role, content, stopReason]
@@ -104,6 +115,8 @@ graph:
           report: *assistant
     - from: Reviewer
       to: PrepareCleanup
+      kind: message
+      on: return
       schema: *assistant
     - from: PrepareCleanup
       to: Cleanup
@@ -112,3 +125,6 @@ graph:
     - from: Cleanup
       to: $sink
       schema: *assistant
+    - { from: Verifier, to: Verifier, schema: *assistant }
+    - { from: Reviewer, to: Reviewer, schema: *assistant }
+    - { from: Cleanup, to: Cleanup, schema: *assistant }

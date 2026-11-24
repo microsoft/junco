@@ -114,9 +114,9 @@ graph:
     - {from: Reviewer, to: $sink, schema: {}}
 ```
 
-`Goals` sends the question once to each browser agent. `first.ts` opens a separate Playwright MCP server for each through `createAgent`; `Reviewer` gets neither server. When both browser agents return, the reviewer consumes their reports through `{{Bun->Reviewer}}` and `{{Rust->Reviewer}}`.
+`Goals` sends the question once to each browser agent. `first.ts` maps a separate Playwright collection to each browser agent; `Reviewer` inherits the native default and gets neither browser. When both browser agents return, the reviewer consumes their reports through `{{Bun->Reviewer}}` and `{{Rust->Reviewer}}`.
 
-**Migration:** every graph-managed agent requires a reusable `prompt`. Its trigger admits a fresh run in the same session after settlement. `always` and resolved value cells remain true: a graph using either to drive a prompt can make unbounded model calls. For a finite run, send a one-shot assignment from `kind: emit`, or trigger on a consumable `kind: message, on: return` edge as above. Reaching `$sink` does not stop other runnable nodes. `step()` advances one scheduling decision.
+`fromYaml` constructs and owns each agent. A YAML `prompt` supplies its reusable instruction; a promptless agent can instead receive input or have an instruction staged by a controller. `always` and resolved value cells remain true: driving an agent with either can make unbounded model calls. For a finite run, send a one-shot assignment from `kind: emit`, or trigger on a consumable `kind: message, on: return` edge as above. Reaching `$sink` does not stop other runnable nodes. `step()` advances one scheduling decision.
 
 Set `repeat` on a YAML node to cap its work over the graph's lifetime. For example, `A: {prompt: Generate a unit test, trigger: always, repeat: 3}` runs the prompt at most three times **in total**, across all `step()` and `run()` calls. `repeat: 0` disables the node; omitting it leaves the node uncapped. A cap does not make a one-shot node run again, and it does not interrupt a prompt to limit its model turns.
 
@@ -124,7 +124,7 @@ The scheduler decides which queued messages a node reads: each `NodeModel` it se
 
 An ordinary selected message reaches the agent as a separate user message in delivery order. `Task` text and images arrive as message content with a `Task:` JSON line (`taskId`, `spec`, `deps`, `history`); other payloads arrive as `JSON.stringify({ id, payload })`. A `{{edge}}` placeholder can read a retained value or render the products consumed from an `on: return` FIFO, joined with a blank line. Products rendered in the prompt are not also steered. Ordinary message edges cannot be interpolated.
 
-Models and MCP servers are chosen in TypeScript. The YAML never names either:
+Every workflow containing agents needs a model ladder and a native-backed tool collection for each role. `tools` maps qualified agent IDs to collections, not tool names to functions. An omitted role uses `collection` or, if none was supplied, one native default shared by all unmapped agents. Use `tool_block` in YAML for exact-name exclusions; blocking all tools does not skip collection acquisition. A workflow with no agents needs neither a ladder nor a native seed.
 
 ```ts
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -135,16 +135,20 @@ const models = await ModelRuntime.create();
 const ladder = new schedules.ModelLadder(models, schedules.uniformLadder({ model: "github-copilot/claude-sonnet-5.5", thinking: "medium" }));
 const playwright = { name: "playwright", type: "stdio", command: "npx", args: ["-y", "@playwright/mcp@latest", "--headless"] } as const;
 /** One Playwright server, and so one browser, per browsing agent: its own collection. */
-const browsers = new Map<string, tools.ToolCollection>();
+const browsers = new Map<graph.NodeIdType, tools.ToolCollection>();
 const observer = tracer.TuiTracer.shared();
 let answer: string;
 try {
-  for (const node of ["Bun", "Rust"]) browsers.set(node, await new mcp.McpBuilder().add(playwright).build(process.cwd()));
+  await using collections = new AsyncDisposableStack();
+  for (const node of ["Bun", "Rust"]) {
+    const browser = await new mcp.McpBuilder().add(playwright).build(process.cwd());
+    browsers.set(graph.NodeId.create(node), collections.adopt(browser, (c) => c.close()));
+  }
   const execution = await JuncoGraph.fromYaml(source, {
     cwd: process.cwd(),
     scheduler: () => schedules.parallel(),
     ladder,
-    createAgent: (spec) => syntax.createJuncoAgent({ ...spec, collection: browsers.get(spec.node) }, ladder),
+    tools: browsers,
     tracer: observer,
   });
   try {
@@ -154,11 +158,12 @@ try {
     await execution.graph.close();
   }
 } finally {
-  for (const collection of browsers.values()) await collection.close();
   if (observer instanceof tracer.TuiTracer) await observer.finish();
 }
 console.log(answer);
 ```
+
+For a nested agent, use `graph.NodeId.create("Child/Worker")`; escape a literal `~` or `/` in each ID segment as `~0` or `~1`. The same keys select `agentOptions` (for example, a distinct session or an error handler per role). Supplied sessions transfer to the builder even on failure; supplied collections remain yours to close after the graph. For a custom tool, create a collection with `ToolCollection.create(cwd, { policy, extend })` and map it only to authorized agents. See the [authoring reference](skills/junco-graph-create/SKILL.md#runner) for allowed options.
 
 ```sh
 pi                                                      # once: `/login`, pick GitHub Copilot, quit

@@ -36,7 +36,6 @@ graph:
         ## Test setup — the project's test command(s) for the affected packages and the directory/naming pattern for new test files, as observed in the repository.
         ## Risks — existing tests likely affected, compatibility obligations, and spec statements that are easy to miss: exact representations (counts, shapes, ordering, case), nested/recursive application, lifecycle/reset semantics, immutability of inputs, error types and messages.
         Be concrete: paths, symbols, signatures. No prose outside these sections.
-      tools: [read, bash, grep, find, code_graph, ast_grep]
       tool_block: [task]
       trigger: arch-specs
     Tester1:
@@ -62,7 +61,6 @@ graph:
         TEST_COMMAND: <command that runs only your new tests>
         SUITE_COMMAND: <command that runs the affected package's existing tests>
         RED: yes|no   (yes = your tests currently fail only for the missing feature)
-      tools: &native [read, bash, edit, grep, find, ast_grep, ast_edit, diff, code_graph, release]
       tool_block: [task]
       trigger: { all: [team1-spec, Architect->Tester1] }
     Implementer1:
@@ -87,7 +85,6 @@ graph:
         ## Verdict
         TEST_COMMAND: <cmd> exit=<n>
         SUITE_COMMAND: <cmd> exit=<n>
-      tools: *native
       tool_block: [task]
       trigger: { all: [team1-spec-impl, Architect->Implementer1, Tester1->Implementer1] }
     Inbox1:
@@ -118,7 +115,6 @@ graph:
         TEST_COMMAND: <cmd> exit=<n>
         SUITE_COMMAND: <cmd> exit=<n>
         PEER_TESTS: <cmd> exit=<n> | not-run
-      tools: *native
       tool_block: [task]
       trigger: { all: [Inbox1~>Agent1, Architect->Agent1, Implementer1->Agent1] }
     Tester2:
@@ -144,7 +140,6 @@ graph:
         TEST_COMMAND: <command that runs only your new tests>
         SUITE_COMMAND: <command that runs the affected package's existing tests>
         RED: yes|no   (yes = your tests currently fail only for the missing feature)
-      tools: *native
       tool_block: [task]
       trigger: { all: [team2-spec, Architect->Tester2] }
     Implementer2:
@@ -169,7 +164,6 @@ graph:
         ## Verdict
         TEST_COMMAND: <cmd> exit=<n>
         SUITE_COMMAND: <cmd> exit=<n>
-      tools: *native
       tool_block: [task]
       trigger: { all: [team2-spec-impl, Architect->Implementer2, Tester2->Implementer2] }
     Inbox2:
@@ -200,7 +194,6 @@ graph:
         TEST_COMMAND: <cmd> exit=<n>
         SUITE_COMMAND: <cmd> exit=<n>
         PEER_TESTS: <cmd> exit=<n> | not-run
-      tools: *native
       tool_block: [task]
       trigger: { all: [Inbox2~>Agent2, Architect->Agent2, Implementer2->Agent2] }
   edges:

@@ -69,7 +69,7 @@ const requiredTools = [
  */
 const LADDER = schedules.uniformLadder({ model: "github-copilot/claude-sonnet-5.5", thinking: "medium" });
 
-/** The complete application: runs the graph once; closing it also closes its ShellMux. */
+/** Run both YAML agents against the same caller-owned Graft collection. */
 async function runMcpExample(signal?: AbortSignal): Promise<void> {
   let researchText: string;
   let dependencyText: string;
@@ -87,6 +87,7 @@ async function runMcpExample(signal?: AbortSignal): Promise<void> {
       (owned) => owned.close(),
     );
     const observer = tracer.TuiTracer.shared();
+    lifetime.defer(() => observer instanceof tracer.TuiTracer ? observer.finish() : undefined);
     const execution = await JuncoGraph.fromYaml(source, {
       cwd: repositoryRoot,
       ladder: new schedules.ModelLadder(models, LADDER),
@@ -98,7 +99,6 @@ async function runMcpExample(signal?: AbortSignal): Promise<void> {
       tracer: observer,
       signal,
     });
-    lifetime.defer(() => observer instanceof tracer.TuiTracer ? observer.finish() : undefined);
     lifetime.adopt(execution.graph, (g) => g.close());
     for (const id of ["Research", "Dependencies"]) {
       signal?.throwIfAborted();

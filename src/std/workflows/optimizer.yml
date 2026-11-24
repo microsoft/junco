@@ -20,7 +20,6 @@ graph:
       trigger: { any: [initial-state, feedback-state] }
     Editor:
       description: Authors one tuning-region patch per assignment through edit_tuning.
-      tools: [read_target, edit_tuning]
       tool_block: [ast_edit, ast_grep, bash, code_graph, diff, edit, find, grep, read, release, task, yield, send]
       trigger: editor-assignment
       prompt: >-

@@ -17,7 +17,7 @@ bun install --frozen-lockfile
 bun run --cwd packages/junco-tools build
 ```
 
-For live runs, open Pi and save a GitHub Copilot login (`pi` → `/login`). Your account needs access to `github-copilot/claude-sonnet-5.5` with medium thinking. The runner refreshes the model catalog and checks those requirements before starting. You don't need a Btrfs seed: neither LLM has tools, so the graph opens no ShellMux collection.
+For live runs, use a checkout inside a writable Btrfs seed and save a GitHub Copilot login in Pi (`pi` → `/login`). Your account needs access to `github-copilot/claude-sonnet-5.5` with medium thinking. The runner refreshes the model catalog and checks those requirements before starting. The graph owns a native collection; both LLM roles block all its tools.
 
 Run the reminder, then ask it to forward the email:
 
@@ -69,9 +69,10 @@ Live results depend on the plan the model writes. If it writes a literal body in
 
 ## Check it without a model
 
-Once the native addon is built, these checks need no model credentials:
+With the production addon built, build the CopyTree test addon and run these checks without model credentials:
 
 ```sh
+bun run --cwd packages/junco-tools build:native:test
 bun test ./test/camel.test.ts
 bun run test:junco-policy
 ```

@@ -1,8 +1,7 @@
-import {
-  type AgentTool,
-  BACKGROUND_CONTEXT,
-  MemorySessionRepo,
-} from "@earendil-works/pi-agent-core";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
   type Context,
   contentText,
@@ -10,20 +9,19 @@ import {
   fauxAssistantMessage,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import { DummyTracer } from "dataflow-engine";
-import { JuncoAgent } from "junco-agent";
-import { MARSH_POLICY_DENIED, SendTool, YieldTool } from "junco-tools";
+import { DummyTracer, NodeId, type NodeIdType } from "dataflow-engine";
+import { agent, schedules } from "junco";
+import { MARSH_POLICY_DENIED, ToolCollection } from "junco-tools";
 import { Type } from "typebox";
 import {
   convene,
+  createCommittee,
   type MemberId,
-  type Members,
   OssSearchTool,
   ReviewTool,
 } from "../examples/oss-committee/oss-committee.ts";
-import type { YamlAgent } from "../examples/support.ts";
 import { userTexts } from "./deterministic-support.ts";
-import { NATIVE_TOOL_BLOCK, scripted } from "./support.ts";
+import { copyTreeNative, fauxRuntime } from "./support.ts";
 
 export const request = "Design a C# TUI for committee decision history.";
 
@@ -104,7 +102,7 @@ function reportsFromPrompt(text: string, labels: readonly string[]): string[] {
  * lookups (default: one Terminal.Gui result) and ends with `reviews[r]`; `"skip"` omits the review
  * call. After a failed lookup the Librarian sends partial research on its declared edge
  * and yields; with `policyPauseBeforeSend` it is first paused by a policy denial.
- * Dispose it to close every member.
+ * Dispose it to close any open graph before its role-private tool collections.
  */
 export async function scriptedCommittee(
   script: {
@@ -112,6 +110,7 @@ export async function scriptedCommittee(
     readonly reviews?: readonly ScriptedReview[];
     readonly librarianStopReason?: "stop" | "length";
     readonly policyPauseBeforeSend?: boolean;
+    readonly waitForInput?: boolean;
   } = {},
 ) {
   const reviews = script.reviews ?? [approve];
@@ -157,10 +156,8 @@ export async function scriptedCommittee(
             id: "Librarian~>DesignAssignment",
             payload: { kind: "prompt", text: librarianReport },
             // Hand the received assignment on: its id is the `Task:` line of the latest user input.
-            task: JSON.parse(
-              memberInputs.Librarian.at(-1)!.split("\n\nTask: ").at(-1)!,
-            ).taskId,
-            spec: "",
+            task: JSON.parse(memberInputs.Librarian.at(-1)!.split("\n\nTask: ").at(-1)!).taskId,
+            spec: JSON.parse(memberInputs.Librarian.at(-1)!.split("\n\nTask: ").at(-1)!).spec,
             handoff: "partial research after a failed lookup",
           },
           { id: `librarian-send-${librarianRound + 1}` },
@@ -191,7 +188,7 @@ export async function scriptedCommittee(
             "yield",
             {
               reason: "Waiting for the Architect to use the partial research.",
-              waitForInput: true,
+              ...(script.waitForInput === false ? {} : { waitForInput: true }),
             },
             { id: `librarian-yield-${librarianRound + 1}` },
           ),
@@ -399,69 +396,47 @@ export async function scriptedCommittee(
     return fauxAssistantMessage(committeePlan(reducerInput, reducerRound + 1));
   };
 
-  const created: YamlAgent[] = [];
-  const member = async (
-    id: MemberId,
-    turn: FauxResponseFactory,
-    tools: Parameters<typeof JuncoAgent.fromResolved>[0]["tools"],
-  ) => {
-    const { models, model } = scripted(Array.from({ length: 32 }, () => turn));
-    // Match the truncated final's one-token usage; a shorter-than-budget `length` is native overflow recovery.
-    if (id === "Librarian" && librarianStopReason === "length")
-      model.maxTokens = 1;
-    const agent: YamlAgent = await JuncoAgent.fromResolved({
-      session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
-      models,
-      model,
-      systemPrompt: `You are the ${id} of a three-member design committee.`,
-      tools,
-      tool_block: NATIVE_TOOL_BLOCK,
-    });
-    created.push(agent);
-    return agent;
+  const scripts = { Librarian: librarian, Architect: architect, Reducer: reducer };
+  const { models, faux } = await fauxRuntime([], "faux", [
+    { id: "committee", ...(librarianStopReason === "length" ? { maxTokens: 1 } : {}) },
+  ]);
+  const respond: FauxResponseFactory = (context, ...rest) => {
+    const system = context.messages.filter(m => m.role === "system").map(m =>
+      typeof m.content === "string" ? m.content : contentText(m.content)).join("\n");
+    const role = Object.keys(scripts).find(id => system.includes(`You are the ${id}`)) as MemberId | undefined;
+    if (!role) throw new Error("Unknown committee role");
+    faux.appendResponses([respond]);
+    return scripts[role](context, ...rest);
   };
-  let members: Members;
-  try {
-    members = {
-      Librarian: await member("Librarian", librarian, [
-        search.tool,
-        new YieldTool(),
-        guardedTool,
-        new SendTool(),
-      ]),
-      Architect: await member("Architect", architect, []),
-      Reducer: await member("Reducer", reducer, [review.tool]),
-    };
-  } catch (error) {
-    await Promise.allSettled(created.map((agent) => agent.return()));
-    throw error;
+  faux.setResponses([respond]);
+  const ladder = new schedules.ModelLadder(models, schedules.uniformLadder({ model: "faux/committee" }));
+  await using setup = new AsyncDisposableStack();
+  const cwd = setup.adopt(await mkdtemp(join(tmpdir(), "committee-")), dir => rm(dir, { recursive: true, force: true }));
+  const native = await copyTreeNative();
+  const collections = new Map<NodeIdType, ToolCollection>();
+  for (const role of ["Librarian", "Architect", "Reducer"] as const) {
+    const extra: AgentTool[] = role === "Reducer" ? [review.tool] : role === "Librarian" ? [search.tool] : [];
+    if (role === "Librarian" && script.policyPauseBeforeSend) extra.push(guardedTool);
+    collections.set(NodeId.create(role), setup.adopt(await ToolCollection.create(cwd, {
+      native, extend: async () => ({ tools: extra, close: async () => {} }),
+    }), c => c.close()));
   }
-
-  return {
-    members,
-    search,
-    review,
-    memberInputs,
-    searchQueries,
-    modelRequests,
-    async [Symbol.asyncDispose]() {
-      await Promise.all(
-        Object.values(members).map((member) => member.return()),
-      );
+  const options = { cwd, tools: collections, ladder, tracer: new DummyTracer() };
+  const resources = setup.move();
+  return { search, review, memberInputs, searchQueries, modelRequests,
+    async open() {
+      const round = await createCommittee(request, search, options);
+      resources.use(round.execution.graph);
+      const librarian = round.execution.graph.getNode(NodeId.create("Librarian"))!.state;
+      if (!(librarian instanceof agent.JuncoAgent)) throw new Error("Missing built Librarian");
+      return { ...round, librarian };
     },
+    run: (observer = options.tracer, signal?: AbortSignal) => convene(request, { ...options, tracer: observer, signal }, search, review),
+    [Symbol.asyncDispose]: () => resources.disposeAsync(),
   };
 }
 
 if (import.meta.main) {
   await using committee = await scriptedCommittee();
-  console.log(
-    await convene(
-      request,
-      committee.members,
-      committee.search,
-      committee.review,
-      undefined,
-      new DummyTracer(),
-    ),
-  );
+  console.log(await committee.run());
 }

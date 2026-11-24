@@ -1452,6 +1452,24 @@ export function ralphSuccessModeTypes() {
   ];
 }
 
+export function yamlConstructorOptions(
+  node: graph.NodeIdType,
+  session: NonNullable<syntax.YamlAgentOptions["session"]>,
+  collection: tools.ToolCollection,
+  template: PromptTemplate,
+) {
+  const init: syntax.YamlAgentOptions = { session, steeringMode: "all", resources: { promptTemplates: [template] } };
+  const config: Pick<syntax.FromYamlOptions, "agentOptions" | "tools"> = {
+    agentOptions: new Map([[node, init]]),
+    tools: new Map([[node, collection]]),
+  };
+  // @ts-expect-error a caller cannot replace the YAML agent's ladder model
+  const wrongModel: syntax.YamlAgentOptions = { model: "other" };
+  // @ts-expect-error skill grants belong to the YAML document
+  const wrongResources: syntax.YamlAgentOptions = { resources: { skills: [] } };
+  return [config, wrongModel, wrongResources];
+}
+
 export function fanInSelectorTypes() {
   const all: string = workflows.allFanIn;
   const any: string = workflows.anyFanIn;

@@ -5,7 +5,7 @@
 // 1. Tools are ordinary Pi `AgentTool`s. The Librarian searches GitHub; the Reducer records a verdict;
 //    graph tools (`send`, `info`) carry partial research.
 // 2. Members are `JuncoAgent`s, created from provider/model IDs through Pi's saved login.
-// 3. A review round is a YAML dataflow graph. Code nodes prepare assignments and validate upstream
+// 3. One YAML graph runs every review round. Code nodes prepare assignments and validate fresh
 //    reports; each persistent member runs once from the prepared prompt.
 // 4. Rounds repeat over the same members, whose sessions keep every earlier round, until the Reducer
 //    approves.
@@ -23,11 +23,9 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
-import { Task, TaskSchema, Deterministic, graph as graphApi, JuncoGraph, schedules, syntax, tracer } from "junco";
-import { problemRecorder, runCli, type YamlAgent, type YamlExecution } from "../support.ts";
+import { Task, TaskSchema, Deterministic, graph as graphApi, JuncoGraph, schedules, syntax, tools, tracer } from "junco";
+import { problemRecorder, runCli, type YamlExecution } from "../support.ts";
 import source from "./oss-committee.yml" with { type: "text" };
-
-const document = syntax.parse(source);
 
 const RESEARCH_RUNG: schedules.LadderRung = { model: "github-copilot/claude-opus-5.5", thinking: "medium" };
 const LADDER: schedules.Ladder = {
@@ -137,7 +135,7 @@ export class ReviewTool {
       description: "Record this round's verdict. approved=true only when the plan has minimal, clean custom code and relies on well-trusted OSS libraries backed by cited search evidence; otherwise approved=false with concrete feedback for the Librarian and Architect.",
       parameters: reviewParameters,
       execute: async (_toolCallId, { approved, feedback }) => {
-        this.#verdict = { approved, feedback: feedback.trim() };
+        this.#verdict = { approved, feedback };
         const recorded = approved
           ? "Approval recorded."
           : "Revision request recorded; the Librarian and Architect will continue from your feedback.";
@@ -156,16 +154,18 @@ export class ReviewTool {
 
 // ## 2. Members
 //
-// The YAML declares instructions, tools, and graph roles; LADDER supplies scheduler-chosen models.
+// YAML declares instructions and routing. Each role gets only its own collection's custom tools.
 
 export type MemberId = "Librarian" | "Architect" | "Reducer";
-export type Members = Readonly<Record<MemberId, YamlAgent>>;
 type SearchCounts = Pick<OssSearchTool, "searches" | "failures">;
 type RoundContext = {
   readonly request: string;
-  readonly feedback?: string;
+  feedback?: string;
   readonly search: SearchCounts;
-  readonly failuresBefore: number;
+  round: number;
+  failuresBefore: number;
+  searchesBefore: number;
+  readonly published: Map<string, number>;
   acceptedPartial: boolean;
 };
 
@@ -174,93 +174,142 @@ const researchId = graphApi.EdgeId.create("Librarian->DesignAssignment");
 const reducerResearchId = graphApi.EdgeId.create("Librarian->ReviewAssignment");
 const designId = graphApi.EdgeId.create("Architect->ReviewAssignment");
 
-/** Prepare the first assignment at execution time, without starting or replacing any member. */
+/** Publish one research assignment on each admission by the round scheduler. */
 const ResearchAssignment: syntax.DeterministicNode<RoundContext> = ({ context, edges, policy }) =>
   new Deterministic<TSchema, unknown>(async function* () {
-    const { request, feedback } = context;
-    const text = `Original request:\n${request}\n\n${feedback === undefined ? "" : `Review feedback:\n${feedback}\n\n`}` +
-      (feedback === undefined
-        ? "Search public GitHub repositories using only generic technical terms, then report the available evidence and any research gaps."
-        : "Continue investigating with new search_oss lookups using only generic technical terms, then report the updated evidence and any remaining research gaps.");
-    const task = Task.create({ kind: "prompt", text, spec: "A research report citing public OSS evidence and stating its gaps." });
-    return new graphApi.FinalMessages([graphApi.Message.create(edges.get("ResearchAssignment~>Librarian")!, task)]);
+    for (;;) {
+      const { request, feedback } = context;
+      const text = `Original request:\n${request}\n\n${feedback === undefined ? "" : `Review feedback:\n${feedback}\n\n`}` +
+        (feedback === undefined
+          ? "Search public GitHub repositories using only generic technical terms, then report the available evidence and any research gaps."
+          : "Continue investigating with new search_oss lookups using only generic technical terms, then report the updated evidence and any remaining research gaps.");
+      const task = Task.create({ kind: "prompt", text, spec: "A research report citing public OSS evidence and stating its gaps." });
+      context.published.set("ResearchAssignment", context.round);
+      yield [graphApi.Message.create(edges.get("ResearchAssignment~>Librarian")!, task)];
+    }
   }, policy);
 
 /** Admit either exactly one partial prompt or a valid, normally completed research report. */
 const DesignAssignment: syntax.DeterministicNode<RoundContext> = ({ context, edges, policy }) =>
   new Deterministic<TSchema, unknown>(async function* () {
-    const inputs = yield [];
-    const partial = inputs.messages.get(partialResearchId);
-    let report: string;
-    if (partial !== undefined) {
-      const [snapshot, ...extra] = partial;
-      if (!Value.Check(TaskSchema, snapshot) || snapshot.kind !== "prompt" || extra.length > 0)
-        throw new Error("Librarian must send exactly one partial research prompt");
-      report = `Partial research: a GitHub lookup failed and the Librarian is paused.\n${snapshot.text}`;
-      context.acceptedPartial = true;
-    } else {
-      if (context.search.failures() > context.failuresBefore)
-        throw new Error("Librarian must send its partial research after a failed GitHub lookup");
-      if (context.search.searches() === 0)
-        throw new Error("Librarian did not complete a valid GitHub OSS search");
-      report = syntax.finalText(inputs.values.get(researchId), "Librarian");
+    let inputs = yield [];
+    for (;;) {
+      const partial = inputs.messages.get(partialResearchId);
+      let report: string;
+      if (partial !== undefined) {
+        const [snapshot, ...extra] = partial;
+        if (!Value.Check(TaskSchema, snapshot) || snapshot.kind !== "prompt" || extra.length > 0)
+          throw new Error("Librarian must send exactly one partial research prompt");
+        report = `Partial research: a GitHub lookup failed and the Librarian is paused.\n${snapshot.text}`;
+        context.acceptedPartial = true;
+      } else {
+        if (context.search.failures() > context.failuresBefore)
+          throw new Error("Librarian must send its partial research after a failed GitHub lookup");
+        if (context.search.searches() === context.searchesBefore)
+          throw new Error("Librarian did not complete a valid GitHub OSS search");
+        report = syntax.finalText(inputs.values.get(researchId), "Librarian");
+      }
+      const text = `Original request:\n${context.request}\n\n${context.feedback === undefined ? "" : `Review feedback:\n${context.feedback}\n\n`}Librarian report:\n${report}`;
+      const task = Task.create({ kind: "prompt", text, spec: "A design report grounded in the request and the Librarian report." });
+      context.published.set("DesignAssignment", context.round);
+      inputs = yield [graphApi.Message.create(edges.get("DesignAssignment~>Architect")!, task)];
     }
-    const text = `Original request:\n${context.request}\n\n${context.feedback === undefined ? "" : `Review feedback:\n${context.feedback}\n\n`}Librarian report:\n${report}`;
-    const task = Task.create({ kind: "prompt", text, spec: "A design report grounded in the request and the Librarian report." });
-    return new graphApi.FinalMessages([graphApi.Message.create(edges.get("DesignAssignment~>Architect")!, task)]);
   }, policy);
 
 /** Only a partial handoff leaves a Librarian waiting for the design to finish. */
 const ResearchRelease: syntax.DeterministicNode<RoundContext> = ({ context, edges, policy }) =>
   new Deterministic<TSchema, unknown>(async function* () {
-    return new graphApi.FinalMessages(context.acceptedPartial
-      ? [graphApi.Message.create(edges.get("architect-finished")!, true)] : []);
+    yield [];
+    for (;;) {
+      context.published.set("ResearchRelease", context.round);
+      yield context.acceptedPartial ? [graphApi.Message.create(edges.get("architect-finished")!, true)] : [];
+    }
   }, policy);
 
 /** Only the joined, validated final reports can prepare the Reducer's assignment. */
 const ReviewAssignment: syntax.DeterministicNode<RoundContext> = ({ context, edges, policy }) =>
   new Deterministic<TSchema, unknown>(async function* () {
-    const inputs = yield [];
-    const text = `Original request:\n${context.request}\n\nLibrarian report:\n${syntax.finalText(inputs.values.get(reducerResearchId), "Librarian")}\n\nArchitect report:\n${syntax.finalText(inputs.values.get(designId), "Architect")}`;
-    const task = Task.create({ kind: "prompt", text, spec: "One final recommendation reconciling the Librarian and Architect reports." });
-    return new graphApi.FinalMessages([graphApi.Message.create(edges.get("ReviewAssignment~>Reducer")!, task)]);
+    let inputs = yield [];
+    for (;;) {
+      const text = `Original request:\n${context.request}\n\nLibrarian report:\n${syntax.finalText(inputs.values.get(reducerResearchId), "Librarian")}\n\nArchitect report:\n${syntax.finalText(inputs.values.get(designId), "Architect")}`;
+      const task = Task.create({ kind: "prompt", text, spec: "One final recommendation reconciling the Librarian and Architect reports." });
+      context.published.set("ReviewAssignment", context.round);
+      inputs = yield [graphApi.Message.create(edges.get("ReviewAssignment~>Reducer")!, task)];
+    }
   }, policy);
 
 // ## 3. One review round
 //
-// A round is a dataflow graph over the persistent members. Assignment code nodes validate the
+// Every round runs in the same graph over the same members. Assignment code nodes validate the
 // reports they receive and send the exact prompts declared on each member's message route. If a
 // lookup fails, the Librarian finds the partial-research message route with `info`, `send`s its
 // partial research there and yields; the Architect starts from it while the Librarian waits,
 // paused, until the Architect returns. The review assignment always joins both final reports.
 
-/** One review round's graph and its Reducer node. */
-export interface ReviewRound {
-  execution: YamlExecution;
-  reducerId: graphApi.NodeIdType;
-}
-
-export const ReviewRound = {
-  async create(request: string, members: Members, search: SearchCounts, feedback?: string, observer?: tracer.DataflowTracer, ladder?: schedules.ModelLadder, recorder?: syntax.BuildOptions["recorder"]): Promise<ReviewRound> {
-    const context: RoundContext = {
-      request, feedback, search, failuresBefore: search.failures(), acceptedPartial: false,
-    };
-    const execution = await JuncoGraph.fromYaml(source, {
-      cwd: process.cwd(),
-      scheduler: () => schedules.strength((_, id) => ({ Librarian: "med", Architect: "high", Reducer: "xhigh" } as const)[id as MemberId] ?? "med", schedules.parallel()),
-      tracer: observer, context, code: { ResearchAssignment, DesignAssignment, ResearchRelease, ReviewAssignment },
-      ...(ladder === undefined ? {} : { ladder }),
-      ...(recorder === undefined ? {} : { recorder }),
-      tools: {
-        search: members.Librarian.getTools().find((tool) => tool.name === "search_oss")!,
-        review: members.Reducer.getTools().find((tool) => tool.name === "review")!,
-      },
-      createAgent: async (spec) => members[spec.node as MemberId],
-      createAgentOwnership: "caller",
-    });
-    return { execution, reducerId: graphApi.NodeId.create("Reducer") };
-  },
+type CommitteeOptions = Pick<syntax.BuildOptions, "cwd" | "collection" | "tools" | "recorder" | "tracer" | "signal"> & {
+  readonly ladder: schedules.ModelLadder;
 };
+
+export async function createCommittee(request: string, search: SearchCounts, options: CommitteeOptions) {
+  const context: RoundContext = { request, search, round: 1, published: new Map(), acceptedPartial: false,
+    failuresBefore: search.failures(), searchesBefore: search.searches() };
+  let previous: ReadonlyMap<graphApi.NodeIdType, unknown> = new Map();
+  let approved = false;
+  const librarian = graphApi.NodeId.create("Librarian"), architect = graphApi.NodeId.create("Architect");
+  const reducer = graphApi.NodeId.create("Reducer");
+  // An `always` entry and retained values stay available to the engine after publication.
+  // Authorize each assignment once, from this round's reports, not last round's cells.
+  const available = (): graphApi.NodeIdType[] => {
+    const results = execution.graph.results();
+    const candidates = execution.graph.available();
+    const partial = candidates.get(graphApi.NodeId.create("DesignAssignment"))?.view.messages.get(partialResearchId)?.length;
+    return [...candidates].filter(([id]) => {
+      if (id === librarian && (partial || context.acceptedPartial) && context.published.get("ResearchRelease") !== context.round)
+        return false;
+      if (context.published.get(id) === context.round) {
+        if (id === "DesignAssignment" && partial)
+          throw new Error("Librarian must send exactly one partial research prompt");
+        return false;
+      }
+      if (id === "DesignAssignment")
+        return !!partial || results.get(librarian) !== previous.get(librarian);
+      if (id === "ReviewAssignment")
+        return results.get(librarian) !== previous.get(librarian) && results.get(architect) !== previous.get(architect);
+      return id !== "$sink" || approved;
+    }).map(([id]) => id);
+  };
+  const execution: YamlExecution = await JuncoGraph.fromYaml(source, {
+    ...options, context, code: { ResearchAssignment, DesignAssignment, ResearchRelease, ReviewAssignment },
+    scheduler: () => schedules.strength((_, id) => id === "Architect" ? "high" : id === "Reducer" ? "xhigh" : "med",
+      snapshot => ({ selected: schedules.select(snapshot, available()) })),
+  });
+  const run = async () => {
+    options.signal?.throwIfAborted();
+    while (available().length) await execution.step({ signal: options.signal });
+    options.signal?.throwIfAborted();
+    const result = execution.graph.results().get(reducer);
+    if (result === previous.get(reducer)) throw new Error("Reducer did not complete this round");
+    return result;
+  };
+  return { execution, available, run,
+    revise(feedback: string) {
+      previous = execution.graph.results();
+      context.round++;
+      context.feedback = feedback;
+      context.acceptedPartial = false;
+      context.failuresBefore = search.failures();
+      context.searchesBefore = search.searches();
+    },
+    async publish(plan: unknown) {
+      const markdown = approvedPlan(plan);
+      approved = true;
+      await run();
+      if (execution.graph.results().get(execution.graph.sink.id) !== plan)
+        throw new Error("Committee sink did not publish the approved Reducer result");
+      return markdown;
+    },
+  };
+}
 
 // ## 4. Review until approved
 //
@@ -277,31 +326,22 @@ export function approvedPlan(message: unknown): string {
 
 export async function convene(
   request: string,
-  members: Members,
+  options: CommitteeOptions,
   search: SearchCounts,
   review: Pick<ReviewTool, "takeVerdict">,
-  signal?: AbortSignal,
-  observer?: tracer.DataflowTracer,
-  ladder?: schedules.ModelLadder,
-  recorder?: syntax.BuildOptions["recorder"],
 ): Promise<string> {
-  let feedback: string | undefined;
-  // Rounds share the selected tracer; finish its TUI once, however the committee ends.
-  const selected = observer ?? tracer.TuiTracer.shared();
-  try {
-    for (;;) {
-      signal?.throwIfAborted();
-      const { execution, reducerId } = await ReviewRound.create(request, members, search, feedback, selected, ladder, recorder);
-      await using round = execution.graph;
-      const plan = (await execution.run({ signal })).get(reducerId);
-      signal?.throwIfAborted();
-      const verdict = review.takeVerdict();
-      if (verdict === undefined) throw new Error("Reducer did not record a review verdict");
-      if (verdict.approved) return approvedPlan(plan);
-      feedback = verdict.feedback;
-    }
-  } finally {
-    if (selected instanceof tracer.TuiTracer) await selected.finish();
+  const selected = options.tracer ?? tracer.TuiTracer.shared();
+  await using resources = new AsyncDisposableStack();
+  if (selected instanceof tracer.TuiTracer) resources.defer(() => selected.finish());
+  const committee = await createCommittee(request, search, { ...options, tracer: selected });
+  resources.use(committee.execution.graph);
+  for (;;) {
+    const plan = await committee.run();
+    const verdict = review.takeVerdict();
+    if (verdict?.approved) return await committee.publish(plan);
+    syntax.finalText(plan, "Reducer");
+    if (verdict === undefined) throw new Error("Reducer did not record a review verdict");
+    committee.revise(verdict.feedback);
   }
 }
 
@@ -342,16 +382,17 @@ async function main([requestPath, namedOutput, ...extra]: readonly string[], sig
   let plan: string;
   {
     await using resources = new AsyncDisposableStack();
-    // Adopted first, so it closes after every member.
-    const recorder = resources.adopt(await problemRecorder(process.cwd()), (owned) => owned.close());
-    const members = {} as Record<MemberId, YamlAgent>;
-    const specs = await syntax.resolveAgents(document, { cwd: process.cwd(), tools: { search: search.tool, review: review.tool } });
-    for (const spec of specs) {
+    const cwd = process.cwd();
+    const recorder = resources.adopt(await problemRecorder(cwd), (owned) => owned.close());
+    const collections = new Map<graphApi.NodeIdType, tools.ToolCollection>();
+    for (const [id, tool] of [["Librarian", search.tool], ["Reducer", review.tool]] as const) {
       signal?.throwIfAborted();
-      // Members outlive each round's graph; every round's graph requires their recorder.
-      members[spec.node as MemberId] = resources.use(await syntax.createJuncoAgent({ ...spec, recorder, recorderNodeId: spec.node }, ladder));
+      const collection = resources.adopt(await tools.ToolCollection.create(cwd, {
+        recorder, extend: async () => ({ tools: [tool], close: async () => {} }),
+      }), owned => owned.close());
+      collections.set(graphApi.NodeId.create(id), collection);
     }
-    plan = await convene(request, members, search, review, signal, undefined, ladder, recorder);
+    plan = await convene(request, { cwd, tools: collections, ladder, recorder, signal }, search, review);
   }
   signal?.throwIfAborted();
   await writeFile(outputPath, `${plan}\n`, { encoding: "utf8", flag: "wx" });

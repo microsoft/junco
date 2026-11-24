@@ -1,34 +1,32 @@
-import { test } from "bun:test";
+import { spyOn, test } from "bun:test";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  AgentTool,
-  PromptTemplate,
-  Skill,
-} from "@earendil-works/pi-agent-core";
+import { BACKGROUND_CONTEXT, MemorySessionRepo } from "@earendil-works/pi-agent-core";
 import {
   type AssistantMessage,
   type Context,
   contentText,
   fauxAssistantMessage,
+  type FauxResponseFactory,
+  type FauxResponseStep,
+  getCurrentTools,
   fauxToolCall,
   type JsonObject,
   type Tool,
 } from "@earendil-works/pi-ai";
+import { captureUsageContext } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import {
   agent,
   Deterministic,
   graph,
   JuncoGraph,
-  MockAgent,
   schedules,
   type Task,
   tools,
   tracer,
-  trigger,
   workflows,
 } from "junco";
 import { type TSchema, Type } from "typebox";
@@ -37,7 +35,6 @@ import { renderTask } from "../src/agent-node.ts";
 import {
   type BuildOptions,
   build,
-  createJuncoAgent,
   type DeterministicNode,
   resolveAgents,
 } from "../src/syntax/build.ts";
@@ -46,13 +43,9 @@ import { parse } from "../src/syntax/parse.ts";
 import type { JuncoDocument } from "../src/syntax/schema.ts";
 import {
   assistant,
-  requestTexts,
-  pause,
-  run,
-  settle,
   userTexts,
 } from "./deterministic-support.ts";
-import { fauxRuntime, NATIVE_TOOL_BLOCK } from "./support.ts";
+import { copyTreeNative, countedCollection, fauxRuntime, NATIVE_TOOL_BLOCK, offlineLadder } from "./support.ts";
 import {
   Collect,
   Constant,
@@ -99,19 +92,38 @@ const reply = {
     stopReason: { type: "string" },
   },
 };
-type YamlMock = MockAgent<Skill, PromptTemplate, AgentTool, TSchema, unknown>;
-type YamlAgent = agent.JuncoAgent<
-  Skill,
-  PromptTemplate,
-  AgentTool,
-  TSchema,
-  unknown
->;
-const mock = (text: string): YamlMock =>
-  new MockAgent({
-    steeringMode: "all",
-    runs: [run([{ ...settle(assistant(text)), drain: ["steer"] }])],
-  });
+/** A single role's model responses and the actual requests that consumed them. */
+type RoleScript = { requests: Context[]; respond: FauxResponseFactory };
+function script(...steps: (string | FauxResponseStep)[]): RoleScript {
+  const requests: Context[] = [];
+  const respond: FauxResponseFactory = (...args) => {
+    const step = steps[requests.length];
+    requests.push(structuredClone(args[0]));
+    assert.notEqual(step, undefined, "unexpected extra model request");
+    return typeof step === "function" ? step(...args) :
+      typeof step === "string" ? fauxAssistantMessage(step) : step!;
+  };
+  return { requests, respond };
+}
+
+const requestTexts = (requests: readonly Context[]) => requests.map(({ messages }) => userTexts(messages));
+const lastPrompts = ({ requests }: RoleScript) => requestTexts(requests).map(texts => texts.at(-1));
+
+async function offline(roles: Record<string, RoleScript>) {
+  // A short scripted "length" turn really reached its output cap, not the context window.
+  const ladder = await offlineLadder((...args) => {
+    const path = captureUsageContext()?.nodePath.join("/");
+    assert.ok(path && Object.hasOwn(roles, path), `unexpected model request from ${path}`);
+    return roles[path]!.respond(...args);
+  }, { id: "faux-1", maxTokens: 1 });
+  return {
+    ladder,
+    collection: countedCollection().collection,
+    agentOptions: new Map(Object.keys(roles).map(path => [
+      graph.NodeId.create(path), { steeringMode: "all" as const, retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 } },
+    ])),
+  };
+}
 const document = () =>
   parse({
     graph: {
@@ -229,13 +241,16 @@ test("YAML repeat rejects non-counts at validation", () => {
     }), ValidationError);
 });
 
-test("default agents require a ladder", async () => {
+test("an agent present only in a nested graph still requires a ladder", async () => {
+  const child = roundDoc("nested").graph;
+  const doc = parse({ graph: { nodes: { Child: { kind: "graph", graph: child } },
+    edges: [{ from: "Child", to: "$sink", schema: reply }] } });
   await assert.rejects(
-    build(document(), options()),
+    build(doc, options()),
     (error) =>
       error instanceof graph.DataflowDefinitionError &&
       error.message ===
-        "junco-syntax: a ladder is required to create agents; pass ladder or createAgent",
+        "junco-syntax: a ladder is required for agent nodes",
   );
 });
 
@@ -275,10 +290,14 @@ test("ModelLadder rejects rungs outside the runtime's catalog", async () => {
 });
 
 test("decision strength switches each selected agent's model and thinking", async () => {
-  const worker = mock("WORKER-OUT");
-  const final = mock("FINAL-OUT");
+  const calls: [string, string, unknown][] = [];
+  const respond: FauxResponseFactory = (_ctx, options, _state, model) => {
+    const path = captureUsageContext()?.nodePath.join("/") ?? "";
+    calls.push([path, model.id, options?.reasoning]);
+    return fauxAssistantMessage(path === "Final" ? "FINAL-OUT" : "WORKER-OUT");
+  };
   const { models } = await fauxRuntime(
-    [],
+    [respond, respond],
     "p",
     ["s", "l", "m", "h", "x"].map((id) => ({ id, reasoning: true })),
   );
@@ -296,27 +315,12 @@ test("decision strength switches each selected agent's model and thinking", asyn
         (_, id) => (id === "Final" ? "high" : "smol"),
         schedules.parallel(),
       ),
-    createAgent: async (spec) => (spec.node === "Worker" ? worker : final),
+    collection: countedCollection().collection,
   });
   try {
     await execution.run();
     assert.equal(resultText(execution.graph), "FINAL-OUT");
-    for (const [instance, modelId, thinking] of [
-      [worker, "s", "low"],
-      [final, "h", "high"],
-    ] as const)
-      assert.deepEqual(
-        instance.calls
-          .filter(
-            ({ method }) =>
-              method === "setModel" || method === "setThinkingLevel",
-          )
-          .map(({ method, args }) => [method, args]),
-        [
-          ["setModel", [{ provider: "p", modelId }]],
-          ["setThinkingLevel", [thinking]],
-        ],
-      );
+    assert.deepEqual(calls, [["Inner/Worker", "s", "low"], ["Final", "h", "high"]]);
   } finally {
     await execution.graph.close();
   }
@@ -335,11 +339,11 @@ test("fromYaml substitutes text params and runs the workflow", async () => {
       to: $sink
       schema: { type: object, required: [role], properties: { role: { const: assistant } } }
 `;
-  const instance = mock("done");
+  const instance = script("done");
   const execution = await JuncoGraph.fromYaml(source, {
     ...options(),
     params: { greeting: "hi" },
-    createAgent: async () => instance,
+    ...await offline({ A: instance }),
   });
   try {
     assert.equal(
@@ -357,8 +361,7 @@ test("fromYaml substitutes text params and runs the workflow", async () => {
 test("fromYaml accepts a parsed document and runs nested agents", async () => {
   const execution = await JuncoGraph.fromYaml(document(), {
     ...options(),
-    createAgent: async (spec) =>
-      mock(spec.node),
+    ...await offline({ "Inner/Worker": script("Worker"), Final: script("Final") }),
   });
   try {
     await execution.run();
@@ -368,46 +371,40 @@ test("fromYaml accepts a parsed document and runs nested agents", async () => {
   }
 });
 
-test("fromYaml closes prepared agents once when YAML parsing fails", async () => {
-  const { models } = await fauxRuntime([]);
-  const { collection, events, active } = countedCollection();
-  const instance: YamlAgent = await agent.JuncoAgent.create({
-    provider: "faux",
-    model: "faux-1",
-    models,
-    tools: [],
-    collection,
-  });
-  const dispose = instance[Symbol.asyncDispose].bind(instance);
-  let disposals = 0;
-  instance[Symbol.asyncDispose] = async () => {
-    disposals++;
-    await dispose();
+async function countedSession(failure?: Error) {
+  const session = await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT);
+  const close = session.close.bind(session);
+  const contexts: (typeof BACKGROUND_CONTEXT)[] = [];
+  session.close = async (context) => {
+    contexts.push(context);
+    await close(context);
+    if (failure) throw failure;
   };
-  try {
-    await assert.rejects(
-      JuncoGraph.fromYaml("graph: [", {
-        ...options(),
-        sourceName: "pipeline.yml",
-        agents: { A: instance, B: instance },
-      }),
-      (error) =>
-        error instanceof ValidationError &&
-        error instanceof graph.DataflowDefinitionError &&
-        error.code === "yaml" &&
-        error.message.includes("pipeline.yml:1:9"),
-    );
-    assert.equal(disposals, 1);
-    assert.deepEqual(events, ["bind-close:1"]);
-    assert.deepEqual(active, { leases: 0, bindings: 0, creatorCloses: 0 });
-  } finally {
-    await instance.return();
-    await collection.close();
-  }
+  return { session, contexts };
+}
+
+test("fromYaml releases transferred sessions when parsing fails, preserving clean-up failures", async () => {
+  const failure = new Error("session close failed");
+  const a = await countedSession(failure), b = await countedSession();
+  await assert.rejects(JuncoGraph.fromYaml("graph: [", {
+    ...options(), sourceName: "pipeline.yml", agentOptions: new Map([
+      [graph.NodeId.create("A"), { session: a.session }],
+      [graph.NodeId.create("B"), { session: b.session }],
+    ]),
+  }), (error) => {
+    assert.ok(error instanceof AggregateError);
+    assert.ok(error.errors[0] instanceof ValidationError);
+    assert.equal(error.errors[0].code, "yaml");
+    assert.match(error.errors[0].message, /pipeline.yml:1:9/);
+    assert.ok(error.errors.includes(failure));
+    return true;
+  });
+  assert.deepEqual(a.contexts, [BACKGROUND_CONTEXT]);
+  assert.deepEqual(b.contexts, [BACKGROUND_CONTEXT]);
 });
 
 test("fromYaml rejects an invalid document before creating any agent", async () => {
-  let created = 0;
+  const { collection, events } = countedCollection();
   for (const [source, code] of [
     [
       "graph:\n  nodes: { A: { prompt: work } }\n  edges: [{ from: A, to: $sink }]\n",
@@ -421,20 +418,16 @@ test("fromYaml rejects an invalid document before creating any agent", async () 
     await assert.rejects(
       JuncoGraph.fromYaml(source, {
         ...options(),
-        createAgent: async () => {
-          created++;
-          throw new Error("createAgent reached for an invalid document");
-        },
+        collection,
       }),
       (error) => error instanceof ValidationError && error.code === code,
     );
-  assert.equal(created, 0);
+  assert.deepEqual(events, []);
 });
 
-for (const instruction of [undefined, " \t "])
-test(`nested agent rejects ${instruction === undefined ? "missing" : "blank"} prompt before acquisition`, async () => {
+test("nested agent rejects a blank prompt before acquisition", async () => {
   const child = {
-    nodes: { A: { system: "Not a prompt", prompt: instruction } },
+    nodes: { A: { system: "Not a prompt", prompt: " \t " } },
     edges: [{ from: "A", to: "$sink", schema: reply }],
   };
   const source = JSON.stringify({ graph: {
@@ -443,13 +436,10 @@ test(`nested agent rejects ${instruction === undefined ? "missing" : "blank"} pr
   } });
   await assert.rejects(JuncoGraph.fromYaml(source, {
     ...options(),
-    createAgent: async () => assert.fail("acquired an agent with an invalid prompt"),
   }), (error) => error instanceof ValidationError &&
     error.path === "/graph/nodes/Child/graph/nodes/A/prompt");
 });
 
-const lastPrompts = (instance: YamlMock) =>
-  requestTexts(instance.requests).map((texts) => texts.at(-1));
 /** Reads a settled result's text, failing the test when `id` has none. */
 function resultText(
   g: Pick<graph.JuncoGraph<TSchema, unknown>, "result" | "sink">,
@@ -473,211 +463,6 @@ const nodeFailure = (message: RegExp) => (error: unknown) =>
   error instanceof graph.DataflowNodeError &&
   message.test((error.error as Error).message);
 
-function countedCollection(failure?: { binding: number; error: Error }): {
-  collection: tools.ToolCollection;
-  events: string[];
-  active: { leases: number; bindings: number; creatorCloses: number };
-} {
-  const events: string[] = [];
-  const active = { leases: 0, bindings: 0, creatorCloses: 0 };
-  let leases = 0,
-    bindings = 0,
-    creatorClosed = false;
-  const collection = {
-    policy: tools.LockPolicy,
-    tools: [] as AgentTool[],
-    lease() {
-      const id = ++leases;
-      active.leases++;
-      let closed = false;
-      return {
-        close: async () => {
-          if (!closed) {
-            closed = true;
-            active.leases--;
-            events.push(`lease-close:${id}`);
-          }
-        },
-      };
-    },
-    bind() {
-      const id = ++bindings;
-      active.bindings++;
-      let closing: Promise<void> | undefined;
-      return {
-        owner: `owner-${id}`,
-        tools: new Map(),
-        close: () =>
-          (closing ??= Promise.resolve().then(() => {
-            active.bindings--;
-            events.push(`bind-close:${id}`);
-            if (failure?.binding === id) throw failure.error;
-          })),
-      };
-    },
-    close: async () => {
-      if (!creatorClosed) {
-        creatorClosed = true;
-        active.creatorCloses++;
-        events.push("creator-close");
-      }
-    },
-  } as unknown as tools.ToolCollection;
-  return { collection, events, active };
-}
-
-test("named aliases replace builtin definitions and execute without builtin dispatch", async () => {
-  const custom = (name: string): AgentTool => ({
-    name,
-    label: name,
-    description: name,
-    parameters: Type.Object({}),
-    execute: async () => ({
-      content: [{ type: "text", text: "ok" }],
-      details: {},
-    }),
-  });
-  const doc = parse({
-    graph: {
-      nodes: { A: { prompt: "work", tools: ["custom"] } },
-      edges: [{ from: "A", to: "$sink", schema: reply }],
-    },
-  });
-  const [spec] = await resolveAgents(doc, {
-    cwd: process.cwd(),
-    tools: { custom: custom("custom") },
-  });
-  assert.ok(spec);
-  assert.ok(
-    spec.tools.some((tool) => "name" in tool && tool.name === "custom"),
-  );
-  const shadow = parse({
-    graph: {
-      nodes: { A: { prompt: "work", tools: ["shadow"] } },
-      edges: [{ from: "A", to: "$sink", schema: reply }],
-    },
-  });
-  const replacement = custom("yield");
-  const [selected] = await resolveAgents(shadow, {
-    cwd: process.cwd(),
-    tools: { shadow: replacement },
-    toolSource: "declarations.ts",
-  });
-  assert.deepEqual(
-    selected!.tools.filter((tool) => "name" in tool && tool.name === "yield"),
-    [replacement],
-  );
-  const runtime = await fauxRuntime([
-    fauxAssistantMessage(fauxToolCall("yield", {}), { stopReason: "toolUse" }),
-    (context) => {
-      const result = context.messages.find(
-        (message) => message.role === "toolResult",
-      );
-      assert.ok(result && result.role === "toolResult");
-      assert.equal(contentText(result.content), "ok");
-      assert.equal(result.isError, false);
-      return fauxAssistantMessage("done");
-    },
-  ]);
-  const ladder = new schedules.ModelLadder(runtime.models, fauxLadder);
-  const instance = await createJuncoAgent(
-    { ...selected!, tool_block: NATIVE_TOOL_BLOCK },
-    ladder,
-  );
-  try {
-    assert.equal(
-      contentText((await instance.prompt("custom yield")).content),
-      "done",
-    );
-  } finally {
-    await instance.return();
-  }
-  const duplicateDoc = parse({
-    graph: {
-      nodes: { A: { prompt: "work", tools: ["first", "second"] } },
-      edges: [{ from: "A", to: "$sink", schema: reply }],
-    },
-  });
-  const [duplicate] = await resolveAgents(duplicateDoc, {
-    cwd: process.cwd(),
-    tools: { first: replacement, second: replacement },
-  });
-  await assert.rejects(
-    createJuncoAgent({ ...duplicate!, tool_block: NATIVE_TOOL_BLOCK }, ladder),
-    /Duplicate tool name: yield/,
-  );
-});
-
-test("tool blocks filter helpers and reject literal or resolved-name conflicts", async () => {
-  const shell: AgentTool = {
-    name: "bash",
-    label: "bash",
-    description: "shell alias",
-    parameters: Type.Object({}),
-    execute: async () => ({
-      content: [{ type: "text", text: "ok" }],
-      details: {},
-    }),
-  };
-  const nested = parse({
-    graph: {
-      nodes: {
-        Child: {
-          kind: "graph",
-          graph: {
-            nodes: {
-              Worker: { prompt: "work", tools: ["shell"], tool_block: ["bash"] },
-            },
-            edges: [{ from: "Worker", to: "$sink", schema: reply }],
-          },
-        },
-      },
-      edges: [{ from: "Child", to: "$sink", schema: reply }],
-    },
-  });
-  await assert.rejects(
-    resolveAgents(nested, { cwd: process.cwd(), tools: { shell } }),
-    (error) =>
-      error instanceof TypeError &&
-      error.message.includes('node "Child/Worker"') &&
-      error.message.includes('tool "shell" resolves to blocked tool "bash"'),
-  );
-
-  const direct = {
-    graph: {
-      nodes: { A: { prompt: "work", tools: ["same"], tool_block: ["same"] } },
-    },
-  } as JuncoDocument;
-  await assert.rejects(
-    resolveAgents(direct, { cwd: process.cwd(), tools: { same: shell } }),
-    /tools and tool_block both list "same"/,
-  );
-
-  const disjoint = parse({
-    graph: {
-      nodes: { A: { prompt: "work", tool_block: ["task", "send"] } },
-      edges: [{ from: "A", to: "$sink", schema: reply }],
-    },
-  });
-  const [spec] = await resolveAgents(disjoint, { cwd: process.cwd() });
-  assert.ok(spec);
-  assert.deepEqual(spec.tool_block, ["task", "send"]);
-  assert.deepEqual(
-    spec.tools.map((tool) => ("name" in tool ? tool.name : "mcp")),
-    ["yield", "info"],
-  );
-
-  let received: typeof spec | undefined;
-  const execution = await build(disjoint, {
-    ...options(),
-    createAgent: async (candidate) => {
-      received = candidate;
-      return mock("ok");
-    },
-  });
-  assert.deepEqual(received?.tool_block, ["task", "send"]);
-  await execution.graph.close();
-});
 
 test("skills are loaded once, advertised and reject nonexistent registry paths", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "junco-yaml-skill-"));
@@ -780,88 +565,6 @@ test("resolution walks declarations depth-first and retains graph labels", async
   assert.equal(unnamed[0]?.graph, "graph");
 });
 
-test("explicit tools beat collection tools, fill gaps, and keep per-agent helpers fresh", async () => {
-  const makeTool = (name: string, text: string): AgentTool => ({
-    name,
-    label: name,
-    description: text,
-    parameters: Type.Object({}),
-    execute: async () => ({ content: [{ type: "text", text }], details: {} }),
-  });
-  const collectionTool = makeTool("shared", "collection");
-  const shadowedCodeTool = makeTool("shared", "code");
-  const fallback = makeTool("fallback", "fallback");
-  const counted = countedCollection();
-  counted.collection.tools.push(collectionTool);
-  try {
-    const specs = await resolveAgents(
-      parse({
-        graph: {
-          nodes: {
-            A: { prompt: "work", tools: ["shared", "fallback"] },
-            B: { prompt: "work", tools: ["shared"] },
-          },
-          edges: [
-            { from: "A", to: "B", schema: reply },
-            { from: "B", to: "$sink", schema: reply },
-          ],
-        },
-      }),
-      {
-        cwd: process.cwd(),
-        collection: counted.collection,
-        tools: { shared: shadowedCodeTool, fallback },
-      },
-    );
-    const [a, b] = specs;
-    assert.ok(a && b);
-    assert.ok(a.tools.includes(shadowedCodeTool));
-    assert.ok(a.tools.includes(fallback));
-    assert.ok(b.tools.includes(shadowedCodeTool));
-    assert.ok(!a.tools.includes(collectionTool));
-    assert.equal(
-      contentText(
-        (
-          await shadowedCodeTool.execute(
-            "check",
-            {},
-            new AbortController().signal,
-          )
-        ).content,
-      ),
-      "code",
-    );
-    for (const name of ["yield", "info", "send", "task"]) {
-      const left = a.tools.find((tool) => "name" in tool && tool.name === name);
-      const right = b.tools.find(
-        (tool) => "name" in tool && tool.name === name,
-      );
-      assert.ok(left && right);
-      assert.notEqual(left, right);
-    }
-    await assert.rejects(
-      resolveAgents(
-        parse({
-          graph: {
-            nodes: { Unknown: { prompt: "work", tools: ["missing"] } },
-            edges: [{ from: "Unknown", to: "$sink", schema: reply }],
-          },
-        }),
-        { cwd: process.cwd(), collection: counted.collection },
-      ),
-      (error) =>
-        error instanceof TypeError &&
-        error.message.includes('unknown tool "missing" for node "Unknown"'),
-    );
-    assert.deepEqual(counted.active, {
-      leases: 0,
-      bindings: 0,
-      creatorCloses: 0,
-    });
-  } finally {
-    await counted.collection.close();
-  }
-});
 
 test("skills retain content, resolve same-directory symlinks and cache repeated registry references", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "junco-yaml-skill-resolution-"));
@@ -963,12 +666,11 @@ for (const row of [
     }
   });
 
-test("nested message ingress and final egress stage the factory agent prompt", async () => {
-  const final = mock("FINAL-OUT");
+test("nested message ingress and final egress stage the owning agent's prompt", async () => {
+  const final = script("FINAL-OUT");
   const execution = await build(document(), {
     ...options(),
-    createAgent: async (spec) =>
-      spec.node === "Worker" ? mock("WORKER-OUT") : final,
+    ...await offline({ "Inner/Worker": script("WORKER-OUT"), Final: final }),
   });
   try {
     await execution.run();
@@ -980,49 +682,37 @@ test("nested message ingress and final egress stage the factory agent prompt", a
 });
 
 for (const target of ["A", "$sink"])
-test(`legacy availability on ${target} is rejected before any request and closes a transferred agent once`, async () => {
-  const { models, faux } = await fauxRuntime([]);
+test(`legacy availability on ${target} is rejected before any request`, async () => {
+  const ladder = await offlineLadder([]);
   const { collection, events } = countedCollection();
-  const instance: YamlAgent = await agent.JuncoAgent.create({ provider: "faux", model: "faux-1", models, tools: [], collection });
   try {
     const config = {
       ...options(),
-      agents: { A: instance },
+      ladder, collection,
       available: { [target]: () => assert.fail("legacy hook invoked") },
     };
     await assert.rejects(build(roundDoc("work"), config), (error) =>
       error instanceof graph.DataflowDefinitionError && /trigger/.test(error.message));
-    assert.equal(faux.state.callCount, 0);
-    assert.deepEqual(events, ["bind-close:1"]);
+    assert.deepEqual(events, []);
   } finally {
-    await instance.return();
     await collection.close();
   }
 });
 
-test("a prepared agent with a staged prompt fails on admission before a request", async () => {
-  const { models, faux } = await fauxRuntime([]);
-  const { collection } = countedCollection();
-  const instance: YamlAgent = await agent.JuncoAgent.create({
-    provider: "faux", model: "faux-1", models, tools: [], collection,
-    prompt: "Caller-staged instruction",
-  });
+test("a promptless YAML member can be staged by its controller", async () => {
+  const a = script("manually staged");
+  const doc = roundDoc("remove me");
+  doc.graph.nodes.A = {};
+  const execution = await build(doc, { ...options(), ...await offline({ A: a }) });
   try {
-    const execution = await build(roundDoc("YAML instruction"), {
-      ...options(), agents: { A: instance },
-    });
-    try {
-      await assert.rejects(execution.run(), (error) => {
-        const cause = error instanceof graph.DataflowNodeError ? error.error : error;
-        return typeof cause === "object" && cause !== null &&
-          "code" in cause && cause.code === "busy";
-      });
-      assert.equal(faux.state.callCount, 0);
-    } finally {
-      await execution.graph.close();
-    }
+    const instance = execution.graph.getNode(graph.NodeId.create("A"))!.state;
+    assert.ok(instance instanceof agent.JuncoAgent);
+    instance.stagePrompt("controller instruction");
+    await execution.run();
+    assert.equal(requestTexts(a.requests)[0]?.[0], "controller instruction");
+    assert.equal(resultText(execution.graph), "manually staged");
   } finally {
-    await collection.close();
+    await execution.graph.close();
   }
 });
 
@@ -1036,14 +726,10 @@ const workMessage = (
 ) => JSON.stringify({ id: "RalphControl~>Ralph", payload: { phase, round, objectives } });
 
 test("Ralph runs its YAML prompt once per round and publishes only the last", async () => {
-  const instance: YamlMock = new MockAgent({
-    runs: ["draft-1", "draft-2", "draft-3"].map((text) =>
-      run([{ ...settle(assistant(text)), drain: ["steer"] }]),
-    ),
-  });
+  const instance = script("draft-1", "draft-2", "draft-3");
   const execution = await build(ralphDoc(), {
     ...options(),
-    createAgent: async () => instance,
+    ...await offline({ Ralph: instance }),
     ...schedules.ralph({ rounds: 3 }),
   });
   try {
@@ -1079,14 +765,10 @@ test("Ralph runs its YAML prompt once per round and publishes only the last", as
 });
 
 test("default rounds is two and a staged round survives graph steps", async () => {
-  const instance: YamlMock = new MockAgent({
-    runs: ["draft-1", "draft-2", "draft-3"].map((text) =>
-      run([{ ...settle(assistant(text)), drain: ["steer"] }]),
-    ),
-  });
+  const instance = script("draft-1", "draft-2", "draft-3");
   const execution = await build(ralphDoc(), {
     ...options(),
-    createAgent: async () => instance,
+    ...await offline({ Ralph: instance }),
     ...schedules.ralph(),
   });
   try {
@@ -1122,14 +804,10 @@ for (const [name, draft, error] of [
   ],
 ] as const)
   test(`an invalid intermediate draft (${name}) fails Ralph before the next round`, async () => {
-    const instance: YamlMock = new MockAgent({
-      runs: [assistant("draft-1"), draft, assistant("draft-3")].map((message) =>
-        run([{ ...settle(message), drain: ["steer"] }]),
-      ),
-    });
+    const instance = script(assistant("draft-1"), draft, assistant("draft-3"));
     const execution = await build(ralphDoc(), {
       ...options(),
-      createAgent: async () => instance,
+      ...await offline({ Ralph: instance }),
       ...schedules.ralph({ rounds: 3 }),
     });
     try {
@@ -1185,10 +863,10 @@ for (const [name, payloads] of [
   ],
 ] satisfies readonly (readonly [string, Task[]])[])
   test(`Ralph assignment admission rejects ${name}`, async () => {
-    const instance = mock("unused");
+    const instance = script();
     const execution = await build(ralphDoc(), {
       ...options(),
-      createAgent: async () => instance,
+      ...await offline({ Ralph: instance }),
       ...schedules.ralph(),
     });
     try {
@@ -1207,16 +885,11 @@ for (const [name, payloads] of [
   });
 
 test("several prompts on the assignment route are ordered objectives in every round and the check", async () => {
-  const instance: YamlMock = new MockAgent({
-    steeringMode: "all",
-    runs: ["draft-1", "draft-2"].map((text) =>
-      run([{ ...settle(assistant(text)), drain: ["steer"] }]),
-    ),
-  });
+  const instance = script("draft-1", "draft-2");
   const judged: (readonly string[])[] = [];
   const execution = await build(ralphDoc(), {
     ...options(),
-    createAgent: async () => instance,
+    ...await offline({ Ralph: instance }),
     ...schedules.ralph({
       until: (_result, { objectives, round }) => {
         judged.push(objectives);
@@ -1265,16 +938,10 @@ test("several prompts on the assignment route are ordered objectives in every ro
 });
 
 test("a provider-error result re-runs the round up to retries times", async () => {
-  const instance: YamlMock = new MockAgent({
-    runs: [
-      assistant("refused", "error"),
-      assistant("draft-1"),
-      assistant("draft-2"),
-    ].map((message) => run([{ ...settle(message), drain: ["steer"] }])),
-  });
+  const instance = script(assistant("refused", "error"), "draft-1", "draft-2");
   const execution = await build(ralphDoc(), {
     ...options(),
-    createAgent: async () => instance,
+    ...await offline({ Ralph: instance }),
     ...schedules.ralph({ retries: 1 }),
   });
   try {
@@ -1300,16 +967,10 @@ test("a provider-error result re-runs the round up to retries times", async () =
 });
 
 test("an exhausted provider error cannot start a normal revision", async () => {
-  const instance: YamlMock = new MockAgent({
-    runs: [
-      assistant("refused", "error"),
-      assistant("refused again", "error"),
-      assistant("draft-1"),
-    ].map((message) => run([{ ...settle(message), drain: ["steer"] }])),
-  });
+  const instance = script(assistant("refused", "error"), assistant("refused again", "error"), "draft-1");
   const execution = await build(ralphDoc(), {
     ...options(),
-    createAgent: async () => instance,
+    ...await offline({ Ralph: instance }),
     ...schedules.ralph({ retries: 1 }),
   });
   try {
@@ -1331,14 +992,10 @@ test("an exhausted provider error cannot start a normal revision", async () => {
 
 test("a fixed final round publishes its raw provider error after exhausting retries", async () => {
   const failure = assistant("refused", "error");
-  const instance: YamlMock = new MockAgent({
-    runs: [failure, failure].map((product) =>
-      run([{ ...settle(product), drain: ["steer"] }]),
-    ),
-  });
+  const instance = script(failure, failure);
   const execution = await build(ralphDoc(), {
     ...options(),
-    createAgent: async () => instance,
+    ...await offline({ Ralph: instance }),
     ...schedules.ralph({ rounds: 1, retries: 1 }),
   });
   try {
@@ -1346,7 +1003,10 @@ test("a fixed final round publishes its raw provider error after exhausting retr
       kind: "prompt", text: "assignment", taskId: "Ralph#1", spec: "", deps: [], history: [],
     });
     const results = await execution.run();
-    assert.equal(results.get(execution.graph.sink.id), failure);
+    const published = results.get(execution.graph.sink.id);
+    assert.ok(Value.Check(agent.AssistantMessageSchema, published));
+    assert.equal(published.stopReason, "error");
+    assert.equal(published, results.get(graph.NodeId.create("Ralph")));
     assert.deepEqual(lastPrompts(instance), [
       asTask("assignment", "Ralph#1"),
       workMessage("retry", 1),
@@ -1388,15 +1048,11 @@ async function untilRalph(
   decide: (text: string) => unknown,
   rounds?: number,
 ) {
-  const instance: YamlMock = new MockAgent({
-    runs: drafts.map((message) =>
-      run([{ ...settle(message), drain: ["steer"] }]),
-    ),
-  });
+  const instance = script(...drafts);
   const calls: RalphCall[] = [];
   const execution = await build(ralphDoc(), {
     ...options(),
-    createAgent: async () => instance,
+    ...await offline({ Ralph: instance }),
     ...schedules.ralph({
       rounds,
       until: (result, context) => {
@@ -1616,17 +1272,7 @@ test("nested Ralph levels sharing one controller succeed independently", async (
       source: { ...inner.source, routes: { [`$source~>${name}`]: ["$source~>Ralph"] } },
     };
   };
-  const drafts = (name: string) =>
-    new MockAgent({
-      runs: [`${name}-1`, `${name}-2`, `${name}-3`].map((text) =>
-        run([{ ...settle(assistant(text)), drain: ["steer"] }]),
-      ),
-    }) as YamlMock;
-  const agents: Record<string, YamlMock> = {
-    Left: drafts("Left"),
-    Right: drafts("Right"),
-  };
-  const final = mock("final reply");
+  const final = script("final reply");
   const calls: string[] = [];
   const execution = await build(
     parse({
@@ -1652,7 +1298,7 @@ test("nested Ralph levels sharing one controller succeed independently", async (
     }),
     {
       ...options(),
-      createAgent: async (spec) => agents[spec.graph] ?? final,
+      ...await offline({ "Left/Ralph": script("Left-1", "Left-2", "Left-3"), "Right/Ralph": script("Right-1", "Right-2"), Final: final }),
       ...schedules.ralph({
         until: (result, { round, label }) => {
           calls.push(`${label}:${round}:${contentText(result.content)}`);
@@ -1717,15 +1363,16 @@ test("same-named sibling and deep wrappers bind agents and strengths by unique p
     "Deep/Inner/Worker": "low",
     Final: "xhigh",
   };
-  const agents = new Map<string, YamlMock>(
-    Object.keys(rungs).map((path) => [
-      path,
-      mock(`report:${path}`),
-    ]),
-  );
+  const calls = new Map<string, { model: string; prompt: string | undefined }>();
+  const respond: FauxResponseFactory = (context, _options, _state, model) => {
+    const path = captureUsageContext()?.nodePath.join("/");
+    assert.ok(path && Object.hasOwn(rungs, path), `unexpected request from ${path}`);
+    calls.set(path, { model: model.id, prompt: userTexts(context.messages).at(-1) });
+    return fauxAssistantMessage(`report:${path}`);
+  };
   const levels: [string, string][] = [];
   const { models } = await fauxRuntime(
-    [],
+    Object.keys(rungs).map(() => respond),
     "p",
     ["s", "l", "m", "h", "x"].map((id) => ({ id, reasoning: true })),
   );
@@ -1782,11 +1429,7 @@ test("same-named sibling and deep wrappers bind agents and strengths by unique p
           schedules.parallel(),
         );
       },
-      createAgent: async (spec) => {
-        const instance = agents.get(spec.path);
-        assert.ok(instance, `unexpected agent path ${spec.path}`);
-        return instance;
-      },
+      collection: countedCollection().collection,
     },
   );
   try {
@@ -1806,20 +1449,10 @@ test("same-named sibling and deep wrappers bind agents and strengths by unique p
       ["Team", "Deep"],
       ["Team", "Deep/Inner"],
     ]);
-    assert.deepEqual(lastPrompts(agents.get("Final")!), [
-      "report:Left/Worker | report:Right/Worker | report:Deep/Inner/Worker",
-    ]);
+    assert.equal(calls.get("Final")?.prompt, "report:Left/Worker | report:Right/Worker | report:Deep/Inner/Worker");
     assert.equal(resultText(execution.graph), "report:Final");
     const models = { smol: "s", low: "l", med: "m", high: "h", xhigh: "x" };
-    for (const [path, rung] of Object.entries(rungs))
-      assert.deepEqual(
-        agents
-          .get(path)!
-          .calls.filter(({ method }) => method === "setModel")
-          .map(({ args }) => args),
-        [[{ provider: "p", modelId: models[rung] }]],
-        path,
-      );
+    for (const [path, rung] of Object.entries(rungs)) assert.equal(calls.get(path)?.model, models[rung], path);
   } finally {
     await execution.graph.close();
   }
@@ -1828,12 +1461,8 @@ test("same-named sibling and deep wrappers bind agents and strengths by unique p
 test("a nested Ralph level is driven while the outer sink is untouched", async () => {
   const inner = ralphDoc().graph;
   inner.source = { ...inner.source, routes: { "$source~>Wrapper": ["$source~>Ralph"] } };
-  const instance: YamlMock = new MockAgent({
-    runs: ["draft-1", "draft-2"].map((text) =>
-      run([{ ...settle(assistant(text)), drain: ["steer"] }]),
-    ),
-  });
-  const final = mock("final reply");
+  const instance = script("draft-1", "draft-2");
+  const final = script("final reply");
   const execution = await build(
     parse({
       graph: {
@@ -1851,7 +1480,7 @@ test("a nested Ralph level is driven while the outer sink is untouched", async (
     }),
     {
       ...options(),
-      createAgent: async (spec) => (spec.node === "Ralph" ? instance : final),
+      ...await offline({ "Wrapper/Ralph": instance, Final: final }),
       ...schedules.ralph({ rounds: 2 }),
     },
   );
@@ -1877,9 +1506,8 @@ test("a nested Ralph level is driven while the outer sink is untouched", async (
 });
 
 test("message-edge prompt placeholders fail before a model request", async () => {
-  const instance = mock("unused");
-  try {
-    await assert.rejects(
+  const instance = script();
+  await assert.rejects(
       build(
         parse({
           graph: {
@@ -1893,16 +1521,13 @@ test("message-edge prompt placeholders fail before a model request", async () =>
             ],
           },
         }),
-        { ...options(), createAgent: async () => instance },
+        { ...options(), ...await offline({ Reader: instance }) },
       ),
       new graph.DataflowDefinitionError(
         'junco-syntax: prompt placeholder {{Start~>Reader}} of node "Reader" names message edge "Start~>Reader"; placeholders require a value or on: return edge',
       ),
     );
-    assert.deepEqual(instance.requests, []);
-  } finally {
-    await instance.return();
-  }
+  assert.deepEqual(instance.requests, []);
 });
 
 async function stepUntil(execution: { step(): Promise<unknown> }, reached: () => boolean) {
@@ -1914,9 +1539,10 @@ for (const sameProduct of [false, true])
   test(`always stages the YAML prompt once per settlement (identical products: ${sameProduct})`, async () => {
     const first = assistant("first");
     const second = sameProduct ? first : assistant("second");
-    const instance: YamlMock = new MockAgent({
-      runs: [run([pause([]), settle(first)]), run([settle(second)])],
-    });
+    const instance = script(
+      fauxAssistantMessage(fauxToolCall("yield", { reason: "pause" }), { stopReason: "toolUse" }),
+      first, second,
+    );
     const execution = await JuncoGraph.fromYaml(`graph:
   nodes:
     A:
@@ -1925,21 +1551,21 @@ for (const sameProduct of [false, true])
   sink: { stream: true, trigger: never }
   edges:
     - { from: A, to: $sink, kind: message, on: return, schema: {type: object} }
-`, { ...options(), createAgent: async () => instance });
+`, { ...options(), ...await offline({ A: instance }) });
     const id = graph.NodeId.create("A");
-    const staged = () => instance.calls.filter(call => call.method === "stagePrompt").length;
+    const member = execution.graph.getNode(id)!.state;
+    assert.ok(member instanceof agent.JuncoAgent);
     const queued = () => execution.graph.observe().inputs.get(execution.graph.sink.id)?.messages.get(graph.EdgeId.create("A~>$sink")) ?? [];
     try {
       for (let i = 0; i < 3; i++) assert.ok(execution.graph.available().has(id));
-      assert.equal(staged(), 0);
+      assert.equal(member.status, "ready");
       await stepUntil(execution, () => instance.requests.length === 1);
-      assert.equal(staged(), 1);
+      assert.deepEqual(requestTexts(instance.requests)[0], ["Generate a new unit test"]);
       assert.equal(queued().length, 0);
       await stepUntil(execution, () => queued().length === 2);
-      assert.equal(queued()[0], first);
-      assert.equal(queued()[1], second);
-      assert.equal(O.toUndefined(execution.graph.result(id)), second);
-      assert.equal(staged(), 2);
+      const published = queued().map(message => { assert.ok(Value.Check(agent.AssistantMessageSchema, message)); return contentText(message.content); });
+      assert.deepEqual(published, ["first", sameProduct ? "first" : "second"]);
+      assert.equal(O.toUndefined(execution.graph.result(id)), queued()[1]);
       assert.deepEqual(requestTexts(instance.requests).at(-1), ["Generate a new unit test", "Generate a new unit test"]);
       assert.ok(execution.graph.available().has(id));
     } finally {
@@ -1951,8 +1577,8 @@ for (const transport of ["value", "return"] as const)
   test(`one upstream settlement drives a ${transport} template`, async () => {
     const repeated = transport === "value";
     const first = assistant("one"), second = assistant("two");
-    const a = mock("  answer  ");
-    const b: YamlMock = new MockAgent({ runs: [run([settle(first)]), run([settle(second)])] });
+    const a = script("  answer  ");
+    const b = script(first, second);
     const execution = await build(parse({ graph: {
       nodes: {
         Start: { kind: "emit", text: "Provide an answer", spec: "done" },
@@ -1964,11 +1590,12 @@ for (const transport of ["value", "return"] as const)
         { from: "A", to: "B", id: "report", schema: reply, ...(repeated ? {} : {kind: "message", on: "return"}) },
         { from: "B", to: "$sink", schema: reply },
       ],
-    }}), { ...options(), createAgent: async ({ node }) => node === "A" ? a : b });
+    }}), { ...options(), ...await offline({ A: a, B: b }) });
     const id = graph.NodeId.create("B");
     try {
-      await stepUntil(execution, () => O.toUndefined(execution.graph.result(id)) === first);
-      if (repeated) await stepUntil(execution, () => O.toUndefined(execution.graph.result(id)) === second);
+      await stepUntil(execution, () => O.isSome(execution.graph.result(id)));
+      assert.equal(resultText(execution.graph, id), "one");
+      if (repeated) await stepUntil(execution, () => resultText(execution.graph, id) === "two");
       else { await execution.run(); await execution.run(); }
       assert.deepEqual(lastPrompts(b), repeated ? ["value=answer", "value=answer"] : ["value=answer"]);
       assert.deepEqual(requestTexts(b.requests)[0], ["value=answer"]);
@@ -1986,7 +1613,7 @@ for (const trigger of [
   "never",
 ] as const)
   test(`scheduled consumer readiness ${JSON.stringify(trigger)}`, async () => {
-    const consumer: YamlMock = new MockAgent({ runs: [run([settle(assistant("early"))]), run([settle(assistant("late"))])] });
+    const consumer = script("early", "late");
     const execution = await build(
       parse({
         graph: {
@@ -2008,8 +1635,7 @@ for (const trigger of [
       }),
       {
         ...options(),
-        createAgent: async (spec) =>
-          spec.node === "Consumer" ? consumer : mock(spec.node),
+        ...await offline({ Left: script("Left"), Right: script("Right"), Consumer: consumer }),
       },
     );
     try {
@@ -2030,15 +1656,7 @@ for (const trigger of [
   });
 
 test("source fan-out preserves queued payloads and sink waits for both value results", async () => {
-  const agents = new Map([
-    ["Left", mock("LEFT")],
-    ["Right", mock("RIGHT")],
-  ]);
-  const retained = assistant("LEFT");
-  agents.set(
-    "Left",
-    new MockAgent({ runs: [run([{ ...settle(retained), drain: ["steer"] }])] }),
-  );
+  const agents = { Left: script("LEFT"), Right: script("RIGHT") };
   const execution = await build(
     parse({
       graph: {
@@ -2060,7 +1678,7 @@ test("source fan-out preserves queued payloads and sink waits for both value res
     }),
     {
       ...options(),
-      createAgent: async (spec) => agents.get(spec.node)!,
+      ...await offline(agents),
       scheduler: () => schedules.roundRobin(),
     },
   );
@@ -2105,14 +1723,14 @@ test("source fan-out preserves queued payloads and sink waits for both value res
       ["Left", "$sink", "Left->$sink", "value"],
       ["Right", "$sink", "Right->$sink", "value"],
     ]);
-    for (const id of ["Left", "Right"]) {
+    for (const id of ["Left", "Right"] as const) {
       assert.deepEqual(
         observation.inputs
           .get(graph.NodeId.create(id))
           ?.messages.get(graph.EdgeId.create(`$source~>${id}`)),
         [payload],
       );
-      assert.equal(agents.get(id)!.requests.length, 0);
+      assert.equal(agents[id].requests.length, 0);
     }
     await stepUntil(execution, () => O.isSome(execution.graph.result(graph.NodeId.create("Left"))));
     assert.equal(
@@ -2125,7 +1743,7 @@ test("source fan-out preserves queued payloads and sink waits for both value res
     );
     assert.equal(execution.graph.result(execution.graph.sink.id)._tag, "None");
     await execution.run();
-    for (const [, instance] of agents)
+    for (const instance of Object.values(agents))
       assert.deepEqual(lastPrompts(instance), [asTask("seed text", "T1")]);
     const left = execution.graph.result(graph.NodeId.create("Left"));
     const sink = execution.graph.result(execution.graph.sink.id);
@@ -2166,16 +1784,10 @@ test("recursive graphs have fresh local ports and publish one final to messages 
     { from: "Sibling", to: "Final", id: "siblingValue", schema: reply },
     { from: "Fan", to: "$sink", schema: reply },
   );
-  const final = mock("final"),
-    fan = mock("fan");
+  const final = script("final"), fan = script("fan");
   const execution = await build(parse(doc), {
     ...options(),
-    createAgent: async (spec) =>
-      spec.node === "Worker"
-        ? mock(spec.graph === "sibling" ? "SIBLING" : "CHILD")
-        : spec.node === "Fan"
-          ? fan
-          : final,
+    ...await offline({ "Inner/Worker": script("CHILD"), "Sibling/Worker": script("SIBLING"), Fan: fan, Final: final }),
   });
   try {
     const sources = new Set(),
@@ -2243,7 +1855,7 @@ test("scheduled ingress rejects unrouted input", async () => {
         ],
       },
     }),
-    { ...options(), createAgent: async () => mock("unused") },
+    { ...options(), ...await offline({ A: script() }) },
   );
   try {
     enqueuePrompts(execution, "wrong", {
@@ -2287,7 +1899,7 @@ test("unrouted source edges are rejected at parse time", () => {
 });
 
 test("value ingress is forwarded raw and empty routes drop only that input", async () => {
-  const a = mock("done");
+  const a = script("done");
   const execution = await build(
     parse({
       graph: {
@@ -2305,7 +1917,7 @@ test("value ingress is forwarded raw and empty routes drop only that input", asy
         ],
       },
     }),
-    { ...options(), createAgent: async () => a },
+    { ...options(), ...await offline({ A: a }) },
   );
   const input = assistant("  normalized  ");
   try {
@@ -2334,7 +1946,7 @@ test("early sink identifies the selected predecessor that has not returned", asy
         edges: [{ from: "A", to: "$sink", schema: reply }],
       },
     }),
-    { ...options(), createAgent: async () => mock("unused") },
+    { ...options(), ...await offline({ A: script() }) },
   );
   try {
     await assert.rejects(
@@ -2352,7 +1964,7 @@ for (const text of ["", "   ", "bad-stop"])
       ...assistant(text),
       ...(text === "bad-stop" ? { stopReason: "length" as const } : {}),
     };
-    const consumer = mock("unused");
+    const consumer = script();
     const execution = await build(
       parse({
         graph: {
@@ -2370,10 +1982,7 @@ for (const text of ["", "   ", "bad-stop"])
       }),
       {
         ...options(),
-        createAgent: async (spec) =>
-          spec.node === "A"
-            ? (new MockAgent({ runs: [run([settle(bad)])] }) satisfies YamlMock)
-            : consumer,
+        ...await offline({ A: script(bad), B: consumer }),
       },
     );
     try {
@@ -2394,7 +2003,7 @@ for (const text of ["", "   ", "bad-stop"])
 for (const transport of ["value", "return"] as const)
 test(`repeated ${transport} placeholders preserve order and optional emptiness without duplicating messages`, async () => {
   const edgeKind = transport === "return" ? { kind: "message", on: "return" } as const : {};
-  const consumer = mock("done");
+  const consumer = script("done");
   const execution = await build(
     parse({
       graph: {
@@ -2443,8 +2052,7 @@ test(`repeated ${transport} placeholders preserve order and optional emptiness w
     }),
     {
       ...options(),
-      createAgent: async (spec) =>
-        spec.node === "B" ? consumer : mock("VALUE"),
+      ...await offline({ B: consumer, A: script("VALUE"), Optional: script() }),
     },
   );
   try {
@@ -2526,8 +2134,7 @@ test("explicit widths serialize real activations and nested work uses the shared
   const execution = await build(doc, {
     ...options(),
     tracer: observer,
-    createAgent: async (spec) =>
-      mock(spec.node),
+    ...await offline({ "Inner/Worker": script("Worker"), Final: script("Final") }),
   });
   try {
     await execution.run();
@@ -2628,6 +2235,7 @@ test("pre-aborted build preserves its reason without acquiring agents or graph l
   const { models } = await fauxRuntime([]);
   const { collection, active } = countedCollection();
   const reason = new Error("pre-aborted fixture");
+  const transferred = await countedSession();
   try {
     await assert.rejects(
       build(
@@ -2642,13 +2250,295 @@ test("pre-aborted build preserves its reason without acquiring agents or graph l
           collection,
           ladder: new schedules.ModelLadder(models, fauxLadder),
           signal: AbortSignal.abort(reason),
+          agentOptions: new Map([[graph.NodeId.create("A"), { session: transferred.session }]]),
         },
       ),
       (error) => error === reason,
     );
+    assert.deepEqual(transferred.contexts, [BACKGROUND_CONTEXT]);
     assert.deepEqual(active, { leases: 0, bindings: 0, creatorCloses: 0 });
   } finally {
     await collection.close();
+  }
+});
+
+
+test("deleted construction options cannot invoke a factory, adopt a supplied agent or open a mux", async () => {
+  const { models, faux } = await fauxRuntime([]);
+  const { collection, active } = countedCollection();
+  const supplied = await agent.JuncoAgent.create({ provider: "faux", model: "faux-1", models, collection });
+  const open = spyOn(tools.ToolCollection, "create");
+  try {
+    for (const [key, value] of [
+      ["agents", { A: supplied }],
+      ["createAgent", () => assert.fail("removed factory called")],
+      ["createAgentOwnership", "caller"],
+    ] as const) {
+      const config = { ...options(), [key]: value, ladder: new schedules.ModelLadder(models, fauxLadder) };
+      await assert.rejects(build(roundDoc("ignored"), config), new RegExp(`${key}.*no longer supported`));
+      assert.equal(supplied.status, "idle");
+      assert.equal(active.bindings, 1);
+    }
+    assert.equal(open.mock.calls.length, 0);
+    assert.equal(faux.state.callCount, 0);
+  } finally {
+    open.mockRestore();
+    try { await supplied.return(); } finally { await collection.close(); }
+  }
+});
+
+test("node maps reject non-agents, unknown paths and invalid values before acquisition", async () => {
+  const { collection, events } = countedCollection();
+  const ladder = await offlineLadder([]);
+  const doc = document();
+  doc.graph.nodes.Code = { kind: "code" };
+  doc.graph.edges!.push({ from: "Start", to: "Code", kind: "message", schema: prompt },
+    { from: "Code", to: "Final", schema: reply });
+  const base = { ...options(), collection, ladder, code: { Code: Constant(null) } };
+  for (const name of ["tools", "agentOptions"] as const)
+    for (const path of ["Missing", "$sink", "Inner", "Inner/$source", "Start", "Code"]) {
+      const entry = await countedSession();
+      const key = graph.NodeId.create(path);
+      const map = new Map([[key, { session: entry.session }]]);
+      const config = name === "tools" ? { ...base, tools: new Map([[key, collection]]),
+        agentOptions: new Map([[graph.NodeId.create("Final"), { session: entry.session }]]) } : { ...base, agentOptions: map };
+      await assert.rejects(build(doc, config), (error) =>
+        error instanceof ValidationError && error.code === "node-map" && error.path === `/options/${name}` &&
+        error.message.includes(path));
+      assert.deepEqual(entry.contexts, [BACKGROUND_CONTEXT]);
+    }
+  for (const invalid of [{}, { Final: collection }, new Map([[graph.NodeId.create("Final"), undefined]])])
+    await assert.rejects(build(doc, { ...base, tools: invalid as BuildOptions["tools"] }), /map|ToolCollection/i);
+  for (const field of [
+    "provider", "model", "models", "thinkingLevel", "prompt", "systemPrompt", "tools",
+    "recorder", "recorderNodeId", "parallelToolCalls", "resources",
+  ]) {
+    const value = field === "resources" ? { skills: [] } : null;
+    const config = new Map([[graph.NodeId.create("Final"), { [field]: value }]]);
+    await assert.rejects(build(doc, { ...base, agentOptions: config }), new RegExp(field));
+  }
+  assert.deepEqual(events, []);
+});
+
+test("two paths cannot share a session, and promptless nodes cannot discard supplied images", async () => {
+  const ladder = await offlineLadder([]);
+  const { collection, events } = countedCollection();
+  const { session, contexts } = await countedSession();
+  await assert.rejects(build(document(), {
+    ...options(), collection, ladder, agentOptions: new Map(
+      ["Inner/Worker", "Final"].map(path => [graph.NodeId.create(path), { session }]),
+    ),
+  }), /same session/);
+  assert.deepEqual(contexts, [BACKGROUND_CONTEXT]);
+  const doc = roundDoc("omitted");
+  doc.graph.nodes.A = {};
+  await assert.rejects(build(doc, { ...options(), collection, ladder, agentOptions: new Map([[
+    graph.NodeId.create("A"), { images: [{ type: "image", mimeType: "image/png", data: "AA==" }] },
+  ]]) }), /images.*prompt/);
+  assert.deepEqual(events, []);
+});
+
+test("failure registering the second agent releases every graph, agent, binding and pending session", async () => {
+  const primary = new Error("second registration failed"), binding = new Error("binding close failed"), pending = new Error("pending close failed");
+  const { collection, active, events } = countedCollection({ binding: 2, error: binding });
+  const holders = [await countedSession(), await countedSession(), await countedSession(pending)];
+  const paths = ["Child/A", "Child/B", "Later"];
+  const doc = parse({ graph: {
+    nodes: {
+      Child: { kind: "graph", graph: {
+        nodes: { A: { prompt: "first" }, B: { prompt: "second" } },
+        edges: [{ from: "A", to: "B", schema: reply }, { from: "B", to: "$sink", schema: reply }],
+      } },
+      Later: { prompt: "last" },
+    },
+    edges: [{ from: "Child", to: "Later", schema: reply }, { from: "Later", to: "$sink", schema: reply }],
+  } });
+  const graphs = new Set<JuncoGraph<TSchema, unknown>>();
+  const members: { readonly status: string }[] = [];
+  const original = JuncoGraph.prototype.addNode;
+  const registration = spyOn(JuncoGraph.prototype, "addNode").mockImplementation(function(this: JuncoGraph<TSchema, unknown>, spec) {
+    graphs.add(this);
+    if (spec.state instanceof agent.JuncoAgent) {
+      members.push(spec.state);
+      if (spec.id === "B") throw primary;
+    }
+    return Reflect.apply(original, this, [spec]);
+  });
+  try {
+    await assert.rejects(build(doc, {
+      ...options(), collection, ladder: await offlineLadder([]),
+      agentOptions: new Map(paths.map((path, i) => [graph.NodeId.create(path), { session: holders[i]!.session }])),
+    }), (error) => {
+      assert.ok(error instanceof AggregateError);
+      const leaves = (e: unknown): unknown[] => e instanceof AggregateError ? e.errors.flatMap(leaves) : [e];
+      assert.deepEqual(leaves(error), [primary, binding, pending]);
+      return true;
+    });
+    assert.deepEqual(members.map(m => m.status), ["closed", "closed"]);
+    assert.equal(graphs.size, 2);
+    assert.ok([...graphs].every(g => g.signal.aborted));
+    assert.deepEqual(holders.map(h => h.contexts.length), [1, 1, 1]);
+    assert.deepEqual(active, { bindings: 0, leases: 0, creatorCloses: 0 });
+    assert.deepEqual(events.sort(), ["bind-close:1", "bind-close:2", "lease-close:1", "lease-close:2"]);
+  } finally {
+    registration.mockRestore();
+    await collection.close();
+  }
+});
+
+
+test("nested agents request only their mapped tools, run them under their own paths, and share one native fallback", async () => {
+  const native = await copyTreeNative();
+  const root = await mkdtemp(join(tmpdir(), "junco-yaml-grants-"));
+  const names = ["Left", "Right", "Default"] as const;
+  const borrowed = new Map<graph.NodeIdType, tools.ToolCollection>();
+  const calls: string[] = [], traced: object[] = [], monitored: object[] = [];
+  const toolReceipts: [string, string][] = [];
+  const { recorder } = probeRecorder((path, event) => {
+    if (event.kind === "finish" && event.outcome === "success" && event.tool.startsWith("private_"))
+      toolReceipts.push([path, event.tool]);
+  });
+  const trace = Object.assign(new tracer.DummyTracer(), {
+    observeAgent(node: { state: object }) { traced.push(node.state); return () => {}; },
+  });
+  const branch = (name: string) => ({ kind: "graph", graph: {
+    source: { routes: { [`Start~>${name}`]: ["$source~>Worker"] } },
+    nodes: { Worker: { prompt: `instruction:${name}`, system: `system:${name}`,
+      ...(name === "Left" ? { skills: ["guide"] } : {}), tool_block: [...NATIVE_TOOL_BLOCK, "task"] } },
+    edges: [{ from: "$source", to: "Worker", kind: "message", schema: prompt }, { from: "Worker", to: "$sink", schema: reply }],
+  } });
+  const doc = parse({ skills: { guide: "guide/SKILL.md" }, graph: {
+    nodes: { Start: { kind: "emit", text: "start", spec: "work" },
+      ...Object.fromEntries(names.map(name => [name, branch(name)])),
+      Final: { prompt: names.map(name => `{{${name}->Final}}`).join(" / "), tool_block: NATIVE_TOOL_BLOCK } },
+    edges: [...names.flatMap(name => [
+      { from: "Start", to: name, kind: "message", schema: prompt },
+      { from: name, to: "Final", id: `${name}->Final`, kind: "message", on: "return", schema: reply },
+    ]), { from: "Final", to: "$sink", schema: reply }],
+  } });
+  const image = { type: "image", data: "AA==", mimeType: "image/png" } as const;
+  const respond: FauxResponseFactory = (context, options, _state, model) => {
+    const path = captureUsageContext()?.nodePath.join("/");
+    assert.ok(path);
+    calls.push(path);
+    const [name] = path.split("/");
+    const granted = getCurrentTools(context.messages).map(t => t.name);
+    assert.deepEqual(granted.filter(t => t.startsWith("private_")),
+      name === "Left" || name === "Right" ? [`private_${name}`] : []);
+    assert.ok(!granted.includes("bash"));
+    if (name === "Final") {
+      assert.deepEqual(userTexts(context.messages), ["receipt:Left / receipt:Right / receipt:Default"]);
+      return fauxAssistantMessage("joined");
+    }
+    const first = context.messages.find(m => m.role === "user");
+    assert.ok(first && userTexts(context.messages)[0] === `instruction:${name}`);
+    const system = context.messages.filter(m => m.role === "system").map(m => contentText(m.content)).join("\n");
+    assert.ok(system.includes(`system:${name}`));
+    assert.equal(system.includes("Role-specific skill description."), name === "Left");
+    if (name === "Left") {
+      assert.ok(Array.isArray(first.content) && first.content.some(block => block.type === "image" && block.data === image.data));
+      assert.equal(model.id, "large");
+      assert.equal(options?.reasoning, "high");
+    } else assert.equal(model.id, "small");
+    if (name !== "Default") {
+      const result = context.messages.find(m => m.role === "toolResult");
+      if (!result) return fauxAssistantMessage(fauxToolCall(`private_${name}`, {}), { stopReason: "toolUse" });
+      assert.equal(result.isError, false);
+      assert.equal(contentText(result.content), `tool:${name}`);
+    }
+    return fauxAssistantMessage(`receipt:${name}`);
+  };
+  const { models } = await fauxRuntime(Array.from({ length: 6 }, () => respond), "faux", [
+    { id: "small" }, { id: "large", reasoning: true },
+  ]);
+  const ladder = new schedules.ModelLadder(models, {
+    ...schedules.uniformLadder({ model: "faux/small" }), high: { model: "faux/large", thinking: "high" },
+  });
+  try {
+    await mkdir(join(root, "guide"));
+    await writeFile(join(root, "guide", "SKILL.md"), "---\nname: guide\ndescription: Role-specific skill description.\n---\nGuide.\n");
+    for (const name of ["Left", "Right"]) {
+      const dir = join(root, name);
+      await mkdir(dir);
+      borrowed.set(graph.NodeId.create(`${name}/Worker`), await tools.ToolCollection.create(dir, {
+        native, policy: tools.LockPolicy, recorder,
+        extend: async () => ({ tools: [{ name: `private_${name}`, label: name, description: name,
+          parameters: Type.Object({}), execute: async () => ({ content: [{ type: "text", text: `tool:${name}` }], details: {} }) }],
+          close: async () => {},
+        }),
+      }));
+    }
+    // Inject only the filesystem backend; creation, owner bindings and teardown are real.
+    const create = tools.ToolCollection.create.bind(tools.ToolCollection);
+    const open = spyOn(tools.ToolCollection, "create").mockImplementation((cwd, init) => create(cwd, { ...init, native }));
+    try {
+      const opts = { ...options(), cwd: root, ladder, tools: borrowed, recorder, tracer: trace };
+      await assert.rejects(build(doc, { ...opts, policy: tools.EmptyPolicy }), /policy/i);
+      await assert.rejects(build(doc, { ...opts, recorder: probeRecorder().recorder }), /recorder/i);
+      assert.equal(open.mock.calls.length, 0);
+      const execution = await build(doc, { ...opts,
+        scheduler: (_label, path) => schedules.strength(() => path === "Left" ? "high" : "med", schedules.parallel()),
+        agentOptions: new Map([[graph.NodeId.create("Left/Worker"), {
+          images: [image], tokenMonitor: { tokenThreshold: 1, onThreshold: (owner) => { monitored.push(owner); } },
+        }]]),
+      });
+      const fallback = execution.graph.collection;
+      try {
+        assert.equal(open.mock.calls.length, 1);
+        assert.ok(fallback);
+        const actual = names.map(name => {
+          const child = execution.graph.getNode(graph.NodeId.create(name))?.state;
+          assert.ok(child instanceof JuncoGraph);
+          assert.equal(child.collection, fallback);
+          const worker = child.getNode(graph.NodeId.create("Worker"))?.state;
+          assert.ok(worker instanceof agent.JuncoAgent);
+          assert.equal(worker.collection, borrowed.get(graph.NodeId.create(`${name}/Worker`)) ?? fallback);
+          return worker;
+        });
+        await execution.run();
+        assert.equal(resultText(execution.graph), "joined");
+        assert.deepEqual(calls.sort(), ["Default/Worker", "Final", "Left/Worker", "Left/Worker", "Right/Worker", "Right/Worker"]);
+        assert.ok(monitored.length > 0 && monitored.every(owner => owner === actual[0]));
+        for (const worker of actual) assert.equal(traced.filter(owner => owner === worker).length, 1);
+        assert.deepEqual(toolReceipts.sort(), [["Left::Worker", "private_Left"], ["Right::Worker", "private_Right"]]);
+      } finally {
+        await execution.graph.close();
+      }
+      assert.throws(() => fallback!.lease(), /closed/);
+      for (const collection of borrowed.values()) await collection.lease().close();
+      const same = borrowed.get(graph.NodeId.create("Left/Worker"))!;
+      const fullyMapped = new Map([...borrowed, [graph.NodeId.create("Default/Worker"), same] as const, [graph.NodeId.create("Final"), same] as const]);
+      await assert.rejects(build(doc, { ...opts, tools: fullyMapped, tool_pruning: true }), /tool_pruning/);
+      const mapped = await build(doc, { ...opts, tools: fullyMapped });
+      try {
+        assert.equal(open.mock.calls.length, 1, "all paths mapped: no default opened");
+        assert.equal(mapped.graph.collection, undefined);
+        const owners = new Set<string>();
+        for (const name of ["Left", "Default"]) {
+          const child = mapped.graph.getNode(graph.NodeId.create(name))!.state;
+          assert.ok(child instanceof JuncoGraph);
+          const worker = child.getNode(graph.NodeId.create("Worker"))!.state;
+          assert.ok(worker instanceof agent.JuncoAgent && worker.owner !== undefined);
+          assert.equal(worker.collection, same);
+          owners.add(worker.owner);
+        }
+        assert.equal(owners.size, 2);
+      } finally { await mapped.graph.close(); }
+      doc.graph.nodes.Final = { kind: "code" };
+      const primary = new Error("cannot register final");
+      const rolledBack: tools.ToolCollection[] = [];
+      await assert.rejects(build(doc, { ...opts, code: { Final: ({ collection }) => {
+        assert.ok(collection);
+        rolledBack.push(collection);
+        throw primary;
+      } } }), (error) => error === primary);
+      assert.equal(rolledBack.length, 1);
+      assert.throws(() => rolledBack[0]!.lease(), /closed/);
+      for (const collection of borrowed.values()) await collection.lease().close();
+    } finally { open.mockRestore(); }
+  } finally {
+    try { await Promise.all([...borrowed.values()].map(collection => collection.close())); }
+    finally { await rm(root, { recursive: true, force: true }); }
   }
 });
 
@@ -2957,7 +2847,7 @@ for (const nested of [false, true])
         assert.equal(faux.state.callCount, 0);
         assert.deepEqual(
           events.filter((event) => event.startsWith("bind-close:")),
-          ["bind-close:2", "bind-close:1"],
+          ["bind-close:1", "bind-close:2"],
         );
         assert.deepEqual(active, { leases: 0, bindings: 0, creatorCloses: 0 });
         assert.deepEqual(
@@ -3063,8 +2953,7 @@ test("fromYaml collects only requested measurements, separately at each graph le
         }
         return { selected: schedules.select(snapshot, snapshot.available) };
       },
-      createAgent: async ({ node }) =>
-        node === "Worker" ? mock("leaf") : mock("done"),
+      ...await offline({ "Inner/Worker": script("leaf"), Final: script("done") }),
     });
     try {
       await execution.run();
@@ -3077,360 +2966,16 @@ test("fromYaml collects only requested measurements, separately at each graph le
   }
 });
 
-test("resources need the collection build creates", async () => {
-  const message =
-    "junco-syntax: resources and onResourceEvent apply to the collection build creates; open the supplied collection with them instead";
-  for (const extra of [
-    { createAgent: async () => mock("done"), resources: { pids: 1 } },
-    { collection: {} as tools.ToolCollection, onResourceEvent: () => {} },
-  ]) {
-    await assert.rejects(
-      build(document(), { ...options(), ...extra }),
-      (error) =>
-        error instanceof graph.DataflowDefinitionError &&
-        error.message === message,
-    );
-  }
-});
-
-test("tool_pruning needs the collection build creates; loopGuard reaches every agent spec", async () => {
-  const message =
-    "junco-syntax: tool_pruning applies to the collection build creates; open the supplied collection with { tool_pruning: true } instead";
-  for (const extra of [
-    { createAgent: async () => mock("done") },
-    { collection: {} as tools.ToolCollection },
-  ])
-    await assert.rejects(
-      build(document(), { ...options(), ...extra, tool_pruning: true }),
-      (error) =>
-        error instanceof graph.DataflowDefinitionError &&
-        error.message === message,
-    );
+test("native options apply only to a collection created by the builder", async () => {
+  const { collection } = countedCollection();
+  const ladder = await offlineLadder([]);
+  for (const extra of [{ resources: { pids: 1 } }, { onResourceEvent() {} }, { tool_pruning: true }])
+    await assert.rejects(build(document(), { ...options(), collection, ladder, ...extra }), /apply|applies/);
   const loopGuard = new agent.LoopGuard();
-  const seen: [string, unknown][] = [];
-  const execution = await build(document(), {
-    ...options(),
-    loopGuard,
-    createAgent: async (spec) => {
-      seen.push([spec.path, spec.loopGuard]);
-      return mock("done");
-    },
-  });
-  try {
-    assert.deepEqual(
-      seen.map(([path, guard]) => [path, guard === loopGuard]),
-      [
-        ["Inner/Worker", true],
-        ["Final", true],
-      ],
-    );
-  } finally {
-    await execution.graph[Symbol.asyncDispose]();
-  }
+  const specs = await resolveAgents(document(), { cwd: process.cwd(), loopGuard });
+  assert.deepEqual(specs.map(({path, loopGuard: guard}) => [path, guard === loopGuard]), [["Inner/Worker", true], ["Final", true]]);
 });
 
-test("prepared agents use node paths, skip factory configuration and belong to the successful graph", async () => {
-  const { models, faux } = await fauxRuntime([
-    fauxAssistantMessage("prepared child result"),
-    (context) => {
-      assert.equal(
-        userTexts(context.messages).at(-1),
-        "got: prepared child result",
-      );
-      return fauxAssistantMessage("prepared final result");
-    },
-  ]);
-  const { collection, active } = countedCollection();
-  const worker: YamlAgent = await agent.JuncoAgent.create({
-    provider: "faux",
-    model: "faux-1",
-    models,
-    tools: [],
-    collection,
-  });
-  const final: YamlAgent = await agent.JuncoAgent.create({
-    provider: "faux",
-    model: "faux-1",
-    models,
-    tools: [],
-    collection,
-  });
-  try {
-    // No build collection/models/ladder: prepared agents retain their own configuration.
-    const execution = await build(document(), {
-      ...options(),
-      agents: { "Inner/Worker": worker, Final: final },
-    });
-    try {
-      assert.equal(execution.graph.collection, undefined);
-      assert.deepEqual(active, { leases: 0, bindings: 2, creatorCloses: 0 });
-      await execution.run();
-      assert.equal(resultText(execution.graph), "prepared final result");
-      assert.equal(faux.state.callCount, 2);
-    } finally {
-      await execution.graph[Symbol.asyncDispose]();
-    }
-    assert.deepEqual(active, { leases: 0, bindings: 0, creatorCloses: 0 });
-  } finally {
-    await worker.return();
-    await final.return();
-    await collection.close();
-  }
-});
-
-for (const boundary of [
-  "aborted",
-  "code definition",
-  "missing",
-  "unused",
-  "duplicate",
-  "factory",
-  "resources",
-] as const)
-  test(`prepared agents transfer ownership before ${boundary} failure`, async () => {
-    const { models } = await fauxRuntime([]);
-    const { collection, events, active } = countedCollection();
-    const instance: YamlAgent = await agent.JuncoAgent.create({
-      provider: "faux",
-      model: "faux-1",
-      models,
-      tools: [],
-      collection,
-    });
-    const extra: YamlAgent | undefined =
-      boundary === "unused"
-        ? await agent.JuncoAgent.create({
-            provider: "faux",
-            model: "faux-1",
-            models,
-            tools: [],
-            collection,
-          })
-        : undefined;
-    const reason = new Error("prepared pre-aborted fixture");
-    const doc = parse({
-      graph: {
-        nodes: {
-          A: { prompt: "work" },
-          ...(boundary === "missing" || boundary === "duplicate"
-            ? { B: { prompt: "work" } }
-            : boundary === "code definition"
-              ? { Missing: { kind: "code" } }
-              : {}),
-        },
-        edges: [
-          ...(boundary === "missing" || boundary === "duplicate"
-            ? [{ from: "A", to: "B", schema: reply }]
-            : boundary === "code definition"
-              ? [{ from: "A", to: "Missing", schema: reply }]
-              : []),
-          {
-            from:
-              boundary === "missing" || boundary === "duplicate"
-                ? "B"
-                : boundary === "code definition"
-                  ? "Missing"
-                  : "A",
-            to: "$sink",
-            schema: reply,
-          },
-        ],
-      },
-    });
-    const expected = {
-      aborted: /prepared pre-aborted fixture/,
-      "code definition":
-        /code node "Missing" has no definition in options.code/,
-      missing: /missing prepared agent.*B/,
-      unused: /unused prepared agents: Extra/,
-      duplicate: /same agent to multiple node paths/,
-      factory: /agents and createAgent are mutually exclusive/,
-      resources:
-        /resources and onResourceEvent apply to the collection build creates/,
-    }[boundary];
-    try {
-      await assert.rejects(
-        build(doc, {
-          ...options(),
-          agents: {
-            A: instance,
-            ...(extra ? { Extra: extra } : {}),
-            ...(boundary === "duplicate" ? { B: instance } : {}),
-          },
-          ...(boundary === "aborted"
-            ? { signal: AbortSignal.abort(reason) }
-            : {}),
-          ...(boundary === "factory"
-            ? { createAgent: async () => instance }
-            : {}),
-          ...(boundary === "resources" ? { resources: { pids: 1 } } : {}),
-        }),
-        (error) => {
-          assert.ok(error instanceof Error);
-          assert.match(error.message, expected);
-          if (boundary === "aborted") assert.equal(error, reason);
-          return true;
-        },
-      );
-      assert.deepEqual(active, { leases: 0, bindings: 0, creatorCloses: 0 });
-      assert.deepEqual(
-        events,
-        extra ? ["bind-close:2", "bind-close:1"] : ["bind-close:1"],
-      );
-    } finally {
-      await instance.return();
-      await extra?.return();
-      await collection.close();
-    }
-  });
-
-for (const [label, nested, failing] of [
-  ["root", false, "B"],
-  ["unadopted child", true, "B"],
-  ["adopted child", true, "Last"],
-] as const)
-  for (const cleanupFails of [false, true])
-    test(`prepared rollback closes every agent and ${label}${cleanupFails ? " despite cleanup failure" : ""}`, async () => {
-      const { models } = await fauxRuntime([]);
-      // Valid document reference, invalid compiled prompt: fail inside construction, not parse.
-      const invalid = "{{plain-message}}";
-      const failingEdge = { id: "plain-message", kind: "message" };
-      const cleanup = new Error("prepared cleanup sentinel");
-      const { collection, events, active } = countedCollection(
-        cleanupFails ? { binding: 2, error: cleanup } : undefined,
-      );
-      const members: YamlAgent[] = [];
-      for (let i = 0; i < 3; i++)
-        members.push(
-          await agent.JuncoAgent.create({
-            provider: "faux",
-            model: "faux-1",
-            models,
-            tools: [],
-            collection,
-          }),
-        );
-      const child = {
-        nodes: { A: { prompt: "work" }, B: { prompt: failing === "B" ? invalid : "work" } },
-        edges: [
-          { from: "A", to: "B", schema: reply, ...(failing === "B" ? failingEdge : {}) },
-          { from: "B", to: "$sink", schema: reply },
-        ],
-      };
-      try {
-        await assert.rejects(
-          build(
-            parse({
-              graph: nested
-                ? {
-                    nodes: { Child: { kind: "graph", graph: child }, Last: { prompt: failing === "Last" ? invalid : "work" } },
-                    edges: [
-                      { from: "Child", to: "Last", schema: reply, ...(failing === "Last" ? failingEdge : {}) },
-                      { from: "Last", to: "$sink", schema: reply },
-                    ],
-                  }
-                : {
-                    ...child,
-                    nodes: { ...child.nodes, Last: { prompt: "work" } },
-                    edges: [
-                      ...child.edges.slice(0, 1),
-                      { from: "B", to: "Last", schema: reply },
-                      { from: "Last", to: "$sink", schema: reply },
-                    ],
-                  },
-            }),
-            {
-              ...options(),
-              collection,
-              agents: {
-                [nested ? "Child/A" : "A"]: members[0]!,
-                [nested ? "Child/B" : "B"]: members[1]!,
-                Last: members[2]!,
-              },
-            },
-          ),
-          (error) => {
-            if (!cleanupFails) assert.match(String(error), /names message edge "plain-message"/);
-            else {
-              assert.ok(error instanceof AggregateError);
-              assert.match(String(error.errors[0]), /names message edge "plain-message"/);
-              assert.ok(
-                error.errors
-                  .slice(1)
-                  .some(
-                    (failure) =>
-                      failure === cleanup ||
-                      (failure instanceof AggregateError &&
-                        failure.errors.includes(cleanup)),
-                  ),
-              );
-            }
-            return true;
-          },
-        );
-        assert.deepEqual(
-          events.filter((event) => event.startsWith("bind-close:")),
-          ["bind-close:3", "bind-close:2", "bind-close:1"],
-        );
-        assert.deepEqual(active, { leases: 0, bindings: 0, creatorCloses: 0 });
-      } finally {
-        for (const member of members) await member.return().catch(() => {});
-        await collection.close();
-      }
-    });
-
-test("createAgent instances remain caller-owned when construction fails", async () => {
-  const { models } = await fauxRuntime([]);
-  const { collection, active } = countedCollection();
-  const instance: YamlAgent = await agent.JuncoAgent.create({
-    provider: "faux",
-    model: "faux-1",
-    models,
-    tools: [],
-    collection,
-  });
-  const primary = new Error("factory registration sentinel");
-  try {
-    await assert.rejects(
-      build(
-        parse({
-          graph: {
-            nodes: { A: { prompt: "work" }, B: { prompt: "work" } },
-            edges: [
-              { from: "A", to: "B", schema: reply },
-              { from: "B", to: "$sink", schema: reply },
-            ],
-          },
-        }),
-        {
-          ...options(),
-          createAgent: async ({ node }) => {
-            if (node === "B") throw primary;
-            return instance;
-          },
-        },
-      ),
-      (error) => error === primary,
-    );
-    assert.deepEqual(active, { leases: 0, bindings: 1, creatorCloses: 0 });
-  } finally {
-    await instance.return();
-    await collection.close();
-  }
-});
-
-/** Counts every disposal of `instance`, whether by a graph or by its owner. */
-function countDisposals(instance: YamlMock): { count: number } {
-  const disposals = { count: 0 };
-  const dispose = instance.return.bind(instance);
-  instance.return = (value) => {
-    disposals.count++;
-    return dispose(value);
-  };
-  return disposals;
-}
-const aborts = (instance: YamlMock) =>
-  instance.calls.filter(({ method }) => method === "abort").length;
 const roundDoc = (instruction: string) =>
   parse({
     graph: {
@@ -3438,189 +2983,6 @@ const roundDoc = (instruction: string) =>
       edges: [{ from: "Start", to: "A", kind: "message", schema: prompt }, { from: "A", to: "$sink", schema: reply }],
     },
   });
-
-test("caller-owned factory agents survive each round's graph close and close once with their owner", async () => {
-  const instance: YamlMock = new MockAgent({
-    runs: ["answer-1", "answer-2"].map((text) =>
-      run([settle(assistant(text))]),
-    ),
-  });
-  const disposals = countDisposals(instance);
-  try {
-    for (const round of [1, 2]) {
-      const execution = await build(roundDoc(`round ${round}`), {
-        ...options(),
-        createAgent: async () => instance,
-        createAgentOwnership: "caller",
-      });
-      try {
-        await execution.run();
-        assert.equal(resultText(execution.graph), `answer-${round}`);
-      } finally {
-        await execution.graph.close();
-      }
-      assert.equal(aborts(instance), round, "close aborts and joins");
-      assert.equal(disposals.count, 0);
-      assert.notEqual(instance.status, "closed");
-    }
-    assert.deepEqual(requestTexts(instance.requests).map((texts) => texts.filter((text) => text.startsWith("round ")).at(-1)), ["round 1", "round 2"]);
-  } finally {
-    await instance.return();
-  }
-  assert.equal(disposals.count, 1);
-  assert.equal(instance.status, "closed");
-});
-
-for (const ownership of [undefined, "graph"] as const)
-  test(`${ownership ?? "default"} factory ownership disposes the agent on graph close`, async () => {
-    const instance = mock("done");
-    const disposals = countDisposals(instance);
-    const execution = await build(roundDoc("work"), {
-      ...options(),
-      createAgent: async () => instance,
-      ...(ownership ? { createAgentOwnership: ownership } : {}),
-    });
-    await execution.run();
-    assert.notEqual(instance.status, "closed");
-    await execution.graph.close();
-    assert.equal(disposals.count, 1);
-    assert.equal(instance.status, "closed");
-  });
-
-for (const nested of [false, true])
-  test(`graph ownership of an agent dominates its caller-owned registration (${nested ? "graph" : "caller"} registration reached first)`, async () => {
-    const instance = mock("unused");
-    const disposals = countDisposals(instance);
-    const nodes = { A: { prompt: "work" } };
-    const edges = [{ from: "A", to: "$sink", schema: reply }];
-    const execution = await build(
-      parse({
-        graph: nested
-          ? {
-              nodes: { Child: { kind: "graph", graph: { nodes, edges } } },
-              edges: [{ from: "Child", to: "$sink", schema: reply }],
-            }
-          : { nodes, edges },
-      }),
-      {
-        ...options(),
-        createAgent: async () => instance,
-        createAgentOwnership: "caller",
-      },
-    );
-    execution.graph.addNode({
-      id: graph.NodeId.create("Owned"),
-      trigger: trigger.TriggerRule.always(),
-      policy: tools.LockPolicy,
-      state: instance,
-      prompt: "work",
-    });
-    await execution.graph.close();
-    assert.equal(disposals.count, 1);
-    assert.equal(instance.status, "closed");
-  });
-
-test("createAgentOwnership requires createAgent", async () => {
-  await assert.rejects(
-    build(document(), { ...options(), createAgentOwnership: "caller" }),
-    (error) =>
-      error instanceof graph.DataflowDefinitionError &&
-      error.message ===
-        "junco-syntax: createAgentOwnership requires createAgent",
-  );
-});
-
-for (const boundary of ["factory", "code"] as const)
-  for (const ownership of [undefined, "caller"] as const)
-    for (const cleanupFails of [false, true])
-      test(`a later ${boundary} failure rolls back ${ownership ?? "default"}-ownership leases and deterministic state without disposing earlier factory agents${cleanupFails ? ", cleanup failure after the primary" : ""}`, async () => {
-        const primary = new Error(`${boundary} sentinel`);
-        const cleanup = new Error("deterministic close sentinel");
-        const { collection, active } = countedCollection();
-        const earlier = mock("unused");
-        const disposals = countDisposals(earlier);
-        let deterministic: Deterministic<TSchema, unknown> | undefined;
-        const Code: DeterministicNode = ({ policy, collection }) => {
-          deterministic = new Deterministic<TSchema, unknown>(
-            async function* () {
-              yield [];
-              return assistant("code");
-            },
-            policy,
-            collection,
-          );
-          const close = deterministic.close.bind(deterministic);
-          deterministic.close = () =>
-            close().then(() => {
-              if (cleanupFails) throw cleanup;
-            });
-          return deterministic;
-        };
-        try {
-          await assert.rejects(
-            build(
-              parse({
-                graph: {
-                  nodes: {
-                    Child: {
-                      kind: "graph",
-                      graph: {
-                        nodes: {
-                          A: { prompt: "work" },
-                          Code: { kind: "code", trigger: "always" },
-                        },
-                        edges: [
-                          { from: "A", to: "Code", schema: reply },
-                          { from: "Code", to: "$sink", schema: reply },
-                        ],
-                      },
-                    },
-                    Last:
-                      boundary === "code"
-                        ? { kind: "code", trigger: "always" }
-                        : { prompt: "work" },
-                  },
-                  edges: [
-                    { from: "Child", to: "Last", schema: reply },
-                    { from: "Last", to: "$sink", schema: reply },
-                  ],
-                },
-              }),
-              {
-                ...options(),
-                collection,
-                code: {
-                  Code,
-                  Last: () => {
-                    throw primary;
-                  },
-                },
-                createAgent: async (spec) => {
-                  if (spec.node === "Last") throw primary;
-                  return earlier;
-                },
-                ...(ownership ? { createAgentOwnership: ownership } : {}),
-              },
-            ),
-            (error) => {
-              if (!cleanupFails) assert.equal(error, primary);
-              else {
-                assert.ok(error instanceof AggregateError);
-                assert.deepEqual(error.errors, [primary, cleanup]);
-              }
-              return true;
-            },
-          );
-          assert.equal(deterministic?.signal.aborted, true);
-          assert.equal(active.leases, 0, "graph and deterministic leases");
-          assert.equal(disposals.count, 0);
-          assert.equal(aborts(earlier), 1);
-          assert.notEqual(earlier.status, "closed");
-        } finally {
-          await earlier.return();
-          await collection.close();
-        }
-      });
 
 // Raw payloads: edge schemas reach admission; ports and nested graphs forward values unchanged.
 
@@ -3637,7 +2999,7 @@ const codeBuild = (
 ) => build(doc, { ...options(), policy: tools.EmptyPolicy, code, ...extra });
 
 /** A session keeping each probe event with its interned context's path. */
-function probeRecorder() {
+function probeRecorder(receipt?: (path: string, event: tools.ProfileEvent<string>) => void) {
   const probes: [path: string, edgeId: string, value: number][] = [];
   const views = new Map<string, tools.ProfileRecorder<string>>();
   const view = (path: string): tools.ProfileRecorder<string> => {
@@ -3651,6 +3013,7 @@ function probeRecorder() {
           ? created
           : view(`${path === "" ? "" : `${path}::`}${tools.profilePath([id])}`),
       record: (event: tools.ProfileEvent<string>) => {
+        receipt?.(path, event);
         if (event.kind === "probe")
           probes.push([path, event.edgeId, event.value]);
       },
@@ -3956,7 +3319,7 @@ test("an invalid code result fails its value edge and publishes nothing", async 
 });
 
 test("a numeric placeholder fails naming its edge before the agent is asked", async () => {
-  const consumer = mock("unused");
+  const consumer = script();
   const execution = await build(
     parse({
       graph: {
@@ -3973,7 +3336,7 @@ test("a numeric placeholder fails naming its edge before the agent is asked", as
     {
       ...options(),
       code: { Seven: Constant(7) },
-      createAgent: async () => consumer,
+      ...await offline({ A: consumer }),
     },
   );
   try {
@@ -4063,8 +3426,8 @@ test("an agent sends a number through its edge schema", async () => {
     {
       ...options(),
       code: { Seven: Constant(7), Tail: Increment("Worker~>Tail") },
-      createAgent: (spec) =>
-        createJuncoAgent(spec, new schedules.ModelLadder(models, fauxLadder)),
+      collection: countedCollection().collection,
+      ladder: new schedules.ModelLadder(models, fauxLadder),
       recorder,
     },
   );
@@ -4109,6 +3472,8 @@ test("an agent sends a number through its edge schema", async () => {
 test("memory: YAML host NodeIds isolate Worker from worker through real agent calls", async () => {
   const directory = await mkdtemp(join(tmpdir(), "junco-yaml-memory-"));
   const memory = new tools.JuncoMemory({ directory });
+  const seed = join(directory, "seed");
+  let collection: tools.ToolCollection | undefined;
   const trace = new tracer.DummyTracer();
   const names = ["Worker", "worker"] as const;
   const saved = new Map<string, { id: string; text: string }>();
@@ -4175,6 +3540,8 @@ test("memory: YAML host NodeIds isolate Worker from worker through real agent ca
   };
   let execution: Awaited<ReturnType<typeof JuncoGraph.fromYaml>> | undefined;
   try {
+    await mkdir(seed);
+    collection = await tools.ToolCollection.create(seed, { native: await copyTreeNative(), memory });
     const { models, faux } = await fauxRuntime(
       Array.from({ length: 12 }, () => respond),
     );
@@ -4197,7 +3564,6 @@ test("memory: YAML host NodeIds isolate Worker from worker through real agent ca
                 name,
                 {
                   prompt: `scope:${name}`,
-                  tools: ["save_memory", "search_memory", "forget_memory"],
                   tool_block: NATIVE_TOOL_BLOCK,
                 },
               ]),
@@ -4218,10 +3584,7 @@ test("memory: YAML host NodeIds isolate Worker from worker through real agent ca
         ...options(),
         tracer: trace,
         ladder,
-        tools: Object.fromEntries(
-          memory.tools().map((tool) => [tool.name, tool]),
-        ),
-        createAgent: (spec) => createJuncoAgent(spec, ladder),
+        collection,
       },
     );
     await execution.run();
@@ -4241,7 +3604,7 @@ test("memory: YAML host NodeIds isolate Worker from worker through real agent ca
       await execution?.graph.close();
     } finally {
       try {
-        memory.close();
+        try { await collection?.close(); } finally { memory.close(); }
       } finally {
         await rm(directory, { recursive: true, force: true });
       }

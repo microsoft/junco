@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import {
   type AgentTool,
   BACKGROUND_CONTEXT,
@@ -43,8 +44,8 @@ import {
   TaskSchema,
 } from "junco-agent";
 import type { SchedulerContext } from "junco-scheduler";
+import { LockPolicy, type NativeModule } from "junco-tools";
 import { pi, type SchedulerRequest } from "junco-scheduler/agent";
-import { LockPolicy } from "junco-tools";
 import { Type } from "typebox";
 
 import {
@@ -133,6 +134,67 @@ export async function fauxRuntime(
   });
   models.registerNativeProvider(faux.provider);
   return { models, faux };
+}
+
+/** One authenticated offline ladder; a factory dispatches by transcript even for concurrent roles. */
+export async function offlineLadder(responses: readonly FauxResponseStep[] | FauxResponseFactory, model?: FauxModelDefinition) {
+  const { models, faux } = await fauxRuntime(typeof responses === "function" ? [] : responses, "faux", model && [model]);
+  if (typeof responses === "function") {
+    const stream = models.streamSimple.bind(models);
+    models.streamSimple = (...args) => {
+      faux.appendResponses([responses]);
+      return stream(...args);
+    };
+  }
+  return new schedules.ModelLadder(models, schedules.uniformLadder({ model: `faux/${faux.getModel().id}` }));
+}
+
+/** The CopyTree addon is optional; load it only for tests exercising native bindings. */
+export async function copyTreeNative(): Promise<NativeModule> {
+  const native = await import(fileURLToPath(new URL(
+    "../packages/junco-tools/target/native-test/index.js", import.meta.url,
+  )));
+  return { ...native, NativeMux: { open: native.NativeMux.openCopyTree.bind(native.NativeMux) } } as NativeModule;
+}
+
+/** Count lease, owner-binding and creator lifetimes without acquiring a mux. */
+export function countedCollection(failure?: { binding: number; error: Error }) {
+  const events: string[] = [];
+  const active = { leases: 0, bindings: 0, creatorCloses: 0 };
+  let leases = 0, bindings = 0;
+  const collection = {
+    policy: LockPolicy,
+    tools: [],
+    lease() {
+      const id = ++leases;
+      active.leases++;
+      let closed = false;
+      return { close: async () => {
+        if (closed) return;
+        closed = true;
+        active.leases--;
+        events.push(`lease-close:${id}`);
+      } };
+    },
+    bind() {
+      const id = ++bindings;
+      active.bindings++;
+      let closing: Promise<void> | undefined;
+      return { owner: `owner-${id}`, tools: new Map(), close: () =>
+        closing ??= Promise.resolve().then(() => {
+          active.bindings--;
+          events.push(`bind-close:${id}`);
+          if (failure?.binding === id) throw failure.error;
+        }) };
+    },
+    close: async () => {
+      if (active.creatorCloses === 0) {
+        active.creatorCloses++;
+        events.push("creator-close");
+      }
+    },
+  } as unknown as toolsApi.ToolCollection;
+  return { collection, active, events };
 }
 
 /** Native options over `responses` with a fresh in-memory session, under `LockPolicy`. */

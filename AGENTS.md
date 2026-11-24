@@ -48,6 +48,8 @@ no API key, $0).
 
 Reuse these instead of hand-writing the topology. Source routes are the keys of `source.routes`; feed a root graph with `execution.graph.source.enqueue({ messages: new Map([[graph.EdgeId.create("<route>"), [Task.create({ kind: "prompt", text, spec })]]]), values: new Map() })` (`Task.create` mints the required `taskId` with empty `deps` and `history`), or route a parent edge onto them when embedding (`kind: graph`).
 
+`fromYaml` owns the agents it constructs. Supply a `schedules.ModelLadder` whenever the document contains agents. `tools` and `agentOptions` are sparse `ReadonlyMap`s keyed by qualified `graph.NodeIdType` (e.g. `graph.NodeId.create("Left/Worker")`; escape `~` as `~0` and `/` as `~1` within each segment). A node-specific native collection replaces the graph default; omitted agents share the fallback. Use YAML `tool_block` for exclusions. Caller-supplied collections outlive the graph; sessions supplied through `syntax.YamlAgentOptions` transfer at build entry. See the [YAML runner contract](skills/junco-graph-create/SKILL.md#runner).
+
 | Export | Source | Summary | Routes / output | Drive with |
 | --- | --- | --- | --- | --- |
 | `workflows.ralph` | `src/std/workflows/ralph.yml` | Ralph revises its answer in the same session; `RalphControl` decides each delivered settlement. | `assignment` → `$source~>Ralph`; result `Ralph->$sink` | `...schedules.ralph({ rounds })` or `({ until, rounds? })` |
@@ -122,7 +124,7 @@ Reuse these instead of hand-writing the topology. Source routes are the keys of 
 
 ### `errors` — failure policies of agent nodes
 
-Configure `JuncoAgent` with `errorHandler` (or put it in a `MockAgent` transcript), not the agent node's `on_error`. Code and graph nodes keep the engine's `on_error`. Without a handler, thrown failures crash and `stopReason: "error"` settlements remain results, including Ralph's existing retry path.
+Configure a YAML agent through `agentOptions.get(qualifiedId).errorHandler`, or pass `errorHandler` to a low-level `JuncoAgent` constructor or `MockAgent` transcript. Code and graph nodes keep the engine's `on_error`. Without a handler, thrown failures crash and `stopReason: "error"` settlements remain results, including Ralph's existing retry path.
 
 Compose `errors.record(errors.retry({ afterMs: 100, times: 2 }, errors.escalate({ ladder }, errors.crash())))`. Attempts count failures across the node's current run, including yields, and reset on a returned result. Retry stages a continuation prompt in the same session; it does not resend the original prompt. To recover softly, return outbound messages directly from a handler, e.g. `({ error }) => [graph.Message.create(edge, graph.nodes.Task.create({ kind: "error", text: String(error), spec }))]`; the node has no result. Cancellation, definition errors, exhausted budgets and closed agents bypass recovery.
 
@@ -190,7 +192,7 @@ Compose `errors.record(errors.retry({ afterMs: 100, times: 2 }, errors.escalate(
 | `graph.nodes.Source` | class | `packages/dataflow-engine/src/stdlib.ts` | Routes pending external deliveries FIFO. An optional trigger can require inbound message credits; priming then consumes neither credit nor delivery. |
 | `graph.nodes.Sink` | class | `packages/dataflow-engine/src/stdlib.ts` | Stages yielded, terminal and explicitly sent messages for acknowledged external delivery. |
 | `graph.nodes.Agentic` | type | `src/agentic.ts` | Native work states; policies and execution contexts are never graph members. |
-| `graph.nodes.AgenticNode` | type | `src/agentic.ts` | A graph-managed prompt agent registers its reusable prompt; complete bodies require their authorization policy. |
+| `graph.nodes.AgenticNode` | type | `src/agentic.ts` | A graph-managed prompt agent may register a reusable prompt; complete bodies require their authorization policy. |
 | `graph.nodes.Task` | type, const | `packages/junco-agent/src/agentic.ts` | The task payload of agent graphs: a description, a readonly completion spec, subtask deps and the history of its holders. All four fields are required; `Task.create({ kind, text, spec })` mints its `taskId` UID with empty `deps` and `history`. |
 | `graph.nodes.CompactionPolicy` | type | `src/agentic.ts` | Which direct prompt-agent node states `JuncoGraph.compact` compacts. |
 
@@ -228,7 +230,7 @@ Also exported directly from `junco`: `JuncoGraph`, `Deterministic`, `Agentic`, `
 
 | Export | Kind | Source | Summary |
 | --- | --- | --- | --- |
-| `JuncoGraphValidator` | const | `src/syntax/validator.ts` | Validates a decoded Junco document, including nested graphs, before construction. `validate(value)` returns the document or throws `syntax.ValidationError`; `syntax.parse` uses the same validator. |
+| `JuncoGraphValidator` | const | `src/syntax/validator.ts` | `validate(value)` validates a decoded document recursively; `syntax.parse` uses the same validator. `validateNodeMaps(document, { grants: { map, complete: true } })` checks qualified IDs (all node kinds and actual ports); `complete` additionally requires every ID. Both throw `syntax.ValidationError` on invalid input. |
 | `TaskSchema` | const | `packages/junco-agent/src/agentic.ts` | Runtime schema of Task. |
 | `AssistantMessageSchema` | const | `packages/junco-agent/src/agentic.ts` | Runtime schema of Pi's native AssistantMessage: its content, usage/cost, diagnostics and deferred handle, with required fields, literal alternatives and optional fields. |
 | `MockAgent` | class | `src/mock-agent.ts` | A scripted `JuncoAgentProtocol` replaying its `MockTranscript` without model requests. |

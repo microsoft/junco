@@ -47,7 +47,7 @@ import {
   terminalPorts,
   userTexts,
 } from "./deterministic-support.ts";
-import { NATIVE_TOOL_BLOCK, toolTurn, waitingTool } from "./support.ts";
+import { countedCollection, NATIVE_TOOL_BLOCK, offlineLadder, toolTurn, waitingTool } from "./support.ts";
 
 // Real JuncoAgents on Pi's faux providers, driven as graph-registered agents on the parallel policy: a
 // `task` call runs fresh subagents natively in the background while the caller's node stays itself.
@@ -143,10 +143,12 @@ function registry(...names: string[]) {
   };
 }
 
+type SubagentHost = Pick<Agent, "setSubagentObserver">;
+
 /** Records every agent `caller.createSubagents` returns, recursively for descendants. */
 function trackSubagents(
-  caller: Agent,
-  observe?: (parent: Agent, child: Agent, index: number) => void,
+  caller: SubagentHost,
+  observe?: (parent: SubagentHost, child: Agent, index: number) => void,
   created: Agent[] = [],
 ): Agent[] {
   caller.setSubagentObserver({
@@ -1243,7 +1245,7 @@ describe("native tasks on a graph-driven caller", () => {
     ]);
     r.script("grand", [fauxAssistantMessage("grand-report")]);
     const caller = await r.agent("caller", [new toolsApi.TaskTool()]);
-    const parents: [Agent, Agent][] = [];
+    const parents: [SubagentHost, Agent][] = [];
     const created = trackSubagents(caller, (parent, child) =>
       parents.push([parent, child]),
     );
@@ -1509,68 +1511,62 @@ describe("native task lifecycle and complaints", () => {
     assert.deepEqual(caller.getTaskResults(), [], "no late report arrived");
   });
 
-  test("a caller-owned agent survives its round's close, which closes every child, and runs again in a fresh round with fresh task results", async () => {
-    const r = registry("caller", "worker");
-    r.script("caller", [
-      toolTurn(taskCall([{ task: "a", model: r.model("worker") }])),
-      fauxAssistantMessage("interim"),
-      fauxAssistantMessage("round 1 final"),
-      fauxAssistantMessage("round 2 final"),
-    ]);
-    r.script("worker", [fauxAssistantMessage("a-report")]);
-    const caller = await r.agent("caller", [new toolsApi.TaskTool()]);
-    const created = trackSubagents(caller);
-    const round = async (prompt: string) => {
-      const execution = await JuncoGraph.fromYaml(
-        `graph:
-  nodes:
-    Assignment: { kind: emit, text: ${prompt}, spec: Complete the round. }
-    caller:
-      trigger: Assignment~>caller
-      prompt: ${prompt}
-  edges:
-    - { from: Assignment, to: caller, kind: message, schema: { type: object } }
-    - from: caller
-      to: $sink
-      schema: { type: object, required: [role, content] }
-`,
-        {
-          cwd: process.cwd(),
-          scheduler: () => schedules.parallel(),
-          tracer: quiet,
-          createAgent: async () => caller,
-          createAgentOwnership: "caller",
-        },
-      );
-      try {
-        const results = await execution.run();
-        const result = results.get(graph.NodeId.create("caller"));
-        assert.ok(Value.Check(AssistantMessageSchema, result));
-        return {
-          text: contentText(result.content),
-          tasks: caller
-            .getTaskResults()
-            .map(({ status, output }) => `${status}:${output}`),
-        };
-      } finally {
-        await execution.graph.close();
+  test("a persistent YAML caller starts each assignment with fresh task results and closes its children", async () => {
+    const ladder = await offlineLadder((context) => {
+      const users = userTexts(context.messages);
+      if (users[0] === `${TASK_CONTEXT}\n\na`) return fauxAssistantMessage("a-report");
+      if (users.at(-1)?.startsWith("Again\n\nTask: ")) {
+        assert.ok(context.messages.some((m) => m.role === "assistant" && contentText(m.content) === "round 1 final"));
+        return fauxAssistantMessage("round 2 final");
       }
-    };
-
-    assert.deepEqual(await round("Start"), {
-      text: "round 1 final",
-      tasks: ["completed:a-report"],
+      if (!context.messages.some((m) => m.role === "assistant"))
+        return toolTurn(taskCall([{ task: "a", tools: [] }]));
+      return fauxAssistantMessage(markersIn(context).length ? "round 1 final" : "interim");
     });
-    assert.equal(created.length, 1);
-    assert.equal(created[0]!.status, "closed");
-    assert.notEqual(caller.status, "closed");
-    assert.deepEqual(
-      await round("Again"),
-      { text: "round 2 final", tasks: [] },
-      "the new round starts with fresh task results",
-    );
-    assert.equal(created.length, 1);
-    assert.notEqual(caller.status, "closed");
+    const { collection } = countedCollection();
+    await using lifetime = { [Symbol.asyncDispose]: () => collection.close() };
+    const execution = await JuncoGraph.fromYaml(`graph:
+  source: { routes: { assignment: ["$source~>caller"] } }
+  sink: { stream: true }
+  nodes:
+    caller: { trigger: "$source~>caller", prompt: "Complete the current assignment." }
+  edges:
+    - { from: $source, to: caller, kind: message, schema: { type: object } }
+    - { from: caller, to: caller, schema: &report { type: object, required: [role, content] } }
+    - { from: caller, to: $sink, kind: message, on: return, schema: *report }
+`, { cwd: process.cwd(), scheduler: () => schedules.parallel(), tracer: quiet, ladder, collection });
+    const id = graph.NodeId.create("caller");
+    const caller = execution.graph.getNode(id)?.state;
+    assert.ok(caller instanceof agentApi.JuncoAgent);
+    const children: Agent[] = [];
+    caller.setSubagentObserver({ acquired: (child) => children.push(child) });
+    try {
+      const round = async (text: string) => {
+        execution.graph.source.enqueue({
+          messages: new Map([[graph.EdgeId.create("assignment"), [
+            Task.create({ kind: "prompt", text, spec: "Complete the round." }),
+          ]]]), values: new Map(),
+        });
+        const result = (await execution.run()).get(id);
+        assert.ok(Value.Check(AssistantMessageSchema, result));
+        const published: unknown[] = [];
+        execution.graph.sink.drain(({ payload }) => published.push(payload));
+        assert.equal(published.length, 1);
+        assert.equal(published[0], result);
+        assert.equal(execution.graph.getNode(id)!.state, caller);
+        return { text: contentText(result.content), tasks: caller.getTaskResults().map(({ status, output }) => `${status}:${output}`) };
+      };
+      assert.deepEqual(await round("Start"), { text: "round 1 final", tasks: ["completed:a-report"] });
+      assert.equal(children.length, 1);
+      assert.equal(children[0]!.status, "closed");
+      assert.notEqual(caller.status, "closed");
+      assert.deepEqual(await round("Again"), { text: "round 2 final", tasks: [] });
+      assert.equal(children.length, 1);
+      assert.notEqual(caller.status, "closed");
+    } finally {
+      await execution.graph.close();
+    }
+    assert.equal(caller.status, "closed");
   });
 
   test("a native error stop asks the caller with its real output by default; the caller's ignore finishes the batch", async () => {

@@ -27,11 +27,13 @@ import {
   type Edge,
   EdgeId,
   Message,
+  NodeId,
   type NodeGenerator,
   FinalMessages,
   type ParentView,
 } from "dataflow-engine";
 import { roundRobin } from "junco-scheduler";
+import { LockPolicy, ToolCollection } from "junco-tools";
 import { type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 import { Deterministic } from "../../deterministic.js";
@@ -43,7 +45,6 @@ import {
   uniformLadder,
 } from "../../node-policy.js";
 import {
-  createJuncoAgent,
   type DeterministicNode,
   finalText,
 } from "../../syntax/build.js";
@@ -1205,7 +1206,7 @@ class OptimizerController {
   }
 
   /** read_target and edit_tuning over this campaign's target and its active turn. */
-  tools(): Record<string, AgentTool> {
+  tools(): AgentTool[] {
     const reply = <D>(details: D) => ({
       content: [{ type: "text" as const, text: JSON.stringify(details) }],
       details,
@@ -1258,7 +1259,7 @@ class OptimizerController {
         }
       },
     };
-    return { read_target: read, edit_tuning: edit };
+    return [read, edit];
   }
 
   /** Evaluate's decision for one inbound state. */
@@ -2041,7 +2042,14 @@ class OptimizerCampaign implements SessionServices {
     const failures: unknown[] = [];
     let result: unknown;
     let graph: JuncoGraph<TSchema, unknown> | undefined;
+    let editor: ToolCollection | undefined;
     try {
+      signal.throwIfAborted();
+      editor = await ToolCollection.create(request.sessionDir, {
+        policy: LockPolicy,
+        recorder,
+        extend: async () => ({ tools: controller.tools(), close: async () => {} }),
+      });
       const execution = await JuncoGraph.fromYaml<OptimizerController>(source, {
         sourceName: "optimizer.yml",
         cwd: request.sessionDir,
@@ -2049,8 +2057,7 @@ class OptimizerCampaign implements SessionServices {
         tracer: new DummyTracer(),
         recorder,
         ladder,
-        tools: controller.tools(),
-        createAgent: (spec) => createJuncoAgent(spec, ladder),
+        tools: new Map([[NodeId.create("Editor"), editor]]),
         code: {
           Init: controller.init,
           Evaluate: controller.evaluate,
@@ -2071,6 +2078,11 @@ class OptimizerCampaign implements SessionServices {
     }
     try {
       await graph?.close();
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      await editor?.close();
     } catch (error) {
       failures.push(error);
     }

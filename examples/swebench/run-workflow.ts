@@ -8,9 +8,9 @@
  *   bun run run-workflow.ts <problem-directory> <manifest.json> <artifact-directory>   internal worker
  *
  * Models come from Pi's saved logins (~/.pi/agent; MODELS) and the pair's ladder: each agent is
- * created with its role's model and every provider request is checked against exactly that model at the
- * Models boundary. Each agent's bash runs in its role's container from the manifest written by
- * benchmark.py. Artifacts: requests.jsonl (accepted requests by node and model), recordings/ (durable Pi
+ * assigned its role's model before activation and every provider request is checked against the active
+ * node path at the Models boundary. Each shell role's bash runs only in its manifest container.
+ * Artifacts: requests.jsonl (accepted requests by node and model), recordings/ (durable Pi
  * sessions: committed messages, tool calls, tool results, usage) with recordings/index.jsonl mapping node →
  * model → session file, profile.jsonl (Junco profile samples; per-request USD under the profile optimizer), the
  * workflow's own plans, check logs, patches and verdicts, outcome.json (the worker's verdict) and, under the
@@ -26,13 +26,12 @@ import {
   type AgentTool,
   BACKGROUND_CONTEXT,
   JsonlSessionRepo,
-  type PromptTemplate,
-  type Skill,
 } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import { type Api, lazyStream, type Model, type TSchema, Type } from "@earendil-works/pi-ai";
-import { type BashOperations, createBashTool, ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { agent, graph, JuncoGraph, schedules, syntax, tracer } from "junco";
+import { type BashToolOptions, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { captureUsageContext } from "dataflow-engine";
+import { agent, graph, JuncoGraph, schedules, syntax, tools, tracer } from "junco";
 import { benchmarkTelemetry, grafanaUrl } from "../benchmark-telemetry.ts";
 import type * as Pair from "./wf.ts";
 
@@ -71,11 +70,8 @@ export const MODELS: readonly string[] = [
 const WORKDIR = "/testbed";
 const ACTIVATE = "source /opt/miniconda3/bin/activate\nconda activate testbed";
 const GIT = ["git", "-c", "safe.directory=/testbed", "-C", WORKDIR];
-/** Junco's communication tools. Bound tools are the only others. */
-const COMMUNICATION_TOOLS: Record<string, true> = { yield: true, info: true, send: true };
 /**
- * Junco defaults every agent loses: the host file and shell natives (a node's bound container bash replaces
- * the native bash) and `task`, so nodes cannot spawn undeclared work.
+ * Every role must block these tools, except that a SANDBOX role uses the collection's container-only bash.
  */
 export const BLOCKED_DEFAULTS: readonly string[] = [
   "ast_edit", "ast_grep", "bash", "code_graph", "diff", "edit", "find", "grep", "read", "release", "task",
@@ -97,9 +93,8 @@ type Workflow = Pick<typeof Pair, "document" | "ladder" | "strengthOf" | "run" |
   readonly profileRun?: { readonly nonce: string };
   readonly graphHash?: string;
 };
-// Junco exports no name for the YAML agent instantiation createJuncoAgent returns.
-type Agent = Awaited<ReturnType<typeof syntax.createJuncoAgent>>;
 type Manifest = { baseline: string; containers: Record<Pair.Role, string> };
+type ContainerBash = Required<Pick<BashToolOptions, "operations" | "commandPrefix" | "exposeSessionEnvironment">>;
 type Outcome = {
   workflow_status: "completed" | "error" | "cancelled";
   terminal_text: string | null;
@@ -124,8 +119,8 @@ export function checkLadder(ladder: unknown): asserts ladder is schedules.Ladder
     if (!MODELS.includes(rung.model)) throw new Error(`ladder rung ${name} must be one of ${MODELS.join(", ")}, got ${rung.model}`);
 }
 
-/** Pi's saved-login runtime paired with `ladder`; fails unless every ladder model is credentialed, available and supports its thinking level. */
-async function copilotLadder(ladder: schedules.Ladder): Promise<schedules.ModelLadder> {
+/** The saved-login runtime; every ladder model must have a credential and be available. */
+async function copilotModels(ladder: schedules.Ladder): Promise<ModelRuntime> {
   const models = await ModelRuntime.create({ allowModelNetwork: false, refreshOnCreate: false });
   // Pi's cached catalog (~/.pi/agent/models-store.json) holds MODELS newer than the built-in one; no network.
   await models.refresh({ allowNetwork: false });
@@ -139,11 +134,14 @@ async function copilotLadder(ladder: schedules.Ladder): Promise<schedules.ModelL
     for (const model of wanted.filter((m) => m.startsWith(`${providerId}/`)))
       if (!available.some((m) => `${m.provider}/${m.id}` === model)) throw new Error(`${model} is not available through the saved login`);
   }
-  return new schedules.ModelLadder(models, ladder);
+  return models;
 }
 
-/** Rejects a request to any model but `allowed` before it is sent; records accepted requests. */
-function route(log: string, role: string, allowed: string, model: Pick<Model<Api>, "provider" | "id">): void {
+/** Reject absent, unknown or wrongly routed requests before they reach a provider. */
+function route(log: string, assignments: ReadonlyMap<string, string>, model: Pick<Model<Api>, "provider" | "id">): void {
+  const role = captureUsageContext()?.nodePath.reduce<string>(syntax.nodeKey, "");
+  const allowed = role && assignments.get(role);
+  if (!allowed) throw new Error(`refused model request from unknown role ${role || "(none)"}`);
   const target = `${model.provider}/${model.id}`;
   if (target !== allowed) throw new Error(`${role}: refused request to ${target}; this role may only use ${allowed}`);
   appendFileSync(log, `${JSON.stringify({ role, provider: model.provider, model: model.id })}\n`);
@@ -166,11 +164,11 @@ const REQUEST_METHODS: Record<string, "stream" | "message" | "reject"> = {
 };
 
 /**
- * `models` for one agent `role` that may only call `allowed`: every provider request goes through `route` first.
+ * One runtime for the ladder: every provider request goes through the active graph role's guard.
  * Pi swallows errors thrown by `before_request` hooks, so the refusal happens at the Models boundary,
  * as the provider failure Pi expects (a thrown request is a harness invariant fault).
  */
-export function guardedModels(models: ModelRuntime, log: string, role: string, allowed: string): ModelRuntime {
+export function guardedModels(models: ModelRuntime, log: string, assignments: ReadonlyMap<string, string>): ModelRuntime {
   return new Proxy(models, {
     get(target, key) {
       const value = Reflect.get(target, key, target);
@@ -179,7 +177,7 @@ export function guardedModels(models: ModelRuntime, log: string, role: string, a
       if (shape === undefined) return value.bind(target);
       return (model: Model<Api>, ...rest: unknown[]) => {
         try {
-          route(log, role, allowed, model);
+          route(log, assignments, model);
         } catch (error) {
           if (shape === "reject") return Promise.reject(error);
           const refused = lazyStream(model, () => Promise.reject(error));
@@ -191,69 +189,23 @@ export function guardedModels(models: ModelRuntime, log: string, role: string, a
   });
 }
 
-type AgentFactory = {
-  readonly ladder: schedules.ModelLadder;
-  /** The rung of a root-relative agent path (`Lead`, `Planner/Draft`). */
-  readonly strengthOf: (path: string) => schedules.ModelStrengthName;
-  readonly log: string;
-  readonly repo: JsonlSessionRepo;
-  /** recordings/index.jsonl: one `{node, model, session}` line per agent; `node` is its root-relative path. */
-  readonly index: string;
-  /** Per-agent-path instances of each supplied tool name; any other supplied tool is refused. */
-  readonly bind: Readonly<Record<string, (path: string) => AgentTool>>;
-  /** Acquired agents by root-relative path, in acquisition order. */
-  readonly acquired: Map<string, Agent>;
-};
-
-/**
- * The guarded factory: the agent's role model from the ladder (the same rung the strength scheduler
- * selects), a durable JSONL session, its node's bound tools plus Junco's defaults except BLOCKED_DEFAULTS it
- * does not replace and the spec's own tool_block, and the spec's collection, recorder and skills.
- */
-async function createAgent(factory: AgentFactory, spec: syntax.AgentSpec): Promise<Agent> {
-  const { path } = spec;
-  if (factory.acquired.has(path)) throw new Error(`${path}: agent already created`);
-  const tools = spec.tools.flatMap((tool): AgentTool[] => {
-    if (!("name" in tool)) throw new Error(`${path}: mcp tools are not permitted`);
-    if (tool.name === "task") return [];
-    if (Object.hasOwn(COMMUNICATION_TOOLS, tool.name)) return [tool];
-    const bound = factory.bind[tool.name];
-    if (bound === undefined) throw new Error(`${path}: tool ${tool.name} is not permitted`);
-    return [bound(path)];
+/** The live cancellation targets, installed before the first scheduler decision. */
+export function collectAgents(g: JuncoGraph<TSchema, unknown>, members: Map<string, Abortable>, prefix = ""): void {
+  g.forEachNode((id, { state }) => {
+    const path = syntax.nodeKey(prefix, id);
+    if (state instanceof JuncoGraph) collectAgents(state, members, path);
+    else if (state instanceof agent.JuncoAgent) members.set(path, state);
   });
-  const { model, thinking = "off" } = factory.ladder.rungs[factory.strengthOf(path)];
-  const slash = model.indexOf("/");
-  // Junco owns the session from here on, including when creation fails.
-  const session = await factory.repo.create({ cwd: spec.cwd }, BACKGROUND_CONTEXT);
-  appendFileSync(factory.index, `${JSON.stringify({ node: path, model, session: session.metadata.path })}\n`);
-  const instance = await agent.JuncoAgent.create<Skill, PromptTemplate, TSchema, unknown>({
-    provider: model.slice(0, slash),
-    model: model.slice(slash + 1),
-    models: guardedModels(factory.ladder.models, factory.log, path, model),
-    thinkingLevel: thinking,
-    session,
-    systemPrompt: spec.systemPrompt,
-    cwd: spec.cwd,
-    tools,
-    tool_block: [...new Set([
-      ...BLOCKED_DEFAULTS.filter((name) => !tools.some((tool) => tool.name === name)),
-      ...(spec.tool_block ?? []),
-    ])],
-    collection: spec.collection,
-    recorder: spec.recorder,
-    recorderNodeId: spec.recorderNodeId,
-    ...(spec.skills.length ? { resources: { skills: spec.skills } } : {}),
-  });
-  factory.acquired.set(path, instance);
-  return instance;
 }
 
-/** Closes every factory agent (idempotent after graph close); returns the failures. */
-async function closeAgents(acquired: ReadonlyMap<string, Agent>): Promise<unknown[]> {
+type Releases = (() => Promise<void>)[];
+
+async function closeAll(releases: Releases): Promise<unknown[]> {
   const failures: unknown[] = [];
-  for (const instance of [...acquired.values()].reverse()) {
+  while (releases.length) {
+    const close = releases.pop()!;
     try {
-      await instance.return();
+      await close();
     } catch (error) {
       failures.push(error);
     }
@@ -261,22 +213,46 @@ async function closeAgents(acquired: ReadonlyMap<string, Agent>): Promise<unknow
   return failures;
 }
 
-/** Releases the run's recording resources in order, each even when an earlier one failed. */
-async function closeRecording(
-  acquired: ReadonlyMap<string, Agent>,
+/** Acquire recording resources incrementally; collections added later close before these. */
+async function openRecording(artifacts: string, name: string, releases: Releases, usage = false) {
+  const profile = new tracer.JsonlRecorder({ path: join(artifacts, "profile.jsonl"), ...(usage ? { costMode: "usage" } : {}) });
+  let recorder: tracer.ProfileRecorder<string> = profile;
+  releases.push(() => recorder.close());
+  const observers = await telemetry(profile, name);
+  recorder = observers.recorder;
+  const root = join(artifacts, "recordings");
+  mkdirSync(root);
+  const index = join(root, "index.jsonl");
+  writeFileSync(index, "", { flag: "wx" });
+  const env = new NodeExecutionEnv({ cwd: artifacts });
+  releases.push(() => env.cleanup(BACKGROUND_CONTEXT));
+  const repo = new JsonlSessionRepo({ fileSystem: env, sessionsRoot: root });
+  releases.push(() => repo.close(BACKGROUND_CONTEXT));
+  return { ...observers, repo, index };
+}
+
+/** Called last at graph handoff. Until then, every opened session is ours, including on an index write failure. */
+export async function recordedSessions(
+  assignments: ReadonlyMap<graph.NodeIdType, string>,
+  cwd: string,
   repo: JsonlSessionRepo,
-  env: NodeExecutionEnv,
-  recorder: tracer.ProfileRecorder<string>,
-): Promise<unknown[]> {
-  const failures = await closeAgents(acquired);
-  for (const release of [() => repo.close(BACKGROUND_CONTEXT), () => env.cleanup(BACKGROUND_CONTEXT), () => recorder.close()]) {
-    try {
-      await release();
-    } catch (error) {
-      failures.push(error);
+  index: string,
+): Promise<Map<graph.NodeIdType, syntax.YamlAgentOptions>> {
+  const sessions = new Map<graph.NodeIdType, syntax.YamlAgentOptions>();
+  const pending: Releases = [];
+  try {
+    for (const [node, model] of assignments) {
+      const session = await repo.create({ cwd }, BACKGROUND_CONTEXT);
+      pending.push(() => session.close(BACKGROUND_CONTEXT));
+      appendFileSync(index, `${JSON.stringify({ node, model, session: session.metadata.path })}\n`);
+      sessions.set(node, { session });
     }
+    return sessions;
+  } catch (error) {
+    const failures = await closeAll(pending);
+    if (failures.length) throw new AggregateError([error, ...failures], "opening SWE-bench sessions failed");
+    throw error;
   }
-  return failures;
 }
 
 /** One profiling session recorded into every sink; flush and close settle all of them and report each failure. */
@@ -336,12 +312,12 @@ const stopContainer = (container: string): Promise<void> => docker(["kill", cont
 );
 
 /**
- * Pi's bash tool executing in `container` at /testbed under the testbed conda environment.
+ * The only bash backend of this role's collection, at /testbed under the testbed conda environment.
  * The host environment the tool supplies is ignored. On timeout or abort, `onFatal` runs after the
  * container is stopped (descendants of a killed docker-exec client would otherwise survive).
  */
-export function containerBash(container: string, onFatal: (reason: Error) => void): AgentTool {
-  const operations: BashOperations = {
+export function containerBash(container: string, onFatal: (reason: Error) => void): ContainerBash {
+  const operations: NonNullable<BashToolOptions["operations"]> = {
     exec: async (command, _cwd, { onData, signal, timeout }) => {
       if (timeout !== undefined && (!Number.isFinite(timeout) || timeout <= 0))
         throw new Error("Invalid timeout: must be a finite number of seconds");
@@ -383,7 +359,7 @@ export function containerBash(container: string, onFatal: (reason: Error) => voi
       }
     },
   };
-  return createBashTool(WORKDIR, { operations, commandPrefix: ACTIVATE, exposeSessionEnvironment: false });
+  return { commandPrefix: ACTIVATE, exposeSessionEnvironment: false, operations };
 }
 
 /** One docker CLI call: exit code and the complete stdout bytes and stderr text. */
@@ -476,8 +452,8 @@ function readProblem(problemDir: string): Pair.Problem {
   return value;
 }
 
-/** The manifest benchmark.py writes: one distinct container per workflow role at one 40-hex baseline. */
-function readManifest(path: string, roles: readonly string[]): Manifest {
+/** Full Docker IDs, not names or prefixes: two different strings must not resolve to the same sandbox. */
+export function readManifest(path: string, roles: readonly string[]): Manifest {
   const value = JSON.parse(readFileSync(path, "utf8"));
   const containers = value?.containers;
   if (typeof value?.baseline !== "string" || !/^[0-9a-f]{40}$/.test(value.baseline))
@@ -486,10 +462,10 @@ function readManifest(path: string, roles: readonly string[]): Manifest {
     typeof containers !== "object" ||
     containers === null ||
     Object.keys(containers).sort().join() !== [...roles].sort().join() ||
-    roles.some((role) => typeof containers[role] !== "string" || !containers[role]) ||
+    roles.some((role) => typeof containers[role] !== "string" || !/^[0-9a-f]{64}$/.test(containers[role])) ||
     new Set(Object.values(containers)).size !== roles.length
   )
-    throw new Error(`manifest containers must map exactly ${roles.join(", ")} to distinct container IDs`);
+    throw new Error(`manifest containers must map exactly ${roles.join(", ")} to distinct full container IDs`);
   return value;
 }
 
@@ -526,35 +502,42 @@ const within = (path: string, root: string): boolean => path === root || path.st
  * resolves it), no skills, bash the only bound tool and only on an agent path with its own sandbox, and
  * branch roots whose bash leaves are confined to that branch's sandboxes.
  */
-export function checkDocument(workflow: Workflow): void {
+export function checkDocument(workflow: Workflow): Map<graph.NodeIdType, string> {
   const { document, code, SANDBOX, BRANCHES, ROLES } = workflow;
   if (document.skills !== undefined) throw new Error("skills registry is not permitted");
   const roles: readonly string[] = ROLES;
   /** Agent and nested-graph paths: the nodes a branch may be rooted at. */
   const roots = new Set<string>();
-  const bashUsers: string[] = [];
-  const walk = (graph: syntax.GraphSpec, prefix: string): void => {
-    for (const [id, node] of Object.entries(graph.nodes)) {
-      const path = prefix + id;
+  const assignments = new Map<graph.NodeIdType, string>();
+  const walk = (level: syntax.GraphSpec, prefix: string): void => {
+    for (const [id, node] of Object.entries(level.nodes)) {
+      const path = syntax.nodeKey(prefix, id);
       if (id.includes("/")) throw new Error(`${path}: node IDs must not contain /`);
       if (node.kind === "graph") {
         roots.add(path);
-        walk(node.graph, `${path}/`);
+        walk(node.graph, path);
       } else if (node.kind === "code") {
-        if (typeof (code as Record<string, unknown>)[id] !== "function") throw new Error(`code node ${path} has no exported definition ${id} in code`);
+        if (!Object.hasOwn(code, id) || typeof code[id] !== "function") throw new Error(`code node ${path} has no exported definition ${id} in code`);
       } else if (node.kind !== "emit") {
         roots.add(path);
         if (node.skills?.length) throw new Error(`${path}: skills are not permitted`);
-        for (const tool of node.tools ?? []) if (tool !== "bash") throw new Error(`${path}: tool ${tool} is not permitted`);
-        if (node.tools?.includes("bash")) bashUsers.push(path);
+        const shell = Object.hasOwn(SANDBOX, path);
+        for (const tool of BLOCKED_DEFAULTS) {
+          const blocked = node.tool_block?.includes(tool) ?? false;
+          if (shell && tool === "bash") {
+            if (blocked) throw new Error(`${path}: mapped sandbox requires unblocked bash`);
+          } else if (!blocked) throw new Error(`${path}: tool_block must include ${tool}`);
+        }
+        const strength = workflow.strengthOf(path);
+        if (!Object.hasOwn(workflow.ladder, strength)) throw new Error(`${path}: unknown ladder strength ${strength}`);
+        assignments.set(path, workflow.ladder[strength].model);
       }
     }
   };
   walk(document.graph, "");
-  for (const path of bashUsers) if (!Object.hasOwn(SANDBOX, path)) throw new Error(`${path} uses bash but has no sandbox`);
   const users = new Map<string, string[]>();
   for (const [path, role] of Object.entries(SANDBOX)) {
-    if (!bashUsers.includes(path) || !roles.includes(role)) throw new Error(`SANDBOX.${path} must bind a bash-using agent path to one of ${roles.join(", ")}`);
+    if (!assignments.has(graph.NodeId.create(path)) || !roles.includes(role)) throw new Error(`SANDBOX.${path} must bind a bash-using agent path to one of ${roles.join(", ")}`);
     if (ACCEPTANCE.includes(role)) throw new Error(`SANDBOX.${path}: acceptance sandbox ${role} is reserved for code nodes`);
     users.set(role, [...(users.get(role) ?? []), path]);
   }
@@ -574,15 +557,16 @@ export function checkDocument(workflow: Workflow): void {
     const own = [`candidate${branch}`, `accept${branch}`];
     const cancels: readonly string[] = sandboxes;
     if (!roots.has(root)) throw new Error(`branch ${branch} root ${root} must be an agent or nested graph path`);
-    const members = bashUsers.filter((path) => within(path, root));
+    const members = Object.keys(SANDBOX).filter((path) => within(path, root));
     if (!members.length) throw new Error(`branch ${branch} root ${root} has no bash agent`);
     for (const path of members) if (SANDBOX[path] !== own[0]) throw new Error(`${path} in branch ${branch} must use sandbox ${own[0]}`);
     if (cancels.length !== own.length || own.some((role) => !cancels.includes(role) || !roles.includes(role)))
       throw new Error(`branch ${branch} must cancel exactly the known sandboxes ${own.join(" and ")}`);
   }
+  return assignments;
 }
 
-/** Offline validation; resolves agents with the unbound bash stand-in only to type-check tool names, never executing it. */
+/** Offline validation and per-path model assignment; opens no sessions, models, muxes, or containers. */
 async function check(problemDir: string): Promise<{ problem: string; models: Record<string, string> }> {
   const dir = resolve(problemDir);
   grafanaUrl(); // benchmark.py's validate step: a bad GRAFANA_URL fails before any instance starts
@@ -590,10 +574,7 @@ async function check(problemDir: string): Promise<{ problem: string; models: Rec
   const workflow = await loadWorkflow();
   if (!Bun.deepEquals(syntax.parse(readFileSync(join(ROOT, `${PAIR}.yml`), "utf8")), workflow.document))
     throw new Error(`document is not syntax.parse(${PAIR}.yml)`);
-  checkDocument(workflow);
-  const specs = await syntax.resolveAgents(workflow.document, { cwd: dir, tools: { bash: UNBOUND_BASH } });
-  const models = Object.fromEntries(specs.map((spec) => [spec.path, workflow.ladder[workflow.strengthOf(spec.path)].model]));
-  return { problem: problem.instance_id, models };
+  return { problem: problem.instance_id, models: Object.fromEntries(checkDocument(workflow)) };
 }
 
 function writeOutcome(artifacts: string, outcome: Outcome): void {
@@ -601,17 +582,6 @@ function writeOutcome(artifacts: string, outcome: Outcome): void {
   writeFileSync(`${path}.tmp`, `${JSON.stringify(outcome)}\n`);
   renameSync(`${path}.tmp`, path);
 }
-
-/** A stand-in that lets resolveAgents type the YAML `bash` name; the factory always replaces it per node. */
-const UNBOUND_BASH: AgentTool = {
-  name: "bash",
-  label: "bash",
-  description: "unbound",
-  parameters: Type.Object({}),
-  execute: async () => {
-    throw new Error("bash was not bound to a sandbox");
-  },
-};
 
 type Abortable = { abort(): Promise<unknown> };
 
@@ -625,10 +595,10 @@ export function sandboxBash(
   containers: Readonly<Record<string, string>>,
   acquired: ReadonlyMap<string, Abortable>,
   fatal: (reason: Error) => void,
-): (path: string) => AgentTool {
+): (path: string) => ContainerBash {
   return (path) => {
     const role = workflow.SANDBOX[path];
-    if (role === undefined) throw new Error(`${path} has no sandbox`);
+    if (!Object.hasOwn(workflow.SANDBOX, path) || !Object.hasOwn(containers, role)) throw new Error(`${path} has no sandbox`);
     const branch = Object.entries(workflow.BRANCHES).find(([, config]) => within(path, config.agent));
     return containerBash(containers[role], (reason) => {
       if (branch === undefined) return fatal(reason);
@@ -667,10 +637,6 @@ async function worker(problemDir: string, manifestPath: string, artifacts: strin
   const dir = resolve(problemDir);
   const log = join(artifacts, "requests.jsonl");
   writeFileSync(log, "", { flag: "wx" });
-  const recordings = join(artifacts, "recordings");
-  mkdirSync(recordings);
-  const index = join(recordings, "index.jsonl");
-  writeFileSync(index, "", { flag: "wx" });
   const controller = new AbortController();
   let cancelled = false;
   const cancel = () => {
@@ -679,21 +645,14 @@ async function worker(problemDir: string, manifestPath: string, artifacts: strin
   };
   process.once("SIGINT", cancel);
   process.once("SIGTERM", cancel);
-  const acquired = new Map<string, Agent>();
-  const env = new NodeExecutionEnv({ cwd: artifacts });
-  const repo = new JsonlSessionRepo({ fileSystem: env, sessionsRoot: recordings });
-  // Both optimizers record per-provider-request cost, failed and cancelled requests included.
-  const profiling = process.env.JUNCO_PROFILE_RUN_DIR !== undefined || process.env.JUNCO_GRAPH_RUN_DIR !== undefined;
-  const profile = new tracer.JsonlRecorder({ path: join(artifacts, "profile.jsonl"), ...(profiling ? { costMode: "usage" } : {}) });
-  let recorder: tracer.ProfileRecorder<string> = profile;
+  const acquired = new Map<string, Abortable>();
+  const releases: Releases = [];
   let receipt: { nonce: string; graphHash: string } | undefined;
   let outcome: Outcome;
   try {
     const problem = readProblem(dir);
     const workflow = await loadWorkflow();
-    checkDocument(workflow);
-    if (workflow.profileRun !== undefined && workflow.graphHash !== undefined)
-      receipt = { nonce: workflow.profileRun.nonce, graphHash: workflow.graphHash };
+    const assignments = checkDocument(workflow);
     const { baseline, containers } = readManifest(manifestPath, workflow.ROLES);
     const host: Pair.Host = {
       problem,
@@ -707,26 +666,37 @@ async function worker(problemDir: string, manifestPath: string, artifacts: strin
       cancel: cancelBranch(workflow.BRANCHES, containers, acquired),
     };
     const bash = sandboxBash(workflow, containers, acquired, (reason) => controller.abort(reason));
-    const ladder = await copilotLadder(workflow.ladder);
-    const observers = await telemetry(profile, problem.instance_id);
-    recorder = observers.recorder;
-    const factory: AgentFactory = { ladder, strengthOf: workflow.strengthOf, log, repo, index, bind: { bash }, acquired };
+    const ladder = new schedules.ModelLadder(guardedModels(await copilotModels(workflow.ladder), log, assignments), workflow.ladder);
+    const profiling = process.env.JUNCO_PROFILE_RUN_DIR !== undefined || process.env.JUNCO_GRAPH_RUN_DIR !== undefined;
+    const { recorder, tracer: observer, repo, index } = await openRecording(artifacts, problem.instance_id, releases, profiling);
+    if (workflow.profileRun !== undefined && workflow.graphHash !== undefined)
+      receipt = { nonce: workflow.profileRun.nonce, graphHash: workflow.graphHash };
+    const collections = new Map<graph.NodeIdType, tools.ToolCollection>();
+    for (const path of Object.keys(workflow.SANDBOX)) {
+      controller.signal.throwIfAborted();
+      const collection = await tools.ToolCollection.create(dir, { recorder, bash: bash(path) });
+      releases.push(() => collection.close());
+      collections.set(graph.NodeId.create(path), collection);
+    }
+    controller.signal.throwIfAborted();
     const text = await workflow.run({
       cwd: dir,
       ladder,
-      createAgent: (spec) => createAgent(factory, spec),
-      tools: { bash: UNBOUND_BASH },
-      tracer: observers.tracer,
+      tools: collections,
+      tracer: observer,
       recorder,
       signal: controller.signal,
       context: host,
-    });
+      agentOptions: await recordedSessions(assignments, dir, repo, index),
+    }, (g) => collectAgents(g, acquired));
     if (typeof text !== "string" || !text.trim()) throw new Error("workflow returned blank terminal text");
     outcome = { workflow_status: "completed", terminal_text: text, error: null };
   } catch (error) {
     outcome = { workflow_status: cancelled ? "cancelled" : "error", terminal_text: null, error: describe(error) };
   }
-  const failures = await closeRecording(acquired, repo, env, recorder);
+  const failures = await closeAll(releases);
+  process.removeListener("SIGINT", cancel);
+  process.removeListener("SIGTERM", cancel);
   if (failures.length)
     outcome = {
       workflow_status: outcome.workflow_status === "cancelled" ? "cancelled" : "error",
@@ -752,7 +722,7 @@ graph:
       description: Calls the probe tool and returns its value.
       trigger: Assignment~>Probe
       system: You are a test agent. Use tools exactly as instructed.
-      tools: [probe]
+      tool_block: &no-default-tools ${JSON.stringify([...BLOCKED_DEFAULTS, "complain", "info", "send", "yield"])}
       prompt: Follow the probe assignment in the next user message. Reply with exactly the value the tool returns.
     Relay:
       kind: code
@@ -762,6 +732,7 @@ graph:
       description: Repeats the handed-off value.
       system: You are a test agent.
       trigger: Relay~>Echo
+      tool_block: *no-default-tools
       prompt: "Reply with exactly the value in the user message following this prompt and nothing else."
   edges:
     - {from: Assignment, to: Probe, kind: message, schema: {}}
@@ -786,37 +757,31 @@ const Relay: syntax.DeterministicNode = ({ edges, policy }) => {
 type SessionEntry = { type?: string; message?: { role?: string; content?: unknown; toolName?: string } };
 
 /** Committed message entries of a durable session, read back through a fresh repository. */
-async function sessionMessages(root: string, path: string): Promise<SessionEntry["message"][]> {
+export async function sessionMessages(root: string, path: string): Promise<SessionEntry["message"][]> {
+  await using lifetime = new AsyncDisposableStack();
   const env = new NodeExecutionEnv({ cwd: root });
+  lifetime.defer(() => env.cleanup(BACKGROUND_CONTEXT));
   const repo = new JsonlSessionRepo({ fileSystem: env, sessionsRoot: root });
-  try {
-    const metadata = (await repo.list(undefined, BACKGROUND_CONTEXT)).find((m) => m.path === path);
-    if (metadata === undefined) throw new Error(`no durable session at ${path}`);
-    const session = await repo.open(metadata, BACKGROUND_CONTEXT);
-    try {
-      const entries = (await session.findEntries({ type: "message" }, BACKGROUND_CONTEXT)) as SessionEntry[];
-      return entries.map((entry) => entry.message);
-    } finally {
-      await session.close(BACKGROUND_CONTEXT);
-    }
-  } finally {
-    await repo.close(BACKGROUND_CONTEXT);
-    await env.cleanup(BACKGROUND_CONTEXT);
-  }
+  lifetime.defer(() => repo.close(BACKGROUND_CONTEXT));
+  const metadata = (await repo.list(undefined, BACKGROUND_CONTEXT)).find((m) => m.path === path);
+  if (metadata === undefined) throw new Error(`no durable session at ${path}`);
+  const session = await repo.open(metadata, BACKGROUND_CONTEXT);
+  lifetime.defer(() => session.close(BACKGROUND_CONTEXT));
+  const entries = (await session.findEntries({ type: "message", order: "asc" }, BACKGROUND_CONTEXT)) as SessionEntry[];
+  return entries.map((entry) => entry.message);
 }
 
 /**
- * Live smoke through the worker's own factory and recording: a Sonnet tool call whose answer a code node
+ * Live smoke through the same per-role guards and durable sessions: a tool call whose answer a code node
  * hands to an Opus receiver as a message (the workflow's handoff path); then the request log, the reopened
  * durable sessions and the profile are inspected.
  */
 async function preflight(): Promise<void> {
   const artifacts = mkdtempSync(join(tmpdir(), "junco-cb-preflight-"));
+  const cwd = process.cwd();
   const log = join(artifacts, "requests.jsonl");
   const recordings = join(artifacts, "recordings");
-  mkdirSync(recordings);
   const index = join(recordings, "index.jsonl");
-  writeFileSync(index, "");
   const sentinel = crypto.randomUUID();
   let probes = 0;
   const probe: AgentTool = {
@@ -830,27 +795,27 @@ async function preflight(): Promise<void> {
     },
   };
   const { ladder: rungs } = await loadWorkflow();
-  const ladder = await copilotLadder(rungs);
-  const acquired = new Map<string, Agent>();
-  const env = new NodeExecutionEnv({ cwd: artifacts });
-  const repo = new JsonlSessionRepo({ fileSystem: env, sessionsRoot: recordings });
-  const profilePath = join(artifacts, "profile.jsonl");
-  const profile = new tracer.JsonlRecorder({ path: profilePath });
-  const factory: AgentFactory = { ladder, strengthOf: PREFLIGHT_STRENGTH, log, repo, index, bind: { probe: () => probe }, acquired };
-  let recorder: tracer.ProfileRecorder<string> = profile;
+  const assignments = new Map(["Probe", "Echo"].map((node) => [graph.NodeId.create(node), rungs[PREFLIGHT_STRENGTH(node)].model]));
+  const ladder = new schedules.ModelLadder(guardedModels(await copilotModels(rungs), log, assignments), rungs);
+  const releases: Releases = [];
   let text: string;
   try {
-    const observers = await telemetry(profile, "preflight");
-    recorder = observers.recorder;
-    const execution = await JuncoGraph.fromYaml(syntax.parse(PREFLIGHT), {
-      cwd: ROOT,
+    const { recorder, tracer: observer, repo, index } = await openRecording(artifacts, "preflight", releases);
+    const document = syntax.parse(PREFLIGHT);
+    const collection = await tools.ToolCollection.create(cwd, {
+      recorder,
+      extend: async () => ({ tools: [probe], close: async () => {} }),
+    });
+    releases.push(() => collection.close());
+    const execution = await JuncoGraph.fromYaml(document, {
+      cwd,
       ladder,
       scheduler: () => schedules.strength((_snapshot, id) => PREFLIGHT_STRENGTH(id), schedules.parallel()),
-      createAgent: (spec) => createAgent(factory, spec),
       code: { Relay },
-      tools: { probe },
-      tracer: observers.tracer,
+      tools: new Map([[graph.NodeId.create("Probe"), collection]]),
+      tracer: observer,
       recorder,
+      agentOptions: await recordedSessions(assignments, cwd, repo, index),
     });
     try {
       await execution.run();
@@ -860,10 +825,13 @@ async function preflight(): Promise<void> {
     } finally {
       await execution.graph.close();
     }
-  } finally {
-    const failures = await closeRecording(acquired, repo, env, recorder);
-    if (failures.length) throw new AggregateError(failures, "preflight cleanup failed");
+  } catch (error) {
+    const failures = await closeAll(releases);
+    if (failures.length) throw new AggregateError([error, ...failures], "preflight failed");
+    throw error;
   }
+  const failures = await closeAll(releases);
+  if (failures.length) throw new AggregateError(failures, "preflight cleanup failed");
   const requests = readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { role: string; model: string });
   const sessions = readFileSync(index, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { node: string; model: string; session: string });
   const recorded: Record<string, { model: string; roles: string[]; tool_calls: string[]; tool_results: string[] }> = {};
@@ -881,7 +849,7 @@ async function preflight(): Promise<void> {
       tool_results: messages.filter((m) => m?.role === "toolResult").map((m) => String(m?.toolName)),
     };
   }
-  const profileSamples = readFileSync(profilePath, "utf8").trim().split("\n").filter(Boolean).length;
+  const profileSamples = readFileSync(join(artifacts, "profile.jsonl"), "utf8").trim().split("\n").filter(Boolean).length;
   const result = {
     probe_calls: probes,
     sentinel_reported: text.includes(sentinel),

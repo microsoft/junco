@@ -98,6 +98,38 @@ const rejectsAt = (value: unknown, path: string) => {
   );
 };
 
+test("node maps validate each sparse or complete domain, including escaped names and nested ports", () => {
+  const child = (route: string) => ({ kind: "graph", graph: {
+    nodes: { Worker: { prompt: "work" } },
+    source: { routes: { [route]: ["$source~>Worker"] } },
+    edges: [{ from: "$source", to: "Worker", kind: "message", schema }, { from: "Worker", to: "$sink", schema }],
+  } });
+  const doc = parse({ graph: {
+    nodes: { Start: { kind: "emit", text: "work", spec: "done" }, Left: child("Start~>Left"),
+      Right: child("Start~>Right"), "Left/Worker": { kind: "code" } },
+    edges: [
+      ...["Left", "Right"].map((to) => ({ from: "Start", to, kind: "message", schema })),
+      ...["Left", "Right"].map((from) => ({ from, to: "Left/Worker", schema })),
+      { from: "Left/Worker", to: "$sink", schema },
+    ],
+  } });
+  const id = graph.NodeId.create;
+  const sparse = new Map([[id("Left/Worker"), "left"]]);
+  const full = new Map(["$source", "$sink", "Start", "Left", "Right", "Left~1Worker",
+    "Left/$source", "Left/$sink", "Right/$source", "Right/$sink", "Left/Worker"].map((key) => [id(key), true]));
+  const check = () => JuncoGraphValidator.validateNodeMaps(doc, {
+    "sparse/map": { map: sparse, complete: false }, full: { map: full, complete: true },
+  });
+  assert.throws(check, { code: "node-map", path: "/options/full", message: /missing IDs: "Right\/Worker"/ });
+  full.set(id("Right/Worker"), false);
+  check();
+  sparse.set(id("Typo"), "unused");
+  assert.throws(check, { code: "node-map", path: "/options/sparse~1map", message: /unknown IDs: "Typo"/ });
+  sparse.clear();
+  full.delete(id("Left/$source"));
+  assert.throws(check, { code: "node-map", path: "/options/full", message: /Left\/\$source/ });
+});
+
 for (const id of ["$source", "$sink"])
   test(`reserved node ${id}`, () =>
     rejects((d) => {
@@ -330,12 +362,12 @@ test("identifiers, duplicates, source routes and sink results", () => {
       "/graph/source/routes/ ",
     ],
     [
-      "blank tool",
+      "blank blocked tool",
       variant((d) => {
-        d.graph.nodes.A!.tools = [""];
+        d.graph.nodes.A!.tool_block = [""];
       }),
       "identifier",
-      "/graph/nodes/A/tools/0",
+      "/graph/nodes/A/tool_block/0",
     ],
     [
       "duplicate edge",
@@ -356,13 +388,13 @@ test("identifiers, duplicates, source routes and sink results", () => {
       "/graph/nodes/B/trigger/any/0",
     ],
     [
-      "duplicate tool",
+      "duplicate blocked tool",
       variant((d) => {
-        d.graph.nodes.A!.tools = ["read", "read"];
+        d.graph.nodes.A!.tool_block = ["read", "read"];
       }),
       "duplicate",
-      "/graph/nodes/A/tools/1",
-      "/graph/nodes/A/tools/0",
+      "/graph/nodes/A/tool_block/1",
+      "/graph/nodes/A/tool_block/0",
     ],
     [
       "duplicate skill",
@@ -877,7 +909,7 @@ graph:
       system: |-
         first system line
         second system line
-      tools: [read, custom]
+      tool_block: [read, custom]
       skills: [guide]
       trigger:
         any: [ingress, seed]
@@ -887,7 +919,7 @@ graph:
     Ralph:
       description: revises the seeded assignment
       system: revise the assignment
-      tools: [custom]
+      tool_block: [custom]
       skills: [guide]
       prompt: "Revise the assignment in the delivered message."
     Child:
@@ -1001,7 +1033,7 @@ graph:
           kind: "agent",
           description: "receives either input",
           system: "first system line\nsecond system line",
-          tools: ["read", "custom"],
+          tool_block: ["read", "custom"],
           skills: ["guide"],
           trigger: { any: ["ingress", "seed"] },
           prompt: "Inspect the delivered input.\nExplain what should happen next.",
@@ -1009,7 +1041,7 @@ graph:
         Ralph: {
           description: "revises the seeded assignment",
           system: "revise the assignment",
-          tools: ["custom"],
+          tool_block: ["custom"],
           skills: ["guide"],
           prompt: "Revise the assignment in the delivered message.",
         },
@@ -1226,7 +1258,7 @@ test("strict object boundaries and malformed list/map entries", () => {
     ["/skills/guide", (d) => (d.skills = { guide: 2 })],
     ["/mcp", (d) => (d.mcp = { playwright: { command: "npx" } })],
     ["/graph/nodes/A", (d) => (d.graph.nodes.A.mcp = ["playwright"])],
-    ...["tools", "skills", "system", "prompt", "description"].map(
+    ...["tool_block", "skills", "system", "prompt", "description"].map(
       (field): [string, Mutate] => [
         "/graph/nodes/A",
         (d) => {
@@ -1295,7 +1327,7 @@ test("all builtins, collision identities and legal parallel edges", () => {
     );
 });
 
-test("agent tool_block validates conflicts, entries and source locations", () => {
+test("agents reject YAML tools at the field and validate tool_block exclusions", () => {
   const source = `graph:
   nodes:
     A:
@@ -1308,23 +1340,14 @@ test("agent tool_block validates conflicts, entries and source locations", () =>
       schema: { type: number }
 `;
   const error = failure(source, { sourceName: "bad-tools.yml" });
-  assert.equal(error.code, "node");
-  assert.equal(error.path, "/graph/nodes/A/tool_block/0");
+  assert.equal(error.code, "document");
+  assert.equal(error.path, "/graph/nodes/A/tools");
   assert.equal(error.sourceName, "bad-tools.yml");
-  assert.equal(error.location?.start.line, 5);
-  assert.match(error.message, /Node "A"/);
-  assert.match(error.message, /tools and tool_block/);
-  assert.match(error.message, /"bash"/);
-  assert.match(error.help, /remove "bash" from either/);
-
-  const helper = failure(
-    variant((doc) => {
-      doc.graph.nodes.A.tools = ["yield"];
-      doc.graph.nodes.A.tool_block = ["yield"];
-    }),
-  );
-  assert.equal(helper.code, "node");
-  assert.match(helper.message, /tools and tool_block/);
+  assert.deepEqual(error.location, {
+    start: { line: 4, column: 6 },
+    end: { line: 4, column: 11 },
+  });
+  assert.match(error.message, /unknown property "tools"/);
 
   const duplicate = failure(
     variant((doc) => {
@@ -1351,7 +1374,7 @@ test("agent tool_block validates conflicts, entries and source locations", () =>
   );
 
   for (const block of [{}, { tool_block: [] }, { tool_block: ["bash"] }]) {
-    const node = { prompt: "Work", ...block };
+    const node = { ...block };
     assert.deepEqual(
       parse({
         graph: {
@@ -1363,13 +1386,13 @@ test("agent tool_block validates conflicts, entries and source locations", () =>
     );
   }
 
-  const nestedConflict = failure({
+  const nestedError = failure({
     graph: {
       nodes: {
         Child: {
           kind: "graph",
           graph: {
-            nodes: { Worker: { prompt: "Work", tools: ["x"], tool_block: ["x"] } },
+            nodes: { Worker: { kind: "agent", tools: [] } },
             edges: [{ from: "Worker", to: "$sink", schema }],
           },
         },
@@ -1378,8 +1401,8 @@ test("agent tool_block validates conflicts, entries and source locations", () =>
     },
   });
   assert.equal(
-    nestedConflict.path,
-    "/graph/nodes/Child/graph/nodes/Worker/tool_block/0",
+    nestedError.path,
+    "/graph/nodes/Child/graph/nodes/Worker/tools",
   );
 });
 

@@ -374,6 +374,10 @@ export class MockAgent<
     return this.#explicitRun(() => this.#user(text, options?.images));
   }
 
+  get stagedPrompt(): AgenticOptions<S, P, T, N, V>["prompt"] {
+    return this.#staged?.text;
+  }
+
   stagePrompt(
     prompt: NonNullable<AgenticOptions<S, P, T, N, V>["prompt"]>,
     options?: { images?: ImageContent[] },

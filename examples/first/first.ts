@@ -10,27 +10,25 @@ import source from "./first.yml" with { type: "text" };
 const models = await ModelRuntime.create();
 const ladder = new schedules.ModelLadder(models, schedules.uniformLadder({ model: "github-copilot/claude-sonnet-5.5", thinking: "medium" }));
 const playwright = { name: "playwright", type: "stdio", command: "npx", args: ["-y", "@playwright/mcp@latest", "--headless"] } as const;
-/** One Playwright server, and so one browser, per browsing agent: its own collection. */
-const browsers = new Map<string, tools.ToolCollection>();
-const observer = tracer.TuiTracer.shared();
 let answer: string;
-try {
-  for (const node of ["Bun", "Rust"]) browsers.set(node, await new mcp.McpBuilder().add(playwright).build(process.cwd()));
+{
+  await using lifetime = new AsyncDisposableStack();
+  const observer = tracer.TuiTracer.shared();
+  lifetime.defer(() => observer instanceof tracer.TuiTracer ? observer.finish() : undefined);
+  const browsers = new Map<graph.NodeIdType, tools.ToolCollection>();
+  for (const node of ["Bun", "Rust"]) {
+    const collection = await new mcp.McpBuilder().add(playwright).build(process.cwd());
+    browsers.set(graph.NodeId.create(node), lifetime.adopt(collection, (c) => c.close()));
+  }
   const execution = await JuncoGraph.fromYaml(source, {
     cwd: process.cwd(),
     scheduler: () => schedules.parallel(),
     ladder,
-    createAgent: (spec) => syntax.createJuncoAgent({ ...spec, collection: browsers.get(spec.node) }, ladder),
+    tools: browsers,
     tracer: observer,
   });
-  try {
-    const results = await execution.run();
-    answer = syntax.finalText(results.get(graph.NodeId.create("Reviewer")), "Reviewer");
-  } finally {
-    await execution.graph.close();
-  }
-} finally {
-  for (const collection of browsers.values()) await collection.close();
-  if (observer instanceof tracer.TuiTracer) await observer.finish();
+  lifetime.defer(() => execution.graph.close());
+  const results = await execution.run();
+  answer = syntax.finalText(results.get(graph.NodeId.create("Reviewer")), "Reviewer");
 }
 console.log(answer);

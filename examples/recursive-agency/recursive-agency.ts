@@ -2,25 +2,25 @@
 // Scheduler models select one current wave from SchedulerSnapshot; only work graphs own members.
 // Start sends the assignment to both branches; the nested source routes carry it to the grandchild.
 // Join checks both reports and returns the grandchild's exact result.
-// Run: bun run examples/recursive-agency/recursive-agency.ts
+// Run in a writable native Btrfs seed: bun run /path/to/junco/examples/recursive-agency/recursive-agency.ts
 
 import assert from "node:assert/strict";
-import { BACKGROUND_CONTEXT, type AgentTool, MemorySessionRepo } from "@earendil-works/pi-agent-core";
 import {
   type Context,
   contentText,
   createModels,
   type FauxResponseFactory,
-  type FauxResponseStep,
+  InMemoryCredentialStore,
   fauxAssistantMessage,
   fauxProvider,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import * as O from "fp-ts/lib/Option.js";
 import { AssistantMessageSchema, agent, graph as graphApi, JuncoGraph, schedules, syntax, tracer } from "junco";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
-import { problemRecorder, runCli, type YamlAgent } from "../support.ts";
+import { problemRecorder, runCli } from "../support.ts";
 import source from "./recursive-agency.yml" with { type: "text" };
 
 const { JuncoAgent } = agent;
@@ -40,34 +40,7 @@ const Join: syntax.DeterministicNode = ({ policy }) =>
     return inputs.values.get(graphApi.EdgeId.create("0->Join"));
   }, policy);
 
-
-const NATIVE_TOOL_BLOCK = [
-  "read",
-  "bash",
-  "edit",
-  "release",
-  "grep",
-  "find",
-  "ast_grep",
-  "ast_edit",
-  "diff",
-  "code_graph",
-] as const;
 let providers = 0;
-async function nativeOptions(responses: readonly FauxResponseStep[]) {
-  const name = `faux-${++providers}`;
-  const faux = fauxProvider({ api: name, provider: name });
-  faux.setResponses([...responses]);
-  const models = createModels();
-  models.setProvider(faux.provider);
-  const options = {
-    session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
-    models,
-    model: faux.getModel(),
-    tool_block: NATIVE_TOOL_BLOCK,
-  };
-  return { faux, options };
-}
 
 function schedulerRequestOf(context: Context): Request {
   const last = context.messages.at(-1);
@@ -116,14 +89,26 @@ async function main(signal: AbortSignal) {
   await using recording = new AsyncDisposableStack();
   const recorder = recording.adopt(await problemRecorder(process.cwd()), (owned) => owned.close());
   const log: string[] = [];
-  const leafResponses = [
-    fauxAssistantMessage([fauxToolCall("yield", { reason: "waiting once" }, { id: "leaf-yield" })], {
-      stopReason: "toolUse",
-    }),
-    fauxAssistantMessage("leaf-result"),
-  ];
-  const siblingResponses = [fauxAssistantMessage("sibling-result")];
-  const actors = new Map<string, { faux: Awaited<ReturnType<typeof nativeOptions>>["faux"]; agent: YamlAgent }>();
+  const faux = fauxProvider({ api: "faux", provider: "faux" });
+  const calls = { leaf: 0, sibling: 0 };
+  const respond: FauxResponseFactory = (context) => {
+    const first = context.messages.find((m) => m.role === "user");
+    assert.ok(first);
+    if (contentText(first.content).startsWith("Complete the sibling assignment")) {
+      calls.sibling++;
+      return fauxAssistantMessage("sibling-result");
+    }
+    assert.ok(contentText(first.content).startsWith("Complete the grandchild assignment"));
+    return ++calls.leaf === 1
+      ? fauxAssistantMessage(fauxToolCall("yield", { reason: "waiting once" }, { id: "leaf-yield" }), { stopReason: "toolUse" })
+      : fauxAssistantMessage("leaf-result");
+  };
+  faux.setResponses([respond, respond, respond]);
+  const credentials = new InMemoryCredentialStore();
+  await credentials.modify("faux", async () => ({ type: "api_key", key: "offline" }));
+  const models = await ModelRuntime.create({ credentials, modelsPath: null, refreshOnCreate: false, allowModelNetwork: false });
+  models.registerNativeProvider(faux.provider);
+  const ladder = new schedules.ModelLadder(models, schedules.uniformLadder({ model: `faux/${faux.getModel().id}` }));
   const decisions: string[][] = [];
   const decide: Record<string, (request: Request) => Plan> = {
     grandchild: runAvailable,
@@ -140,6 +125,8 @@ async function main(signal: AbortSignal) {
     },
   };
   const observer = tracer.TuiTracer.shared();
+  await using lifetime = new AsyncDisposableStack();
+  lifetime.defer(() => observer instanceof tracer.TuiTracer ? observer.finish() : undefined);
   const root = {
     context: await JuncoGraph.fromYaml(source, {
       cwd: process.cwd(),
@@ -147,39 +134,23 @@ async function main(signal: AbortSignal) {
       code: { Join },
       recorder,
       tracer: observer,
-      createAgent: async (spec) => {
-        const { faux, options } = await nativeOptions(spec.node === "0" ? leafResponses : siblingResponses);
-        const agent: YamlAgent = await JuncoAgent.fromResolved({
-          ...options,
-          systemPrompt: spec.systemPrompt,
-          tools: spec.tools as AgentTool[],
-          tool_block: [
-            ...new Set([
-              ...(options.tool_block ?? []),
-              ...(spec.tool_block ?? []),
-            ]),
-          ],
-          recorder: spec.recorder,
-          recorderNodeId: spec.recorderNodeId,
-        });
-        actors.set(spec.node, { faux, agent });
-        if (spec.node === "1") {
-          agent.events.on("run_end", (event) => {
-            if (event.status === "completed") log.push("sibling done");
-          });
-        }
-        return agent;
-      },
+      ladder,
+      signal,
     }),
     decisions,
   };
-  const leaf = actors.get("0")!;
-  const sibling = actors.get("1")!;
+  lifetime.defer(() => root.context.graph.close());
+  const childGraph = root.context.graph.getNode(NodeId.create("0"))!.state;
+  assert.ok(childGraph instanceof JuncoGraph);
+  const grandchildGraph = childGraph.getNode(NodeId.create("0"))!.state;
+  assert.ok(grandchildGraph instanceof JuncoGraph);
+  const leaf = grandchildGraph.getNode(NodeId.create("0"))!.state;
+  const sibling = root.context.graph.getNode(NodeId.create("1"))!.state;
+  assert.ok(leaf instanceof JuncoAgent && sibling instanceof JuncoAgent);
+  sibling.events.on("run_end", (event) => {
+    if (event.status === "completed") log.push("sibling done");
+  });
   {
-    // LIFO: join a pending abort, then close the graph, then finish the TUI.
-    await using lifetime = new AsyncDisposableStack();
-    lifetime.defer(() => observer instanceof tracer.TuiTracer ? observer.finish() : undefined);
-    lifetime.adopt(root.context.graph, (graph) => graph.close());
     let abortWork: Promise<void> | undefined;
     const interrupt = () => {
       abortWork = root.context.graph.abort(signal.reason);
@@ -195,8 +166,7 @@ async function main(signal: AbortSignal) {
     signal.throwIfAborted();
   }
 
-  const childGraph = root.context.graph.getNode(NodeId.create("0"))!.state as JuncoGraph<TSchema, unknown>;
-  const grandchildGraph = childGraph.getNode(NodeId.create("0"))!.state as JuncoGraph<TSchema, unknown>;
+  await lifetime.disposeAsync();
   const resultOf = (graph: JuncoGraph<TSchema, unknown>, id: string) => {
     const result = graph.result(NodeId.create(id));
     assert.ok(O.isSome(result), `Missing retained result ${id}`);
@@ -218,9 +188,8 @@ async function main(signal: AbortSignal) {
   assert.ok(paired.length >= 2, JSON.stringify(root.decisions));
   const firstChild = log.indexOf("child decision");
   assert.ok(firstChild >= 0 && firstChild < log.indexOf("sibling done"), log.join(", "));
-  assert.equal(leaf.faux.state.callCount, 2);
-  assert.equal(sibling.faux.state.callCount, 1);
-  for (const actor of [leaf.agent, sibling.agent]) assert.equal(actor.status, "closed");
+  assert.deepEqual(calls, { leaf: 2, sibling: 1 });
+  for (const actor of [leaf, sibling]) assert.equal(actor.status, "closed");
   console.log(`root complete; ${leafResult} + ${siblingResult}; ${root.decisions.length} root decisions`);
 }
 

@@ -7,8 +7,6 @@ import {
   MemorySessionRepo,
 } from "@earendil-works/pi-agent-core";
 import {
-  type AssistantMessage,
-  type Context,
   contentText,
   fauxAssistantMessage,
   fauxToolCall,
@@ -28,24 +26,19 @@ import {
 import { Value } from "typebox/value";
 import { renderTask } from "../src/agent-node.ts";
 import { userTexts } from "./deterministic-support.ts";
-import { fauxRuntime, NATIVE_TOOL_BLOCK, scripted } from "./support.ts";
+import { countedCollection, offlineLadder, NATIVE_TOOL_BLOCK, scripted } from "./support.ts";
 
 const assignment = "Cover every section.\nKeep the original constraints.";
 function workflowPrompt(source: string, id: string): string {
   const role = syntax.parse(source).graph.nodes[id];
-  assert.ok(role && "prompt" in role);
+  assert.ok(role && "prompt" in role && typeof role.prompt === "string");
   return role.prompt;
 }
 
 /** Every user text in one provider request. */
 type Request = { readonly users: string[] };
 const requests: Request[] = [];
-const recording =
-  (reply: string) =>
-  (context: Context): AssistantMessage => {
-    requests.push({ users: userTexts(context.messages) });
-    return fauxAssistantMessage(reply);
-  };
+const selections: Request[] = [];
 
 /**
  * The root `tools` yield factory and the agent's classifier must share one registry: a genuine
@@ -123,30 +116,25 @@ async function assertPublicYieldBoundary(): Promise<void> {
 
 await assertPublicYieldBoundary();
 
-const { models, faux } = await fauxRuntime(
-  ["draft-1", "draft-2", "draft-3"].map(recording),
-  "ralph-workflow-smoke",
-);
-const model = faux.getModel();
-const ladder = new schedules.ModelLadder(
-  models,
-  schedules.uniformLadder({ model: `${model.provider}/${model.id}` }),
-);
-// createAgent keeps the smoke collection-free: no ShellMux, so no Btrfs seed is needed.
+const { collection } = countedCollection();
+await using lifetime = { [Symbol.asyncDispose]: () => collection.close() };
+const ladder = await offlineLadder((context) => {
+  const users = userTexts(context.messages);
+  if (users[0] === workflowPrompt(workflows.ralph, "Ralph")) {
+    requests.push({ users });
+    return fauxAssistantMessage(`draft-${requests.length}`);
+  }
+  selections.push({ users });
+  const candidate = users.at(-1)!;
+  return fauxAssistantMessage(candidate.startsWith("{")
+    ? contentText(JSON.parse(candidate).payload.content)
+    : candidate.split("\n\nTask: ")[0]!);
+});
 const judged: number[] = [];
 const execution = await JuncoGraph.fromYaml(workflows.ralph, {
   cwd: process.cwd(),
   scheduler: () => schedules.parallel(),
-  createAgent: (spec) =>
-    syntax.createJuncoAgent(
-      {
-        ...spec,
-        tool_block: [
-          ...new Set([...NATIVE_TOOL_BLOCK, ...(spec.tool_block ?? [])]),
-        ],
-      },
-      ladder,
-    ),
+  collection,
   ladder,
   tracer: new tracerApi.DummyTracer(),
   // Uncapped: only the predicate ends the loop; the window watchdog below is the fixture's guard.
@@ -208,45 +196,19 @@ console.log(
   }),
 );
 
-// Fan-in selectors on one scripted runtime: AllFanIn's single selection, then two AnyFanIn batches.
-const selections: Request[] = [];
-const fanIn = await fauxRuntime(
-  ["best", "x-complete", "y-complete"].map(
-    (reply) =>
-      (context: Context): AssistantMessage => {
-        selections.push({ users: userTexts(context.messages) });
-        return fauxAssistantMessage(reply);
-      },
-  ),
-  "fan-in-workflow-smoke",
-);
-const fanInModel = fanIn.faux.getModel();
-const fanInLadder = new schedules.ModelLadder(
-  fanIn.models,
-  schedules.uniformLadder({ model: `${fanInModel.provider}/${fanInModel.id}` }),
-);
 const fanInOptions = {
   cwd: process.cwd(),
   scheduler: () => schedules.parallel(),
-  createAgent: async (spec: syntax.AgentSpec) => {
-    const agent = await syntax.createJuncoAgent(
-      {
-        ...spec,
-        tool_block: [
-          ...new Set([...NATIVE_TOOL_BLOCK, ...(spec.tool_block ?? [])]),
-        ],
-      },
-      fanInLadder,
-    );
-    await agent.setSteeringMode("all");
-    return agent;
-  },
-  ladder: fanInLadder,
+  collection,
+  ladder,
   tracer: new tracerApi.DummyTracer(),
 };
 const candidates = graphApi.EdgeId.create("candidates");
 
-const all = await JuncoGraph.fromYaml(workflows.allFanIn, fanInOptions);
+const all = await JuncoGraph.fromYaml(workflows.allFanIn, {
+  ...fanInOptions,
+  agentOptions: new Map([[graphApi.NodeId.create("AllFanIn"), { steeringMode: "all" }]]),
+});
 try {
   all.graph.source.enqueue({
     messages: new Map([
@@ -276,6 +238,7 @@ try {
 
 const any = await JuncoGraph.fromYaml(workflows.anyFanIn, {
   ...fanInOptions,
+  agentOptions: new Map([[graphApi.NodeId.create("AnyFanIn"), { steeringMode: "all" }]]),
   ...schedules.anyFanIn(),
 });
 const streamed: string[] = [];

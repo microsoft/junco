@@ -1,8 +1,9 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { agent, Deterministic, graph, JuncoGraph, schedules, syntax, tracer } from "junco";
+import { BACKGROUND_CONTEXT, MemorySessionRepo } from "@earendil-works/pi-agent-core";
+import { Deterministic, graph, JuncoGraph, schedules, syntax, tracer } from "junco";
 import type { TSchema } from "typebox";
-import { fauxRuntime, NATIVE_TOOL_BLOCK } from "./support.ts";
+import { offlineLadder } from "./support.ts";
 
 const options = () => ({
   cwd: process.cwd(),
@@ -28,10 +29,11 @@ const promptError = (error: unknown) =>
   error instanceof syntax.ValidationError && error.code === "document" &&
   error.path === "/graph/nodes/Child/graph/nodes/Worker/prompt";
 
-test("explicit and implicit agents need a nonblank prompt before any graph acquires resources", async () => {
+test("explicit and implicit agents may omit a prompt but cannot supply a blank one", async () => {
   let acquisitions = 0;
-  for (const kind of [{}, { kind: "agent" }])
-    for (const field of [{}, { prompt: "" }, { prompt: " \n\t" }]) {
+  for (const kind of [{}, { kind: "agent" }]) {
+    syntax.JuncoGraphValidator.validate(nested(kind));
+    for (const field of [{ prompt: "" }, { prompt: " \n\t" }]) {
       const doc = nested({ ...kind, ...field, system: "Not an instruction to run" });
       assert.throws(() => syntax.JuncoGraphValidator.validate(doc), promptError);
       const source = JSON.stringify(doc);
@@ -43,50 +45,42 @@ test("explicit and implicit agents need a nonblank prompt before any graph acqui
             acquisitions++;
             return schedules.parallel();
           },
-          createAgent: async () => {
-            acquisitions++;
-            throw new Error("unexpected acquisition");
-          },
         }),
         promptError,
       );
     }
+  }
   assert.equal(acquisitions, 0);
 });
 
 for (const failure of ["invalid prompt", "legacy available"] as const)
-  test(`${failure} releases transferred agents once without a request`, async () => {
-    const { models, faux } = await fauxRuntime([]);
-    const prepared: NonNullable<syntax.BuildOptions["agents"]>[string] =
-      await agent.JuncoAgent.create({
-        provider: "faux",
-        model: "faux-1",
-        models,
-        tools: [],
-        tool_block: NATIVE_TOOL_BLOCK,
-      });
-    const dispose = prepared[Symbol.asyncDispose].bind(prepared);
-    let disposals = 0;
-    prepared[Symbol.asyncDispose] = async () => {
-      disposals++;
-      await dispose();
+  test(`${failure} releases the transferred session once without a request`, async () => {
+    const repo = new MemorySessionRepo();
+    const session = await repo.create({}, BACKGROUND_CONTEXT);
+    const close = session.close.bind(session);
+    let disposals = 0, requests = 0;
+    session.close = async (context) => { disposals++; return close(context); };
+    const config = {
+      ...options(),
+      ladder: await offlineLadder(() => { requests++; assert.fail("unexpected request"); }),
+      agentOptions: new Map([[graph.NodeId.create("Child/Worker"), { session }]]),
     };
-    const config = { ...options(), agents: { "Child/Worker": prepared } };
     if (failure === "legacy available")
       Object.defineProperty(config, "available", {
         get: () => assert.fail("legacy options must not be read or invoked"),
       });
     try {
-      const doc = nested(failure === "invalid prompt" ? {} : { prompt: "Work" });
+      const doc = nested({ prompt: failure === "invalid prompt" ? "  " : "Work" });
       await assert.rejects(
         JuncoGraph.fromYaml(doc, config),
         failure === "invalid prompt" ? promptError : (error) =>
           error instanceof graph.DataflowDefinitionError && /available.*trigger/.test(error.message),
       );
       assert.equal(disposals, 1);
-      assert.equal(faux.state.callCount, 0);
+      assert.equal(requests, 0);
     } finally {
-      await prepared.return();
+      if (!disposals) await session.close(BACKGROUND_CONTEXT);
+      await repo.close(BACKGROUND_CONTEXT);
     }
   });
 

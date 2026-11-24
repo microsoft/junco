@@ -2,7 +2,7 @@
 //
 // mixed.yml declares the competitors and their joined Reviewer; this module supplies LADDER, Ralph's rounds and raw-draft validation.
 // Goals sends the same assignment to both competitors; only Ralph's final draft reaches Reviewer.
-// Install workspace dependencies, then run after `pi` → `/login` → GitHub Copilot:
+// From a writable native Btrfs seed with workspace dependencies installed, run after `pi` → `/login` → GitHub Copilot:
 //
 //   bun run examples/mixed/mixed.ts
 //
@@ -26,7 +26,7 @@ export interface MixedGraph {
 }
 
 export const MixedGraph = {
-  async create(options: Pick<syntax.BuildOptions, "createAgent" | "tracer" | "ladder" | "recorder">): Promise<MixedGraph> {
+  async create(options: Pick<syntax.BuildOptions, "collection" | "tracer" | "recorder"> & { ladder: schedules.ModelLadder }): Promise<MixedGraph> {
     const reviewerId = graph.NodeId.create("Reviewer");
     const ralph = schedules.ralph({ rounds: 2 });
     const execution = await JuncoGraph.fromYaml(source, {
@@ -60,8 +60,8 @@ async function main(signal?: AbortSignal): Promise<void> {
     await using lifetime = new AsyncDisposableStack();
     const recorder = lifetime.adopt(await problemRecorder(process.cwd()), (owned) => owned.close());
     const observer = tracer.TuiTracer.shared();
-    const { execution, reviewerId } = await MixedGraph.create({ ladder: new schedules.ModelLadder(models, LADDER), recorder, tracer: observer });
     lifetime.defer(() => observer instanceof tracer.TuiTracer ? observer.finish() : undefined);
+    const { execution, reviewerId } = await MixedGraph.create({ ladder: new schedules.ModelLadder(models, LADDER), recorder, tracer: observer });
     lifetime.adopt(execution.graph, (graph) => graph.close());
     signal?.throwIfAborted();
     const results = await execution.run({ signal });

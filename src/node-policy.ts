@@ -129,7 +129,7 @@ export async function applyModel(
 export type NodePolicy = {
   /** The prompt agent a prompt-agent body drives. */
   readonly agent?: AnyJuncoAgent | AnyMockAgent;
-  /** Return FIFOs interpolated by this registration's compiled YAML prompt. */
+  /** Present for a builder-staged YAML prompt, even when it interpolates no return FIFOs. */
   promptReturnEdges?: ReadonlySet<string>;
   /** A nested-graph body that parks instead of returning; only message edges may touch it. */
   readonly persistent?: true;
@@ -140,8 +140,6 @@ export type NodePolicy = {
   readonly inputMode?: "all-messages";
   /** Reasons of the agent's latest pause. */
   lastYield?: readonly AgenticYieldReason[];
-  /** `"caller"`: graph close aborts and joins this body's agent without disposing it; omitted means graph-owned. */
-  agentOwnership?: "graph" | "caller";
 };
 
 /** Source-derived policy metadata; native descriptions remain on native observations. */

@@ -51,11 +51,13 @@ import { errorGraph, MARSH_POLICY_DENIED } from "junco-tools/errors";
 import { redirectLog } from "junco-tools/log";
 import { type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
+import { createJuncoAgent, parse, resolveAgents } from "../../../src/syntax/index.ts";
 import { userTexts } from "../../../test/deterministic-support.ts";
 import {
   fauxRuntime,
   flushMacrotasks,
   NATIVE_TOOL_BLOCK,
+  offlineLadder,
   scripted,
   toolTurn,
 } from "../../../test/support.ts";
@@ -135,10 +137,6 @@ test("custom bash avoids native acquisition and reports only successful replacem
       /Duplicate tool name: bash/,
     );
     assert.deepEqual(records, []);
-    const unused = await nativeOptions([]);
-    const { parse, resolveAgents } = await import(
-      "../../../src/syntax/index.ts"
-    );
     const [spec] = await resolveAgents(
       parse({
         graph: {
@@ -148,16 +146,16 @@ test("custom bash avoids native acquisition and reports only successful replacem
       }),
       {
         cwd: process.cwd(),
-        tools: { bash: bash.tool },
         toolSource: "unused.ts",
       },
     );
-    agent = await JuncoAgent.fromResolved({
-      ...unused,
-      tools: spec!.tools as AgentTool[],
-      toolSource: spec!.toolSource,
-    });
-    assert.deepEqual(records, []);
+    assert.ok(spec);
+    const unmodified = await createJuncoAgent(spec, await offlineLadder([]));
+    try {
+      assert.deepEqual(records, []);
+    } finally {
+      await unmodified.return();
+    }
   } finally {
     try {
       await agent?.return();

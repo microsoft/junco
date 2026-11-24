@@ -19,7 +19,6 @@ import {
   type RefactorVerdict,
   rankCandidates,
   refactorCandidates,
-  runCandidateBatch,
   type SearchReport,
   type SnapshotRefresher,
   VerdictRecorder,
@@ -32,6 +31,7 @@ import {
   type LaneScript,
   type NodeInput,
   type ScriptedLane,
+  runScriptedBatch,
   scriptedLane,
   snapshotOf,
   wiring,
@@ -646,20 +646,11 @@ const keysScript = (
 
 /** One real batch of Keys lanes (ranks 1…n, one per script) with a recording applier. */
 async function keysBatch(scripts: readonly LaneScript[]) {
-  const lanes = await Promise.all(
-    scripts.map((script, index) =>
-      scriptedLane(
-        { ...keysWork, rank: index + 1 },
-        keysSnapshot,
-        keysSources,
-        script,
-      ),
-    ),
-  );
+  const lanes = scripts.map((script, index) => scriptedLane({ ...keysWork, rank: index + 1 }, keysSources, script));
   const recorder = recordingApplier();
-  const outcomes = await runCandidateBatch({
+  const outcomes = await runScriptedBatch({
     snapshot: keysSnapshot,
-    lanes: lanes.map(({ lane }) => lane),
+    lanes,
     observer: quiet(),
     apply: recorder.apply,
   });
@@ -1106,9 +1097,9 @@ const laneWorks = () =>
   [1, 2, 3, 4].map((n) => workOf(laneSnapshot, `fx/C${n}.ts#C${n}`, n));
 
 function assertClosed(lanes: readonly ScriptedLane[]) {
-  for (const { lane } of lanes) {
-    assert.equal(lane.proposer.status, "closed");
-    assert.equal(lane.judge.status, "closed");
+  for (const { members } of lanes) {
+    assert.equal(members.length, 2);
+    for (const member of members) assert.equal(member.status, "closed");
   }
 }
 
@@ -1116,12 +1107,13 @@ describe("candidate batch graph", () => {
   test("four lanes run in parallel with their own research stars and independent judges", async () => {
     const proposers = barrier(4);
     const held = Promise.withResolvers<void>();
+    // Leave one outstanding report in every lane; finished lanes need not wait for their peers.
     const heldEntered = Promise.withResolvers<void>();
-    // Eleven of twelve researchers answer while Search2 of rank 2 is held.
+    let waiting = 0;
     const othersAnswered = Promise.withResolvers<void>();
     let answered = 0;
     const onResearched = () => {
-      if (++answered === 11) othersAnswered.resolve();
+      if (++answered === 8) othersAnswered.resolve();
     };
     const scripts = [
       {
@@ -1129,30 +1121,22 @@ describe("candidate batch graph", () => {
         earlySubmit: true,
         forbiddenProbe: "Search1",
       },
-      {
-        proposal: dupProposal(2),
-        hold: {
-          shard: "Search2",
-          entered: () => heldEntered.resolve(),
-          gate: held.promise,
-        },
-      },
+      { proposal: dupProposal(2) },
       { readAssigned: true },
       { failures: { Search3: 1 } },
     ];
-    const lanes = await Promise.all(
-      laneWorks().map((work, index) =>
-        scriptedLane(work, laneSnapshot, laneSources, {
-          ...scripts[index],
-          onResearched,
-          barrier: proposers.enter,
-        }),
-      ),
-    );
+    const lanes = laneWorks().map((work, index) => scriptedLane(work, laneSources, {
+      ...scripts[index], onResearched, barrier: proposers.enter,
+      hold: {
+        shard: "Search2",
+        entered: () => { if (++waiting === 4) heldEntered.resolve(); },
+        gate: held.promise,
+      },
+    }));
     const recorder = recordingApplier();
-    const running = runCandidateBatch({
+    const running = runScriptedBatch({
       snapshot: laneSnapshot,
-      lanes: lanes.map(({ lane }) => lane),
+      lanes,
       observer: quiet(),
       apply: recorder.apply,
     });
@@ -1169,11 +1153,11 @@ describe("candidate batch graph", () => {
       4,
       "every proposer started before any continued",
     );
-    for (const { log, lane } of lanes) {
+    for (const { log } of lanes) {
       assert.equal(log.judgeCalls, 0, "no judge sees an unfinished lane");
       assert.equal(
-        lane.proposal.peek(),
-        undefined,
+        log.submitted,
+        false,
         "no lane submits before its reports arrive",
       );
     }
@@ -1272,11 +1256,7 @@ describe("candidate batch graph", () => {
       { beforeResearchYields: 20 },
       {},
     ];
-    const lanes = await Promise.all(
-      laneWorks().map((work, index) =>
-        scriptedLane(work, laneSnapshot, laneSources, scripts[index]),
-      ),
-    );
+    const lanes = laneWorks().map((work, index) => scriptedLane(work, laneSources, scripts[index]));
     const delayed = lanes[2]!;
     const observed: { id: string; yields: number; handles: number }[] = [];
     const recorder = recordingApplier((refactor) => {
@@ -1331,9 +1311,9 @@ describe("candidate batch graph", () => {
         };
       },
     };
-    const outcomes = await runCandidateBatch({
+    const outcomes = await runScriptedBatch({
       snapshot: laneSnapshot,
-      lanes: lanes.map(({ lane }) => lane),
+      lanes,
       observer,
       apply: recorder.apply,
     });
@@ -1372,77 +1352,28 @@ describe("candidate batch graph", () => {
     assertClosed(lanes);
   }, 60_000);
 
-  test("a construction failure closes registered and unregistered lanes without applying", async () => {
-    const lanes = await Promise.all(
-      laneWorks()
-        .slice(0, 3)
-        .map((work) => scriptedLane(work, laneSnapshot, laneSources, {})),
-    );
-    await lanes[1]!.lane.judge.return();
+  test("a pre-aborted batch neither starts a role nor applies a proposal", async () => {
+    const lanes = laneWorks().map((work) => scriptedLane(work, laneSources));
     const recorder = recordingApplier();
-    await assert.rejects(
-      runCandidateBatch({
-        snapshot: laneSnapshot,
-        lanes: lanes.map(({ lane }) => lane),
-        observer: quiet(),
-        apply: recorder.apply,
-      }),
-      (error: unknown) =>
-        error instanceof agent.JuncoAgentError && error.code === "closed",
-    );
+    const failure = new Error("cancel before acquisition");
+    await assert.rejects(runScriptedBatch({
+      snapshot: laneSnapshot, lanes, observer: quiet(), apply: recorder.apply,
+    }, AbortSignal.abort(failure)), (error) => error === failure);
+    assert.ok(lanes.every(({ members, log }) => !members.length && !log.proposerInput.length));
     assert.equal(recorder.applied.length, 0);
-    assertClosed(lanes);
-  }, 30_000);
-
-  test("a construction failure retains a disposal failure and still closes every lane", async () => {
-    const lanes = await Promise.all(
-      laneWorks()
-        .slice(0, 3)
-        .map((work) => scriptedLane(work, laneSnapshot, laneSources, {})),
-    );
-    await lanes[1]!.lane.judge.return();
-    const member = lanes[2]!.lane.judge;
-    const dispose = member[Symbol.asyncDispose].bind(member);
-    const cleanupError = new Error("judge cleanup failed");
-    member[Symbol.asyncDispose] = async () => {
-      await dispose();
-      throw cleanupError;
-    };
-    const recorder = recordingApplier();
-    await assert.rejects(
-      runCandidateBatch({
-        snapshot: laneSnapshot,
-        lanes: lanes.map(({ lane }) => lane),
-        observer: quiet(),
-        apply: recorder.apply,
-      }),
-      (error: unknown) =>
-        error instanceof SuppressedError &&
-        error.error === cleanupError &&
-        error.suppressed instanceof agent.JuncoAgentError &&
-        error.suppressed.code === "closed",
-    );
-    assert.equal(recorder.applied.length, 0);
-    assertClosed(lanes);
-  }, 30_000);
+  });
 
   test("an application failure stops the batch, keeps the earlier application, and closes every lane", async () => {
-    const lanes = await Promise.all(
-      laneWorks()
-        .slice(0, 2)
-        .map((work) =>
-          scriptedLane(work, laneSnapshot, laneSources, {
-            proposal: dupProposal(work.rank),
-          }),
-        ),
-    );
+    const lanes = laneWorks().slice(0, 2).map((work) => scriptedLane(work, laneSources, {
+      proposal: dupProposal(work.rank),
+    }));
     const recorder = recordingApplier(() => {
       if (recorder.applied.length === 1) throw new Error("stage failed");
     });
     await assert.rejects(
-      runCandidateBatch({
+      runScriptedBatch({
         snapshot: laneSnapshot,
-        lanes: lanes.map(({ lane }) => lane),
+        lanes,
         observer: quiet(),
         apply: recorder.apply,
       }),
@@ -1487,17 +1418,12 @@ describe("candidate batch graph", () => {
     },
   ]) {
     test(`${name} fails in the code node and closes every lane`, async () => {
-      const scripted = await scriptedLane(
-        laneWorks()[0]!,
-        laneSnapshot,
-        laneSources,
-        script,
-      );
+      const scripted = scriptedLane(laneWorks()[0]!, laneSources, script);
       const recorder = recordingApplier();
       await assert.rejects(
-        runCandidateBatch({
+        runScriptedBatch({
           snapshot: laneSnapshot,
-          lanes: [scripted.lane],
+          lanes: [scripted],
           observer: quiet(),
           apply: recorder.apply,
         }),
@@ -1515,7 +1441,7 @@ describe("candidate batch graph", () => {
 
   test("cancelling at a completed review applies nothing", async () => {
     const [work] = laneWorks();
-    const scripted = await scriptedLane(work!, laneSnapshot, laneSources, {
+    const scripted = scriptedLane(work!, laneSources, {
       proposal: dupProposal(1),
     });
     const controller = new AbortController();
@@ -1545,10 +1471,10 @@ describe("candidate batch graph", () => {
     };
     const recorder = recordingApplier();
     await assert.rejects(
-      runCandidateBatch(
+      runScriptedBatch(
         {
           snapshot: laneSnapshot,
-          lanes: [scripted.lane],
+          lanes: [scripted],
           observer,
           apply: recorder.apply,
         },
@@ -1577,18 +1503,12 @@ describe("candidate batch graph", () => {
         five,
         async (snapshot, batch, signal) => {
           calls++;
-          const lanes = await Promise.all(
-            batch.map((work) =>
-              scriptedLane(work, snapshot, sources, {
-                proposerFails: work.rank === 1,
-              }),
-            ),
-          );
+          const lanes = batch.map((work) => scriptedLane(work, sources, { proposerFails: work.rank === 1 }));
           created.push(...lanes);
-          return runCandidateBatch(
+          return runScriptedBatch(
             {
               snapshot,
-              lanes: lanes.map(({ lane }) => lane),
+              lanes,
               observer: quiet(),
               apply: recorder.apply,
             },
@@ -1626,7 +1546,7 @@ describe("candidate batch graph", () => {
       },
     ] as const;
     for (const { failures, missing, ...recovery } of cases) {
-      const scripted = await scriptedLane(work, laneSnapshot, laneSources, {
+      const scripted = scriptedLane(work, laneSources, {
         proposal: dupProposal(1),
         failures,
         ...("failureDecision" in recovery
@@ -1634,9 +1554,9 @@ describe("candidate batch graph", () => {
           : {}),
       });
       const recorder = recordingApplier();
-      const [outcome] = await runCandidateBatch({
+      const [outcome] = await runScriptedBatch({
         snapshot: laneSnapshot,
-        lanes: [scripted.lane],
+        lanes: [scripted],
         observer: quiet(),
         apply: recorder.apply,
         ...("policy" in recovery ? { taskFailurePolicy: recovery.policy } : {}),
@@ -1707,24 +1627,14 @@ describe("admission cancellation", () => {
       five,
       async (snapshot, batch, signal) => {
         calls++;
-        const lanes = await Promise.all(
-          batch.map((work) =>
-            scriptedLane(
-              work,
-              snapshot,
-              sources,
-              work.rank === 1
-                ? { hang: { shard: "Search1", tool: "hang" } }
-                : {},
-              [hang.tool],
-            ),
-          ),
-        );
+        const lanes = batch.map((work) => scriptedLane(
+          work, sources, work.rank === 1 ? { hang: { shard: "Search1", tool: "hang" } } : {}, [hang.tool],
+        ));
         created.push(...lanes);
-        return runCandidateBatch(
+        return runScriptedBatch(
           {
             snapshot,
-            lanes: lanes.map(({ lane }) => lane),
+            lanes,
             observer: quiet(),
             apply: recorder.apply,
           },

@@ -16,7 +16,7 @@ Input → Lead → Assign → {Trace, Reproduce, Contracts} → JoinEvidence →
 
 The prepared small-model workflow uses Sonnet 5.5 with high thinking for Lead, Planner and Integrator; Haiku 5.5 with medium thinking for CandidateA, Reproduce and Verifier; and GPT-6 Luna with medium thinking for CandidateB, Contracts and Trace. Nested agents inherit their first path segment's role. The solo baseline uses Opus 5.5 with high thinking throughout.
 
-Each instance gets nine containers from its official SWE-bench image: six agent sandboxes and three acceptance sandboxes reachable only by code nodes. Bash runs at `/testbed`, with the `testbed` environment active and no network. Native host tools and `task` are blocked; Lead and Planner have no shell.
+Each instance gets nine containers from its official SWE-bench image: six agent sandboxes and three acceptance sandboxes reachable only by code nodes. Each shell role has its own native collection whose only bash backend runs in its container, at `/testbed`, with the `testbed` environment active and no network. Every role blocks host file tools and `task`; Lead and Planner also block bash. The ladder checks the full active node path before each provider request, logs accepted requests and refuses missing, unknown or wrongly routed roles. Each agent writes its own durable session.
 
 `CheckPlan` receives each completed draft, runs its checks separately on the clean canonical baseline, and resets after each check. It sends the plan producer at most three correction assignments with the attempt number and observed failures. A parsed fourth draft proceeds with surviving checks (possibly none), records `planning/degraded.txt`, and warns both candidates. A malformed fourth draft still fails. The tournament prefers the first valid patch; if both fail acceptance, it selects an applying patch with the fewest failed checks (tie: A), records the degraded selection and asks Integrator to repair it. Two non-applying candidates still fail. Finish checks the unchanged final patch in a pristine sandbox; only the official SWE-bench evaluator decides resolution.
 
@@ -26,7 +26,7 @@ Dormant code supports YAML-only alternatives: multiple issue recipients, a Criti
 
 The harness runs in its own directory next to this repository (`../junco-swebench`). It never imports this checkout directly: it runs a frozen snapshot, `.junco-snapshot`. Workflow pairs and TypeScript entrypoints link into that snapshot so shared relative imports keep resolving there.
 
-Requirements: Linux x86-64, Bun, Docker (images `swebench/sweb.eval.x86_64.*` are pulled on demand), Python 3 and a saved Pi login (`~/.pi/agent`) for `github-copilot` whose catalog lists both models. `prepare` needs network access to Hugging Face and GitHub.
+Live runs require Linux x86-64, Bun, Docker (images `swebench/sweb.eval.x86_64.*` are pulled on demand), Python 3 and a saved Pi login for every model selected by the ladder. Place the harness and prepared problems inside a dedicated writable Btrfs seed with a writable parent and `user_subvol_rm_allowed`; live preflight opens its native collections in the current directory. See the [native tool requirements](../../packages/junco-tools/README.md). A missing seed is an error, never a host-shell fallback. `prepare` needs network access to Hugging Face and GitHub. `--check` does not open models, sessions, collections or containers.
 
 ### 1. Snapshot junco
 
@@ -95,11 +95,12 @@ For measured runs, set exactly one of `JUNCO_GRAPH_RUN_DIR` or `JUNCO_PROFILE_RU
 
 ### Harness tests
 
-Runtime tests require a reachable Docker daemon and the official fixture image below. The root `bun run test` runner prepares this image and mounts the caller's Docker socket into its CI container; GitHub Actions uses the same prerequisites.
+The routing, session and workflow coordination tests use local model responses and no credentials or telemetry. The full suite also needs a reachable Docker daemon, the official image below, the production native addon and a delegated Linux cgroup v2. Set `JUNCO_BTRFS_TEST_ROOT` to an existing writable Btrfs allocation directory on a `user_subvol_rm_allowed` mount; the nested worker test creates and removes its own private seed there.
 
 ```sh
 docker pull swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest
-bun test ./test_runtime.test.ts                   # model routing, container bash, wf.yml protocol, sandbox ops (Docker)
+JUNCO_BTRFS_TEST_ROOT=/btrfs systemd-run --user --scope -p Delegate=yes -- bun test ./test_runtime.test.ts
+bun test ./test_runtime.test.ts -t 'guarded agent|nested guard|session setup|coordination|solo baseline|checked at every depth'  # without Docker or a native seed
 .venv/bin/python -m unittest test_benchmark       # benchmark.py boundaries (git, containers)
 ```
 
@@ -109,7 +110,8 @@ Edit `wf.yml`, `wf.ts` and the harness files here, then snapshot again (step 1).
 
 - A pair may import only `junco`, the Pi packages, `dataflow-engine`, Node built-ins and its own `./<stem>.yml`.
 - It must export `document`, `code`, `run`, `strengthOf`, `ladder`, `ROLES`, `SANDBOX` and `BRANCHES`. `strengthOf` and the `SANDBOX` keys take root-relative node paths (`CandidateA`, `CandidateA/Worker` when nested).
+- `run(config, observe?)` hands `config.agentOptions` to `fromYaml` immediately. Inside the graph-close `try`, it calls `observe?.(execution.graph)` before the first turn so branch cancellation targets the actual built agents.
 - `document` must equal `syntax.parse(<stem>.yml)`. Nested graphs are allowed; at every depth there are no skills, no node ID contains `/`, and every code node has a `code` export named by its local ID.
-- The only agent tool allowed is `bash`, and only on agent paths that `SANDBOX` binds to a known role other than an acceptance sandbox. Each sandbox has at most one bash agent, except `canonical`, which `Integrator` and `Verifier` (or one leaf under each) share in turn.
+- On **every** agent, `tool_block` must exclude all host-native tools and `task`. Bash must also be blocked unless `SANDBOX` maps that agent's qualified path to a legal worker sandbox; a mapped role must leave bash unblocked. Do not declare a YAML `tools:` list. Each sandbox has at most one bash agent, except `canonical`, which `Integrator` and `Verifier` (or one leaf under each) share in turn. The runner alone selects the container backend; no agent has acceptance-container access.
 - Each `BRANCHES` root is an agent or nested-graph path whose bash agents all use its `candidate<Branch>` sandbox; cancelling it aborts every agent under that root and stops exactly `candidate<Branch>` and `accept<Branch>`.
 - Every ladder rung must be one of the runner's `MODELS`. Before creating agents, the worker also requires each rung's thinking level to be one its model supports.

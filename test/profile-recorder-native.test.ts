@@ -6,7 +6,6 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
   contentText,
@@ -15,25 +14,11 @@ import {
   fauxToolCall,
 } from "@earendil-works/pi-ai";
 import { parseSamples } from "dataflow-profile";
-import { JuncoGraph, schedules, type tools, tracer } from "junco";
+import { graph, JuncoGraph, schedules, type tools, tracer } from "junco";
 import { JuncoAgent } from "junco-agent";
-import { LockPolicy, type NativeModule, ToolCollection } from "junco-tools";
-import { nativeOptions } from "./support.ts";
+import { LockPolicy, ToolCollection } from "junco-tools";
+import { copyTreeNative, offlineLadder } from "./support.ts";
 import { Constant } from "./syntax-code-nodes.fixture.ts";
-
-// Build the CopyTree test addon with `bun run build:native:test` in packages/junco-tools.
-const native = await import(
-  fileURLToPath(
-    new URL(
-      "../packages/junco-tools/target/native-test/index.js",
-      import.meta.url,
-    ),
-  )
-);
-const copyTree = {
-  ...native,
-  NativeMux: { open: native.NativeMux.openCopyTree.bind(native.NativeMux) },
-} as unknown as NativeModule;
 
 // Touched memory held for one second: real pipeline memory, sampled every 100 ms.
 // The size prints only after the workload completes.
@@ -50,10 +35,7 @@ const DOCUMENT = {
   graph: {
     nodes: {
       Start: { kind: "emit", text: "measure", spec: "done" },
-      Worker: {
-        prompt: "Measure resources",
-        tools: ["bash"],
-      },
+      Worker: { prompt: "Measure resources" },
     },
     edges: [
       { from: "Start", to: "Worker", kind: "message", schema: PROMPT },
@@ -87,7 +69,7 @@ async function runRecorded(
     return fauxAssistantMessage("done");
   };
   const collection = await ToolCollection.create(seed, {
-    native: copyTree,
+    native: await copyTreeNative(),
     policy: LockPolicy,
     sandbox: "always",
     resources: { monitorIntervalMs: 100 },
@@ -100,46 +82,26 @@ async function runRecorded(
       recorder,
       tracer: new tracer.DummyTracer(),
       scheduler: () => schedules.parallel(),
-      createAgent: async (spec) => {
-        const agent = await JuncoAgent.fromResolved({
-          ...(
-            await nativeOptions([
-              (context) => {
-                const texts = context.messages
-                  .filter((message) => message.role === "user")
-                  .map((message) =>
-                    typeof message.content === "string"
-                      ? message.content
-                      : contentText(message.content),
-                  );
-                assert.equal(texts.length, 2);
-                assert.equal(texts[0], "Measure resources");
-                assert.match(
-                  texts[1]!,
-                  /^measure\n\nTask: \{"taskId":"[0-9a-f-]{36}","spec":"done","deps":\[\],"history":\[\]\}$/,
-                );
-                return fauxAssistantMessage(
-                  fauxToolCall("bash", { command: COMMAND }),
-                  { stopReason: "toolUse" },
-                );
-              },
-              lastResult,
-            ])
-          ).options,
-          systemPrompt: "leaf",
-          tools: spec.tools,
-          tool_block: spec.tool_block ?? [],
-          collection: spec.collection,
-          recorder: spec.recorder,
-          recorderNodeId: spec.recorderNodeId,
-        });
-        agent.events.on("usage", ({ row }) => {
-          tokens += row.usage.totalTokens;
-        });
-        return agent;
-      },
+      ladder: await offlineLadder([
+        (context) => {
+          const texts = context.messages
+            .filter((message) => message.role === "user")
+            .map((message) => typeof message.content === "string" ? message.content : contentText(message.content));
+          assert.equal(texts.length, 2);
+          assert.equal(texts[0], "Measure resources");
+          assert.match(
+            texts[1]!,
+            /^measure\n\nTask: \{"taskId":"[0-9a-f-]{36}","spec":"done","deps":\[\],"history":\[\]\}$/,
+          );
+          return fauxAssistantMessage(fauxToolCall("bash", { command: COMMAND }), { stopReason: "toolUse" });
+        },
+        lastResult,
+      ]),
     });
     try {
+      const worker = execution.graph.getNode(graph.NodeId.create("Worker"))?.state;
+      assert.ok(worker instanceof JuncoAgent);
+      worker.events.on("usage", ({ row }) => { tokens += row.usage.totalTokens; });
       await execution.run();
     } finally {
       await execution.graph.close();
@@ -352,7 +314,7 @@ test("graph resources reach bash as cgroup pid limits", async () => {
     const limited = await JuncoGraph.create(
       seed,
       {
-        native: copyTree,
+        native: await copyTreeNative(),
         policy: LockPolicy,
         sandbox: "always",
         resources: { pids: 8 },

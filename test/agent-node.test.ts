@@ -19,9 +19,11 @@ import {
   type ToolResultMessage,
 } from "@earendil-works/pi-ai";
 import {
+  DataflowDefinitionError,
   DataflowNodeError,
   DummyTracer,
   Edge,
+  EdgeId,
   type EdgeIdType,
   from,
   Message,
@@ -68,7 +70,7 @@ import {
   userTexts,
   yieldsThen,
 } from "./deterministic-support.ts";
-import { nativeOptions } from "./support.ts";
+import { countedCollection, nativeOptions, offlineLadder } from "./support.ts";
 
 // A complete task with fixed provenance, so expected steered text is deterministic.
 const full = (text: string, taskId: string) =>
@@ -323,6 +325,70 @@ for (const withhold of [false, true]) {
     },
   );
 }
+
+test("YAML firings respect promptless input, a staged override, then the original return template", async () => {
+  let round = 0;
+  let producer: string[] = [], reviewer: string[] = [];
+  let calledInfo = false;
+  const ladder = await offlineLadder(({ messages }) => {
+    const users = userTexts(messages);
+    if (users[0]?.startsWith("work 1\n")) {
+      producer = users;
+      return fauxAssistantMessage(`report ${round}`);
+    }
+    reviewer = users;
+    if (round === 2 && !calledInfo) {
+      calledInfo = true; // A second request observes messages delivered through Pi steering.
+      return call("info", {}, "override-info");
+    }
+    return fauxAssistantMessage(`review ${round}`);
+  });
+  const { collection } = countedCollection();
+  closers.push(() => collection.close());
+  const execution = await JuncoGraph.fromYaml({
+    graph: {
+      source: { routes: { assignment: ["input"] } },
+      nodes: {
+        Worker: { trigger: "input" },
+        Reviewer: { trigger: "report", prompt: "Review: {{report}}" },
+      },
+      edges: [
+        { from: "$source", to: "Worker", id: "input", kind: "message", schema: {} },
+        { from: "Worker", to: "Worker", schema: {} },
+        { from: "Worker", to: "Reviewer", id: "report", kind: "message", on: "return", schema: {} },
+        { from: "Reviewer", to: "Reviewer", schema: {} },
+        { from: "Reviewer", to: "$sink", schema: {} },
+      ],
+    },
+  }, { cwd: process.cwd(), collection, ladder, scheduler: () => schedules.parallel(), tracer: new DummyTracer() });
+  const graph = execution.graph;
+  closers.push(() => graph.close());
+  const worker = graph.getNode(NodeId.create("Worker"))!.state;
+  const review = graph.getNode(NodeId.create("Reviewer"))!.state;
+  assert.ok(worker instanceof agentApi.JuncoAgent && review instanceof agentApi.JuncoAgent);
+  assert.equal(worker.stagedPrompt, undefined);
+  assert.equal(typeof review.stagedPrompt, "function");
+  for (round = 1; round <= 3; round++) {
+    if (round === 2) {
+      worker.stagePrompt("Controller assignment");
+      review.stagePrompt("Controller review");
+    }
+    const task = Task.create({ kind: "prompt", text: `work ${round}`, spec: "Produce a report." });
+    graph.source.enqueue({
+      messages: new Map([[EdgeId.create("assignment"), [task]]]), values: new Map(),
+    });
+    await execution.run();
+    if (round === 1) {
+      assert.ok("text" in task);
+      assert.deepEqual(producer, [renderTask(task)]);
+      assert.deepEqual(reviewer, ["Review: report 1"]);
+    } else if (round === 2) {
+      assert.ok(producer.includes("Controller assignment"));
+      assert.deepEqual(reviewer.slice(0, 2), ["Review: report 1", "Controller review"]);
+      assert.equal(JSON.parse(reviewer[2]!).payload.content[0].text, "report 2");
+    } else assert.equal(reviewer.at(-1), "Review: report 3");
+  }
+});
 
 for (const strategy of STRATEGIES) {
   describe(strategy, () => {
@@ -689,6 +755,22 @@ for (const strategy of STRATEGIES) {
       assert.equal(graph.getNode(c)!.status, "ready");
       assert.deepEqual(child.requests, []);
       assert.equal(child.status, "idle");
+    });
+
+    test("a promptless activation with no message fails without demanding the agent", async () => {
+      const agent = new MockAgent({ runs: [] });
+      const ports = terminalPorts();
+      const context = plainContext(ports.source, ports.sink, strategy);
+      closers.push(() => context.graph.close());
+      const id = context.graph.addNode({
+        state: agent, prompt: undefined, policy: LockPolicy, trigger: TriggerRule.always(),
+      });
+      ports.connect(context.graph, id);
+      await assert.rejects(context.run(), (error) =>
+        error instanceof DataflowDefinitionError &&
+        error.message.includes(`Agent node "${id}" needs a staged prompt or a delivered message`),
+      );
+      assert.equal(agent.requests.length, 0);
     });
 
     test("an exhausted transcript fails its node instead of hanging", async () => {

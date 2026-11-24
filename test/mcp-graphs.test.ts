@@ -30,44 +30,30 @@ import { JuncoMcpTools, McpBuilder } from "junco-mcp";
 import { pi } from "junco-scheduler/agent";
 import {
   LockPolicy,
-  type NativeModule,
   TaskTool,
   ToolCollection,
 } from "junco-tools";
-import { JuncoGraph, schedules } from "../src/index.ts";
+import { JuncoGraph, schedules, syntax } from "../src/index.ts";
 import { TriggerRule } from "../src/std/trigger.ts";
 import { terminalPorts } from "./deterministic-support.ts";
 import { withNativeCleanup } from "./native-support.ts";
 import {
   addPromptOnce,
   type AgencyContext,
+  copyTreeNative,
   NATIVE_TOOL_BLOCK,
   nativeOptions,
+  offlineLadder,
   schedulerModel,
 } from "./support.ts";
 
 // Agents with real MCP stdio servers in a shared root graph, its nested graph and an independent
 // graph, each collection on its own ShellMux of junco-tools' CopyTree test addon. Build it once in
 // packages/junco-tools with `bun run build:native:test`.
-const testAddon = await import(
-  fileURLToPath(
-    new URL(
-      "../packages/junco-tools/target/native-test/index.js",
-      import.meta.url,
-    ),
-  )
-);
+const copyTree = await copyTreeNative();
 const SERVER = fileURLToPath(
   new URL("../packages/junco-mcp/test/stdio-server.ts", import.meta.url),
 );
-
-const copyTree = {
-  ...testAddon,
-  NativeMux: {
-    open: (...args: Parameters<NativeModule["NativeMux"]["open"]>) =>
-      testAddon.NativeMux.openCopyTree(...args),
-  },
-} as NativeModule;
 
 let root: string;
 let seed: string;
@@ -98,7 +84,7 @@ const fixture = JuncoMcpTools.add({
 });
 
 /** Calls the server's `read_state`, then answers with its process id. */
-const readPid: FauxResponseStep[] = [
+const readPid = [
   fauxAssistantMessage([fauxToolCall("mcp__fx__read_state", {}, { id: "s" })], {
     stopReason: "toolUse",
   }),
@@ -112,7 +98,7 @@ const readPid: FauxResponseStep[] = [
         : "{}";
     return fauxAssistantMessage(String(JSON.parse(text).pid));
   },
-];
+] as const;
 
 async function member(collection: ToolCollection): Promise<JuncoAgent> {
   const { options } = await nativeOptions(readPid);
@@ -261,21 +247,27 @@ test(
         .build(seed, { native: copyTree, policy: LockPolicy });
       const forgetBuilt = defer(() => built.close());
       const runs = [];
+      const ladder = await offlineLadder((context) =>
+        context.messages.at(-1)?.role === "toolResult" ? readPid[1](context) : readPid[0]);
+      const document = { graph: {
+        nodes: {
+          Start: { kind: "emit", text: "Read the fixture pid", spec: "Return the server process id." },
+          Member: { prompt: "Read the server pid.", tool_block: NATIVE_TOOL_BLOCK },
+        },
+        edges: [
+          { from: "Start", to: "Member", kind: "message", schema: {} },
+          { from: "Member", to: "$sink", schema: {} },
+        ],
+      } };
       for (let index = 0; index < 2; index++) {
-        // No `tools`: the MCP tool arrives as a collection default.
-        const agent = await JuncoAgent.fromResolved({
-          ...(await nativeOptions(readPid)).options,
-          cwd: seed,
-          collection: built,
+        const context = await JuncoGraph.fromYaml(document, {
+          cwd: seed, collection: built, ladder, scheduler: () => schedules.parallel(), tracer: new DummyTracer(),
         });
-        const forgetAgent = defer(() => agent.return());
-        const run = single(agent, built);
-        const forgetGraph = defer(() => run.context.graph.close());
-        forgetAgent();
-        runs.push({ ...run, forgetGraph });
+        const forgetGraph = defer(() => context.graph.close());
+        runs.push({ context, forgetGraph });
       }
       const pids = await Promise.all(
-        runs.map(async (run) => pidOf((await run.context.run()).get(run.id))),
+        runs.map(async ({ context }) => Number(syntax.finalText((await context.run()).get(context.graph.sink.id), "Member"))),
       );
       expect(Number.isInteger(pids[0]) && pids[0]! > 0).toBe(true);
       expect(pids[1]).toBe(pids[0]);

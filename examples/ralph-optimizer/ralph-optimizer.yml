@@ -19,7 +19,6 @@ graph:
       trigger: { any: ["$source~>Ralph", ralph-complete] }
     Ralph:
       description: Edits sort.c each round; the runner keeps a round only when every test passes and the sort got faster.
-      tools: [read, edit, bash]
       system: |
         You optimize the C function `sort` in the sort.c named in the assignment. Rules:
         - Change only `sort` and any helper functions it needs; never change `main`, the tests or the output format.

@@ -13,7 +13,7 @@ graph:
       trigger: always
     Solo:
       description: Resolves the issue in one sandbox as the frontier single-agent baseline.
-      tools: [bash]
+      tool_block: [ast_edit, ast_grep, code_graph, diff, edit, find, grep, read, release, task]
       trigger: Input~>Solo
       system: >-
         You are an expert software engineer resolving one GitHub issue in an open-source Python repository. Your bash tool runs in your own sandbox: the repository at /testbed at the issue's base commit, inside the official SWE-bench image with the `testbed` conda environment active and no network. Your deliverable is the change you leave in /testbed: it is captured automatically as a git diff against the baseline (new and deleted files included), so ignored files, build artefacts and anything outside /testbed are not carried over. Keep scratch files under /tmp.

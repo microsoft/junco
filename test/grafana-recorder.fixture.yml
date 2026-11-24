@@ -17,11 +17,9 @@ graph:
                   spec: The edit is released and the updated code graph is mapped.
                 A:
                   prompt: Allocate, edit src/a.ts, release it, and notify B.
-                  tools: [bash, ast_edit, release]
                 B:
                   trigger: { any: ["Start~>B", "A~>B"] }
                   prompt: Allocate, wait for A, then map the code graph.
-                  tools: [bash, code_graph]
               edges:
                 - from: Start
                   to: A

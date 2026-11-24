@@ -4,7 +4,7 @@ import type {
   PromptTemplate,
   Skill,
 } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import {
   DataflowDefinitionError,
   type ErrorFn,
@@ -100,7 +100,7 @@ const TaskDraftSchema = withoutProvenance(TaskSchema);
  */
 export class AgentDriver<N extends TSchema, V> {
   readonly #agent: DrivenAgent<N, V>;
-  /** The node's one run has started: its staged prompt demanded. */
+  readonly #prompt: DrivenAgent<N, V>["stagedPrompt"];
   #started = false;
   #attempt = 0;
   #soft: readonly Message<N>[] | undefined;
@@ -116,8 +116,9 @@ export class AgentDriver<N extends TSchema, V> {
    */
   readonly #received = new Map<string, HeldTask>();
 
-  private constructor(agent: DrivenAgent<N, V>) {
+  private constructor(agent: DrivenAgent<N, V>, prompt: DrivenAgent<N, V>["stagedPrompt"]) {
     this.#agent = agent;
+    this.#prompt = prompt;
     this.#policy = {
       agent,
       inputMode: "all-messages",
@@ -287,9 +288,15 @@ export class AgentDriver<N extends TSchema, V> {
     messages: readonly Message<N>[],
   ): Promise<AssistantMessage | undefined> {
     const agent = this.#agent;
+    const staged = agent.stagedPrompt;
+    const interpolated = staged !== undefined && staged === this.#prompt
+      ? this.#policy.promptReturnEdges
+      : undefined;
+    let needsPrompt = !this.#started && staged === undefined;
     for (const { id, payload: input } of messages) {
-      const interpolated = !this.#started && this.#policy.promptReturnEdges?.has(id);
       const payload: unknown = input;
+      let text: string;
+      let images: ImageContent[] | undefined;
       if (Value.Check(TaskDraftSchema, payload) && "text" in payload) {
         if (!Value.Check(TaskSchema, payload))
           throw new DataflowDefinitionError(
@@ -299,13 +306,23 @@ export class AgentDriver<N extends TSchema, V> {
           ...payload,
           deps: [...payload.deps],
         });
-        if (interpolated) continue;
-        await agent.steer(
-          renderTask(payload),
-          payload.images?.length ? { images: payload.images } : undefined,
-        );
-      } else if (!interpolated) await agent.steer(JSON.stringify({ id, payload }));
+        if (interpolated?.has(id)) continue;
+        text = renderTask(payload);
+        images = payload.images;
+      } else {
+        if (interpolated?.has(id)) continue;
+        text = JSON.stringify({ id, payload });
+      }
+      const options = images?.length ? { images } : undefined;
+      if (needsPrompt) {
+        agent.stagePrompt(text, options);
+        needsPrompt = false;
+      } else await agent.steer(text, options);
     }
+    if (needsPrompt)
+      throw new DataflowDefinitionError(
+        `Agent node "${this.#node}" needs a staged prompt or a delivered message`,
+      );
     this.#started = true;
     const result = await agent.next(view);
     if (result.done === true)
@@ -326,9 +343,9 @@ export class AgentDriver<N extends TSchema, V> {
   /**
    * A graph node driving one prompt agent through a single run.
    *
-   * The body first yields `[]` so the engine's priming consumes nothing. Each later activation
-   * steers the delivered batch into the agent before advancing it; payload kinds are data, never
-   * native commands. A staged prompt function receives the delivered view, including value edges.
+   * The body first yields `[]` so priming consumes nothing. Without a staged or registered
+   * prompt the first delivered message starts the run; remaining messages steer it. Payload kinds
+   * are data, never commands. A staged prompt function receives the view, including value edges.
    * Without a failure handler the node calls `agent.next()` at most once per activation; a handler
    * can retry failed runs before yielding. A settlement returns the native final message.
    * While it drives a `JuncoAgent`, the agent's `send` admits messages on this node's outgoing
@@ -339,16 +356,17 @@ export class AgentDriver<N extends TSchema, V> {
   static node<N extends TSchema, V>(
     agent: DrivenAgent<N, V>,
     options: NodeOptions<N, V> & Pick<ToolCollection, "policy"> & {
-      readonly prompt: string | ((inputs: ParentView<N, V>) => string);
+      readonly prompt: DrivenAgent<N, V>["stagedPrompt"];
     },
   ): NodeSpec<Agentic<N, V>, N, V> & Pick<ToolCollection, "policy"> {
     const { prompt } = options;
     if (
+      prompt !== undefined &&
       typeof prompt !== "function" &&
       (typeof prompt !== "string" || !prompt.trim())
     )
       throw new DataflowDefinitionError("A prompt agent requires a nonblank prompt");
-    const driver = new AgentDriver<N, V>(agent);
+    const driver = new AgentDriver<N, V>(agent, prompt);
     const step: StepFn<Agentic<N, V>, N, V> = async function* (): NodeGenerator<
       N,
       V
@@ -356,7 +374,13 @@ export class AgentDriver<N extends TSchema, V> {
       driver.#registration = registrationOf(this);
       driver.#node = String(this.id);
       let view = yield [];
-      agent.stagePrompt(prompt);
+      driver.#started = false;
+      // Manual registrations stage their own prompt; YAML already staged its first firing.
+      if (
+        prompt !== undefined &&
+        (driver.#policy.promptReturnEdges === undefined || agent.stagedPrompt === undefined)
+      )
+        agent.stagePrompt(prompt);
       while (true) {
         const result = await driver.#recovering(
           this,
@@ -364,7 +388,6 @@ export class AgentDriver<N extends TSchema, V> {
           messagesOf(view),
         );
         if (result !== undefined) {
-          driver.#started = false;
           driver.#attempt = 0;
           // The native result; the step-less registration admits AssistantMessage into V.
           return result as V;

@@ -8,8 +8,8 @@
  * ~/.omp/agent/mcp.json (lsp-mcp bridge), and a saved Pi Copilot login with
  * github-copilot/gpt-6.1-sol high thinking enabled. The output must be new/empty;
  * SIGINT exits 130 and retains that copy. Paid model turns continue after successful diagnostics.
- * Advanced callers prepare once, provide persistent MCP-enabled members to runVerusLoop,
- * then close them and finish any TUI observer. Importing acquires nothing.
+ * Advanced callers prepare once, then pass one collection per role to runVerusLoop.
+ * They own their collections, recorder and TUI observer. Importing acquires nothing.
  *
  * Command/trust guidance:
  * https://verus-lang.github.io/verus/guide/getting_started_cmd_line.html
@@ -21,12 +21,10 @@ import { copyFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm } 
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { contentText } from "@earendil-works/pi-ai";
-import { graph, JuncoGraph, mcp, schedules, syntax, tracer } from "junco";
+import { agent, graph, JuncoGraph, mcp, schedules, syntax, Task, type tools, tracer } from "junco";
 import type { TSchema } from "typebox";
-import { problemRecorder, runCli, verifiedModels, type YamlAgent, type YamlExecution } from "../support.ts";
+import { problemRecorder, runCli, verifiedModels } from "../support.ts";
 import source from "./verus.yml" with { type: "text" };
-
-const document = syntax.parse(source);
 
 const LADDER = schedules.uniformLadder({ model: "github-copilot/gpt-6.1-sol", thinking: "high" });
 
@@ -37,41 +35,38 @@ export type VerusWorkspace = Readonly<VerusRequest & {
   cargoManifests: readonly string[];
 }>;
 export type VerusRole = "Verifier" | "Reviewer" | "Cleanup";
-type VerusMembers = Readonly<Record<VerusRole, YamlAgent>>;
+const roles = ["Verifier", "Reviewer", "Cleanup"] as const;
 type VerusRoundContext = {
-  readonly assignment: string;
+  assignment: string;
   readonly verification: { runs(): number };
   reviewerBaseline?: number;
 };
 
-const VerifierAssignment: syntax.DeterministicNode<VerusRoundContext> = ({ context, edges, policy }) =>
-  new graph.nodes.Deterministic<TSchema, unknown>(async function* (signal) {
-    signal.throwIfAborted();
-    return new graph.FinalMessages([graph.Message.create(edges.get("VerifierAssignment~>Verifier")!, context.assignment)]);
-  }, policy);
-
 /** Validate the translation and sample diagnostics before the persistent Reviewer starts. */
 const PrepareReviewer: syntax.DeterministicNode<VerusRoundContext> = ({ policy, context, edges }) =>
   new graph.nodes.Deterministic<TSchema, unknown>(async function* (signal) {
-    const inputs = yield [];
-    signal.throwIfAborted();
-    const report = inputs.values.get(graph.EdgeId.create("Verifier->PrepareReviewer"));
-    syntax.finalText(report, "Verifier");
-    context.reviewerBaseline = context.verification.runs();
-    return new graph.FinalMessages([graph.Message.create(edges.get("PrepareReviewer~>Reviewer")!, { assignment: context.assignment, report })]);
+    let inputs = yield [];
+    for (;;) {
+      signal.throwIfAborted();
+      const report = inputs.messages.get(graph.EdgeId.create("Verifier~>PrepareReviewer"))?.[0];
+      syntax.finalText(report, "Verifier");
+      context.reviewerBaseline = context.verification.runs();
+      inputs = yield [graph.Message.create(edges.get("PrepareReviewer~>Reviewer")!, { assignment: context.assignment, report })];
+    }
   }, policy);
 
 /** Cleanup is admitted only after a complete review and fresh Reviewer diagnostics. */
 const PrepareCleanup: syntax.DeterministicNode<VerusRoundContext> = ({ policy, context, edges }) =>
   new graph.nodes.Deterministic<TSchema, unknown>(async function* (signal) {
-    const inputs = yield [];
-    signal.throwIfAborted();
-    const report = inputs.values.get(graph.EdgeId.create("Reviewer->PrepareCleanup"));
-    syntax.finalText(report, "Reviewer");
-    if (context.reviewerBaseline === undefined || context.verification.runs() <= context.reviewerBaseline) {
-      throw new Error("Reviewer did not obtain Verus MCP diagnostics in this round");
+    let inputs = yield [];
+    for (;;) {
+      signal.throwIfAborted();
+      const report = inputs.messages.get(graph.EdgeId.create("Reviewer~>PrepareCleanup"))?.[0];
+      syntax.finalText(report, "Reviewer");
+      if (context.reviewerBaseline === undefined || context.verification.runs() <= context.reviewerBaseline)
+        throw new Error("Reviewer did not obtain Verus MCP diagnostics in this round");
+      inputs = yield [graph.Message.create(edges.get("PrepareCleanup~>Cleanup")!, { assignment: context.assignment, report })];
     }
-    return new graph.FinalMessages([graph.Message.create(edges.get("PrepareCleanup~>Cleanup")!, { assignment: context.assignment, report })]);
   }, policy);
 
 const errorCode = (error: unknown): unknown => error instanceof Error && "code" in error ? error.code : undefined;
@@ -155,7 +150,7 @@ export async function prepareVerusSource(request: VerusRequest, signal?: AbortSi
 }
 
 /** Caller owns a private directory inside the output seed; keep the bridge's config, not its external cwd. */
-async function loadVerusMcp(bridgeDir: string): Promise<mcp.JuncoMcpTools> {
+async function loadVerusMcp(bridgeDir: string): Promise<mcp.McpBuilder> {
   const path = join(homedir(), ".omp", "agent", "mcp.json");
   const config = JSON.parse(await readFile(path, "utf8"));
   const server = config.mcpServers?.verus;
@@ -164,65 +159,65 @@ async function loadVerusMcp(bridgeDir: string): Promise<mcp.JuncoMcpTools> {
   }
   const { timeout, cwd, ...stdio } = server;
   if (cwd) await copyFile(join(resolve(cwd), ".lsp-mcp.json"), join(bridgeDir, ".lsp-mcp.json"), constants.COPYFILE_EXCL);
-  return mcp.JuncoMcpTools.add({
+  return new mcp.McpBuilder().add({
     ...stdio, name: "verus", type: "stdio", cwd: bridgeDir, stderr: "pipe",
     clientOptions: { requestTimeoutMs: timeout ?? 120_000 },
   });
 }
 
 type VerusFeedback = Readonly<{ review: string; cleanup: string }>;
-export type VerusRound = Readonly<{
-  execution: YamlExecution;
-  reviewerId: graph.NodeIdType;
-  cleanupId: graph.NodeIdType;
-}>;
-
-/** Fresh one-shot nodes borrow idle agents; LockPolicy does not confine host filesystem writes. */
-export const VerusRound = {
-  async create(workspace: VerusWorkspace, members: VerusMembers, verification: { runs(): number },
-    feedback?: VerusFeedback, observer?: tracer.DataflowTracer, ladder?: schedules.ModelLadder,
-    recorder?: syntax.BuildOptions["recorder"]): Promise<VerusRound> {
-    const assignment = `Original natural-language specification:\n${workspace.spec}\n\nOriginal source (read-only): ${workspace.source}\nOutput directory: ${workspace.outputDir}\nOutput target: ${workspace.target}\nPath mapping: source-directory relative paths are preserved under output; a file maps to output/basename with only required neighboring module context materialized.\nSource-relative Rust inventory: ${JSON.stringify(workspace.rustFiles)}\nCopied Cargo manifests: ${JSON.stringify(workspace.cargoManifests)}\n\nPrevious Reviewer feedback:\n${feedback?.review ?? "First round; none."}\n\nPrevious Cleanup observations:\n${feedback?.cleanup ?? "First round; none."}\n\n`;
-    const context: VerusRoundContext = { assignment, verification };
-    const execution = await JuncoGraph.fromYaml(source, {
-      cwd: process.cwd(), scheduler: () => schedules.parallel(), tracer: observer, context,
-      code: { VerifierAssignment, PrepareReviewer, PrepareCleanup },
-      ...(ladder === undefined ? {} : { ladder }),
-      ...(recorder === undefined ? {} : { recorder }),
-      createAgent: async (spec) => members[spec.node as VerusRole],
-      createAgentOwnership: "caller",
-    });
-    return { execution, reviewerId: graph.NodeId.create("Reviewer"), cleanupId: graph.NodeId.create("Cleanup") };
-  },
+type LoopOptions = Pick<syntax.BuildOptions, "signal" | "tracer" | "recorder"> & {
+  readonly ladder: schedules.ModelLadder;
+  readonly tools: ReadonlyMap<graph.NodeIdType, tools.ToolCollection>;
 };
 
-/** Success never terminates; caller owns members, observer and recorder, including disposal and TUI finish. */
-export async function runVerusLoop(workspace: VerusWorkspace, members: VerusMembers,
-  signal?: AbortSignal, observer?: tracer.DataflowTracer, ladder?: schedules.ModelLadder,
-  recorder?: syntax.BuildOptions["recorder"]): Promise<void> {
+function assignmentFor(workspace: VerusWorkspace, feedback?: VerusFeedback): string {
+  return `Original natural-language specification:\n${workspace.spec}\n\nOriginal source (read-only): ${workspace.source}\nOutput directory: ${workspace.outputDir}\nOutput target: ${workspace.target}\nPath mapping: source-directory relative paths are preserved under output; a file maps to output/basename with only required neighboring module context materialized.\nSource-relative Rust inventory: ${JSON.stringify(workspace.rustFiles)}\nCopied Cargo manifests: ${JSON.stringify(workspace.cargoManifests)}\n\nPrevious Reviewer feedback:\n${feedback?.review ?? "First round; none."}\n\nPrevious Cleanup observations:\n${feedback?.cleanup ?? "First round; none."}\n\n`;
+}
+
+/** Keep all three sessions and their diagnostics subscriptions until cancellation, also after success. */
+export async function runVerusLoop(workspace: VerusWorkspace, options: LoopOptions): Promise<void> {
+  const { signal } = options;
+  signal?.throwIfAborted();
+  for (const role of roles) {
+    if (!options.tools.has(graph.NodeId.create(role))) throw new Error(`Missing Verus collection for ${role}`);
+  }
   let runs = 0;
   let failure: Error | undefined;
-  const unsubscribe = Object.entries(members).map(([role, member]) => member.events.on("turn_end", ({ toolResults }) => {
-    for (const result of toolResults) {
-      if (result.toolName !== "mcp__verus__lsp_diagnostics") continue;
-      if (result.isError) failure ??= new Error(`Verus MCP diagnostics failed: ${contentText(result.content)}`);
-      else if (role === "Reviewer") runs++;
-    }
-  }));
   const verification = { runs: () => { if (failure) throw failure; return runs; } };
-  try {
-    let feedback: VerusFeedback | undefined;
-    for (;;) {
-      signal?.throwIfAborted();
-      const round = await VerusRound.create(workspace, members, verification, feedback, observer, ladder, recorder);
-      await using roundGraph = round.execution.graph;
-      const results = await round.execution.run({ signal });
-      signal?.throwIfAborted();
-      verification.runs(); // Pi turns tool errors into model feedback; retain operational failures.
-      feedback = { review: syntax.finalText(results.get(round.reviewerId), "Reviewer"), cleanup: syntax.finalText(results.get(round.cleanupId), "Cleanup") };
-    }
-  } finally {
-    for (const off of unsubscribe) off();
+  const context: VerusRoundContext = { assignment: assignmentFor(workspace), verification };
+  const execution = await JuncoGraph.fromYaml(source, {
+    ...options, cwd: workspace.outputDir, scheduler: () => schedules.parallel(), context,
+    code: { PrepareReviewer, PrepareCleanup },
+  });
+  await using resources = new AsyncDisposableStack();
+  resources.use(execution.graph);
+  for (const role of roles) {
+    const member = execution.graph.getNode(graph.NodeId.create(role))?.state;
+    if (!(member instanceof agent.JuncoAgent)) throw new Error(`Missing built agent: ${role}`);
+    resources.defer(member.events.on("turn_end", ({ toolResults }) => {
+      for (const result of toolResults) {
+        if (result.toolName !== "mcp__verus__lsp_diagnostics") continue;
+        if (result.isError) failure ??= new Error(`Verus MCP diagnostics failed: ${contentText(result.content)}`);
+        else if (role === "Reviewer") runs++;
+      }
+    }));
+  }
+  const reviewer = graph.NodeId.create("Reviewer"), cleanup = graph.NodeId.create("Cleanup");
+  for (;;) {
+    signal?.throwIfAborted();
+    const previous = execution.graph.results();
+    const task = Task.create({ kind: "prompt", text: context.assignment, spec: "Return the Verifier report for this workspace assignment." });
+    execution.graph.source.enqueue({ messages: new Map([[graph.EdgeId.create("assignment"), [task]]]), values: new Map() });
+    const results = await execution.run({ signal });
+    signal?.throwIfAborted();
+    verification.runs();
+    if (results.get(reviewer) === previous.get(reviewer) || results.get(cleanup) === previous.get(cleanup))
+      throw new Error("Verus round ended without fresh Reviewer and Cleanup reports");
+    context.assignment = assignmentFor(workspace, {
+      review: syntax.finalText(results.get(reviewer), "Reviewer"),
+      cleanup: syntax.finalText(results.get(cleanup), "Cleanup"),
+    });
   }
 }
 
@@ -241,13 +236,13 @@ async function runVerus(request: VerusRequest, signal?: AbortSignal): Promise<vo
   signal?.throwIfAborted();
   const ladder = new schedules.ModelLadder(await verifiedModels(LADDER.med, signal), LADDER);
   signal?.throwIfAborted();
-  // ponytail: default session history stays in memory; pass caller-managed agents to runVerusLoop if long-run memory use matters.
-  const members = {} as Record<VerusRole, YamlAgent>;
-  for (const spec of await syntax.resolveAgents(document, { cwd: workspace.outputDir })) {
+  const collections = new Map<graph.NodeIdType, tools.ToolCollection>();
+  for (const role of roles) {
     signal?.throwIfAborted();
-    members[spec.node as VerusRole] = resources.use(await syntax.createJuncoAgent({ ...spec, tools: [...spec.tools, verus], recorder, recorderNodeId: spec.node }, ladder));
+    const collection = resources.adopt(await verus.build(workspace.outputDir, { signal, recorder }), owned => owned.close());
+    collections.set(graph.NodeId.create(role), collection);
   }
-  await runVerusLoop(workspace, members, signal, observer, ladder, recorder);
+  await runVerusLoop(workspace, { tools: collections, signal, tracer: observer, ladder, recorder });
 }
 
 if (import.meta.main) await runCli(async (signal) => {

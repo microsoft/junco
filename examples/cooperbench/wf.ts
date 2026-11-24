@@ -6,17 +6,12 @@ import { type FileHandle, copyFile, mkdir, open, readFile, rename, rm, writeFile
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspect } from "node:util";
-import type {
-  AgentTool,
-  PromptTemplate,
-  Skill,
-} from "@earendil-works/pi-agent-core";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { OpikTracer } from "dataflow-engine-opik";
 import {
   type Agentic,
-  type agent,
+  agent,
   AssistantMessageSchema,
   graph,
   JuncoGraph,
@@ -462,8 +457,7 @@ const RALPH_CHECKS: Record<string, schedules.RalphPredicate> = {
 
 // ## Shared-worktree pair
 
-export type Owner = { readonly team: AgentKey; readonly node_id: string };
-export type YamlAgent = agent.JuncoAgent<Skill, PromptTemplate, AgentTool, TSchema, unknown>;
+type Owner = { readonly team: AgentKey; readonly node_id: string };
 /** A workflow as `JuncoGraph.fromYaml` builds it: runtime-loaded edge schemas and unknown results. */
 export type YamlExecution = schedules.SchedulerContext<
   Agentic<TSchema, unknown>,
@@ -477,25 +471,24 @@ export type PairOptions = Pick<syntax.BuildOptions, "tracer" | "recorder"> & {
   readonly ladder: schedules.ModelLadder;
   readonly cwd?: string;
   readonly collection: tools.ToolCollection;
-  readonly createAgent: (spec: syntax.AgentSpec, owner: Owner) => Promise<YamlAgent>;
+  readonly emit?: typeof emit;
   readonly signal: AbortSignal;
 };
 
 export type Pair = { readonly execution: YamlExecution; readonly stats: { agents: number; workers: number } };
 
 /** Build the pair over the caller's collection, leaving collection ownership with the caller. */
-export async function createPair(request: PairRequest, options: PairOptions): Promise<Pair> {
+export async function createPair(request: PairRequest, options: PairOptions, workflow = document): Promise<Pair> {
   const stats = { agents: 0, workers: 0 };
-  const ownerOf = (spec: syntax.AgentSpec): Owner => ({ team: /2$/.test(spec.path.split("/")[0]!) ? "agent2" : "agent1", node_id: spec.path });
   const install = (created: Parameters<NonNullable<agent.SubagentObserver["acquired"]>>[0], owner: Owner): void => {
-    observe(created, owner);
+    observe(created, owner, options.emit ?? emit);
     created.setSubagentObserver({ acquired(child) {
       stats.workers++;
       install(child, { team: owner.team, node_id: child.nodeId });
     } });
   };
   const { ladder, tracer: observer, recorder } = options;
-  const execution = await JuncoGraph.fromYaml(document, {
+  const execution = await JuncoGraph.fromYaml(workflow, {
     cwd: options.cwd ?? process.cwd(),
     scheduler,
     ladder,
@@ -504,15 +497,19 @@ export async function createPair(request: PairRequest, options: PairOptions): Pr
     ...(recorder === undefined ? {} : { recorder }),
     collection: options.collection,
     signal: options.signal,
-    createAgent: async (spec) => {
-      stats.agents++;
-      const owner = ownerOf(spec);
-      const created = await options.createAgent(spec, owner);
-      install(created, owner);
-      return created;
-    },
   });
   try {
+    const visit = (level: YamlExecution["graph"], parent = ""): void => {
+      level.forEachNode((id, { state }) => {
+        const path = syntax.nodeKey(parent, id);
+        if (state instanceof JuncoGraph) visit(state, path);
+        else if (state instanceof agent.JuncoAgent) {
+          stats.agents++;
+          install(state, { team: /2$/.test(path.split("/", 1)[0]!) ? "agent2" : "agent1", node_id: path });
+        }
+      });
+    };
+    visit(execution.graph);
     execution.graph.source.enqueue({
       messages: new Map([
         [graph.EdgeId.create("assignment-1"), [graph.nodes.Task.create({ kind: "prompt", text: "## Feature assigned to Team 1\n\n" + request.agents.agent1.task, spec: "The feature assigned to Team 1 is implemented and its tests pass." })]],
@@ -838,12 +835,12 @@ function describe(error: unknown): string {
 }
 
 /** Record every native message and committed usage row of an observed agent. */
-function observe(created: Parameters<NonNullable<agent.SubagentObserver["acquired"]>>[0], { team, node_id }: Owner): void {
+function observe(created: Parameters<NonNullable<agent.SubagentObserver["acquired"]>>[0], { team, node_id }: Owner, publish: typeof emit): void {
   created.events.on("message_end", ({ lane, message }) => {
-    emit({ type: "message", agent_id: team, node_id, lane, message });
+    publish({ type: "message", agent_id: team, node_id, lane, message });
   });
   created.events.on("usage", ({ lane, row }) => {
-    emit({ type: "usage", agent_id: team, node_id, lane, adjustment: row.adjustment, usage: row.usage });
+    publish({ type: "usage", agent_id: team, node_id, lane, adjustment: row.adjustment, usage: row.usage });
   });
 }
 
@@ -916,7 +913,6 @@ async function runPair(request: PairRequest, interrupt: AbortSignal, grafanaUrl:
       await tools.ToolCollection.create(process.cwd(), marshOptions),
       (owned) => owned.close(),
     );
-    const agents = lifetime.adopt(new AsyncDisposableStack(), (owned) => owned.disposeAsync());
     const ladder = new schedules.ModelLadder(await verifiedModels(request.models, request.thinking, signal), ladderOf(request.models, request.thinking));
     signal.throwIfAborted();
     pair = await createPair(request, {
@@ -925,8 +921,6 @@ async function runPair(request: PairRequest, interrupt: AbortSignal, grafanaUrl:
       recorder,
       collection,
       signal,
-      createAgent: async (spec) =>
-        agents.adopt(await syntax.createJuncoAgent(spec, ladder), async (owned) => { await owned.return(); }),
     });
     const { execution } = pair;
     let closing: Promise<void> | undefined;

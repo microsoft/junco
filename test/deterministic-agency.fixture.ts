@@ -1,9 +1,4 @@
 import assert from "node:assert/strict";
-import type {
-  AgentTool,
-  PromptTemplate,
-  Skill,
-} from "@earendil-works/pi-agent-core";
 import {
   fauxAssistantMessage,
   fauxToolCall,
@@ -40,7 +35,7 @@ import {
   textOf,
   userTexts,
 } from "./deterministic-support.ts";
-import { leaf, nativeOptions } from "./support.ts";
+import { countedCollection, leaf, offlineLadder } from "./support.ts";
 import { Constant, Forward } from "./syntax-code-nodes.fixture.ts";
 
 // Directly executable deterministic smoke: real faux-backed JuncoAgents, no credentials.
@@ -223,44 +218,30 @@ export async function runNumericMessagingFixture(): Promise<NumericMessagingSumm
   let rejectedString = false;
   let sendSchema: TSchema | undefined;
   let consumerUserTexts: string[] = [];
-  const producer = await nativeOptions([
-    fauxAssistantMessage(
-      // Pi coerces a numeric string such as "7" to the route's number, so the model sends a word.
-      fauxToolCall(
-        "send",
-        { id: "numbers", payload: "seven", handoff: "", task: "", spec: "" },
-        { id: "s1" },
-      ),
-      { stopReason: "toolUse" },
-    ),
-    (context) => {
-      const result = latest(context.messages, "send");
-      rejectedString = result?.role === "toolResult" && result.isError;
-      sendSchema = declared(context.messages, "send")?.parameters;
-      return fauxAssistantMessage(
-        fauxToolCall(
-          "send",
-          { id: "numbers", payload: 7, handoff: "", task: "", spec: "" },
-          { id: "s2" },
-        ),
-        { stopReason: "toolUse" },
-      );
-    },
-    fauxAssistantMessage("produced"),
-  ]);
-  const consumer = await nativeOptions([
-    (context) => {
-      consumerUserTexts = userTexts(context.messages);
+  const ladder = await offlineLadder((context) => {
+    const users = userTexts(context.messages);
+    if (users[0] === "Receive your numbers.") {
+      consumerUserTexts = users;
       return fauxAssistantMessage("consumed");
-    },
-  ]);
-  const agents: agent.JuncoAgent<
-    Skill,
-    PromptTemplate,
-    AgentTool,
-    TSchema,
-    unknown
-  >[] = [];
+    }
+    assert.equal(users[0], "Send the number seven on your route.");
+    const previous = latest(context.messages, "send");
+    if (previous?.role === "toolResult" && previous.toolCallId === "s2") {
+      assert.equal(previous.isError, false);
+      return fauxAssistantMessage("produced");
+    }
+    if (previous?.role === "toolResult") {
+      assert.equal(previous.toolCallId, "s1");
+      rejectedString = previous.isError;
+      sendSchema = declared(context.messages, "send")?.parameters;
+    }
+    // Pi coerces numeric strings, so send a word before retrying with a number.
+    return fauxAssistantMessage(fauxToolCall("send", {
+      id: "numbers", payload: previous ? 7 : "seven", handoff: "", task: "", spec: "",
+    }, { id: previous ? "s2" : "s1" }), { stopReason: "toolUse" });
+  });
+  const { collection } = countedCollection();
+  await using lifetime = { [Symbol.asyncDispose]: () => collection.close() };
   const execution = await JuncoGraph.fromYaml(
     yamlInput({
       graph: {
@@ -287,24 +268,10 @@ export async function runNumericMessagingFixture(): Promise<NumericMessagingSumm
       cwd: process.cwd(),
       scheduler: () => schedules.parallel(),
       tracer: new tracer.DummyTracer(),
-      createAgent: async (spec) => {
-        const { options } = spec.node === "Producer" ? producer : consumer;
-        const member = await agent.JuncoAgent.fromResolved({
-          ...options,
-          systemPrompt: spec.systemPrompt,
-          tools: spec.tools,
-          tool_block: [
-            ...new Set([
-              ...(options.tool_block ?? []),
-              ...(spec.tool_block ?? []),
-            ]),
-          ],
-        });
-        agents.push(member);
-        return member;
-      },
+      collection, ladder,
     },
   );
+  const agents = ["Producer", "Consumer"].map((id) => execution.graph.getNode(NodeId.create(id))?.state);
   try {
     await execution.run();
   } finally {
@@ -343,7 +310,7 @@ export async function runNumericMessagingFixture(): Promise<NumericMessagingSumm
   assert.ok(Value.Check(AssistantMessageSchema, result.value));
   assert.equal(textOf(result.value), "consumed");
   const closed =
-    agents.length === 2 && agents.every((member) => member.status === "closed");
+    agents.every((member) => member instanceof agent.JuncoAgent && member.status === "closed");
   assert.ok(closed);
   return {
     scenario: "numeric-messaging",

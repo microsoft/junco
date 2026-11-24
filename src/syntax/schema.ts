@@ -1,8 +1,8 @@
 import * as graph from "dataflow-engine";
 import { type Static, type TSchema, Type } from "typebox";
+import { pointer } from "./errors.js";
 
 const strict = { additionalProperties: false } as const;
-export const BUILTIN_TOOL_NAMES = ["yield", "info", "send", "task"] as const;
 const strings = Type.Array(Type.String());
 const trigger = Type.Union([
   Type.Literal("always"),
@@ -31,14 +31,15 @@ const common = {
   description: Type.Optional(Type.String()),
   repeat: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
 };
-const agentFields = {
+export const AgentNodeSchema = Type.Object({
   ...common,
+  kind: Type.Optional(Type.Literal("agent")),
+  trigger: Type.Optional(trigger),
   system: Type.Optional(Type.String()),
-  tools: Type.Optional(strings),
   tool_block: Type.Optional(strings),
   skills: Type.Optional(strings),
-  prompt: Type.String({ pattern: "\\S" }),
-};
+  prompt: Type.Optional(Type.String({ pattern: "\\S" })),
+}, strict);
 // TypeBox 1.x spells recursive schemas Cyclic (Recursive was removed).
 const graphSchema = Type.Cyclic(
   {
@@ -73,14 +74,7 @@ const graphSchema = Type.Cyclic(
         nodes: Type.Record(
           Type.String(),
           Type.Union([
-            Type.Object(
-              {
-                ...agentFields,
-                kind: Type.Optional(Type.Literal("agent")),
-                trigger: Type.Optional(trigger),
-              },
-              strict,
-            ),
+            AgentNodeSchema,
             Type.Object(
               {
                 ...common,
@@ -132,6 +126,19 @@ export type GraphSpec = JuncoDocument["graph"];
 export type NodeSpec = GraphSpec["nodes"][string];
 export type EdgeSpec = Static<typeof edge>;
 export type TriggerSpec = Static<typeof trigger>;
+
+export const nodeKey = (parent: string, id: string): graph.NodeIdType =>
+  graph.NodeId.create(parent ? `${parent}/${pointer(id)}` : pointer(id));
+
+/** Declared nodes in construction order; keys escape individual path segments. */
+export function* walk(spec: GraphSpec, label = spec.name ?? "graph", path = ""):
+  Generator<{ id: string; node: NodeSpec; key: graph.NodeIdType; label: string }> {
+  for (const [id, node] of Object.entries(spec.nodes)) {
+    const key = nodeKey(path, id);
+    yield { id, node, key, label };
+    if (node.kind === "graph") yield* walk(node.graph, node.graph.name ?? id, key);
+  }
+}
 
 export const edgeId = (edge: EdgeSpec): string =>
   edge.id ?? `${edge.from}${edge.kind === "message" ? "~>" : "->"}${edge.to}`;

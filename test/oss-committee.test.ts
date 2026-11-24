@@ -2,6 +2,8 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { contentText, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import {
+  type DataflowGraph,
+  type DataflowRunTrace,
   DataflowNodeError,
   DummyTracer,
   EdgeId,
@@ -10,11 +12,10 @@ import {
 import * as O from "fp-ts/lib/Option.js";
 import { AssistantMessageSchema, Deterministic, type Task } from "junco";
 import { Value } from "typebox/value";
+import type { TSchema } from "typebox";
 import {
   approvedPlan,
-  convene,
   OssSearchTool,
-  ReviewRound,
 } from "../examples/oss-committee/oss-committee.ts";
 import { renderTask } from "../src/agent-node.ts";
 import {
@@ -23,7 +24,6 @@ import {
   scriptedCommittee,
 } from "./oss-committee.fixture.ts";
 
-const quiet = new DummyTracer();
 /** The emit nodes mint assignment ids with `Task.create`; read the id back from the rendered input. */
 const taskIdOf = (input: string | undefined): string => {
   const id = JSON.parse(input!.slice(input!.lastIndexOf("Task: ") + 6)).taskId;
@@ -50,41 +50,35 @@ const approved: ScriptedReview = {
 };
 test("a round gates each member on the previous member's complete report", async () => {
   await using committee = await scriptedCommittee();
-  const { execution } = await ReviewRound.create(
-    request,
-    committee.members,
-    committee.search,
-    undefined,
-    quiet,
-  );
-  await using graph = execution.graph;
-  assert.deepEqual([...graph.available().keys()], ["ResearchAssignment"]);
+  const { execution, available, run } = await committee.open();
+  const { graph } = execution;
+  assert.deepEqual(available(), ["ResearchAssignment"]);
   assert.equal(committee.modelRequests.length, 0);
   await execution.step(); // the code node publishes the research assignment
-  assert.deepEqual([...graph.available().keys()], ["Librarian"]);
+  assert.deepEqual(available(), ["Librarian"]);
   await execution.step(); // prime the Librarian without starting its prompt
-  assert.deepEqual([...graph.available().keys()], ["Librarian"]);
+  assert.deepEqual(available(), ["Librarian"]);
   await execution.step(); // the Librarian searches and finishes; its outgoing value edges resolve
   const librarian = graph.result(NodeId.create("Librarian"));
   assert.ok(O.isSome(librarian));
   const librarianReport = textOf(librarian.value);
   assert.ok(librarianReport.includes(repositoryUrl));
   assert.ok(librarianReport.includes("GitHub-reported stars: 10000"));
-  assert.deepEqual([...graph.available().keys()], ["DesignAssignment"]);
+  assert.deepEqual(available(), ["DesignAssignment"]);
   await execution.step(); // prime the validator without consuming the report
-  assert.deepEqual([...graph.available().keys()], ["DesignAssignment"]);
+  assert.deepEqual(available(), ["DesignAssignment"]);
   await execution.step(); // validate the report and publish the design assignment
-  assert.deepEqual([...graph.available().keys()], ["Architect"]);
+  assert.deepEqual(available(), ["Architect"]);
   assert.equal(committee.searchQueries.length, 1);
   assert.ok(!committee.searchQueries[0]!.includes(request));
   assert.match(committee.searchQueries[0]!, /terminal|tui|c#|csharp/i);
   assert.ok(!committee.modelRequests.includes("Architect"));
 
-  await execution.run();
+  await run();
   const architect = graph.result(NodeId.create("Architect"));
   assert.ok(O.isSome(architect));
-  assert.equal(graph.getNode(NodeId.create("ResearchRelease"))!.status, "done");
-  assert.deepEqual([...graph.available().keys()], []);
+  assert.ok(O.isNone(graph.result(graph.sink.id)), "unapproved output escaped");
+  assert.deepEqual(available(), []);
   assert.equal(committee.memberInputs.Librarian.length, 1);
   assert.equal(committee.memberInputs.Architect.length, 1);
   assert.equal(
@@ -132,24 +126,18 @@ test("a failed lookup sends partial research to the Architect before the Librari
   await using committee = await scriptedCommittee({
     lookups: [[rateLimited()]],
   });
-  const { execution } = await ReviewRound.create(
-    request,
-    committee.members,
-    committee.search,
-    undefined,
-    quiet,
-  );
-  await using graph = execution.graph;
+  const { execution, available, run, librarian } = await committee.open();
+  const { graph } = execution;
   let librarianRuns = 0;
-  committee.members.Librarian.events.on("run_start", () => { librarianRuns++; });
+  librarian.events.on("run_start", () => { librarianRuns++; });
   await execution.step(); // prepare the research assignment
   await execution.step(); // prime the Librarian
   await execution.step(); // failed lookup, then info, send and the real yield tool
   assert.equal(committee.search.searches(), 0);
   assert.equal(committee.search.failures(), 1);
-  assert.equal(committee.members.Librarian.status, "suspended");
+  assert.equal(librarian.status, "suspended");
   assert.ok(O.isNone(graph.result(NodeId.create("Librarian"))));
-  assert.deepEqual([...graph.available().keys()], ["DesignAssignment"]);
+  assert.deepEqual(available(), ["DesignAssignment"]);
   assert.ok(!committee.modelRequests.includes("Architect"));
 
   // The Librarian stays paused until the Architect returns from the partial research.
@@ -159,18 +147,19 @@ test("a failed lookup sends partial research to the Architect before the Librari
     steps++
   ) {
     assert.ok(steps < 10, "the Architect never finished");
-    assert.equal(committee.members.Librarian.status, "suspended");
-    assert.ok(!graph.available().has(NodeId.create("Librarian")));
+    assert.equal(librarian.status, "suspended");
+    assert.ok(!available().includes(NodeId.create("Librarian")));
     await execution.step();
   }
-  assert.equal(committee.members.Librarian.status, "suspended");
-  assert.deepEqual([...graph.available().keys()], ["ResearchRelease"]);
+  assert.equal(librarian.status, "suspended");
+  assert.deepEqual(available(), ["ResearchRelease"]);
+  await execution.step(); // prime without consuming the Architect's completion
   await execution.step(); // only an accepted partial receives architect-finished
-  assert.deepEqual([...graph.available().keys()], ["Librarian"]);
+  assert.deepEqual(available(), ["Librarian"]);
   assert.ok(committee.memberInputs.Architect[0]?.includes("Partial research"));
   assert.ok(committee.memberInputs.Architect[0]?.includes("HTTP 403"));
 
-  await execution.run();
+  await run();
   assert.equal(librarianRuns, 1);
   assert.equal(committee.searchQueries.length, 1);
   assert.ok(
@@ -185,26 +174,20 @@ test("a policy pause before any partial send leaves the Librarian resumable", as
     lookups: [[rateLimited()]],
     policyPauseBeforeSend: true,
   });
-  const { execution } = await ReviewRound.create(
-    request,
-    committee.members,
-    committee.search,
-    undefined,
-    quiet,
-  );
-  await using graph = execution.graph;
+  const { execution, available, run, librarian } = await committee.open();
+  const { graph } = execution;
   await execution.step(); // prepare the research assignment
   await execution.step(); // prime the Librarian
   await execution.step(); // failed lookup, then a policy denial pauses the run
   assert.equal(committee.search.failures(), 1);
-  assert.equal(committee.members.Librarian.status, "suspended");
-  assert.deepEqual([...graph.available().keys()], ["Librarian"]);
+  assert.equal(librarian.status, "suspended");
+  assert.deepEqual(available(), ["Librarian"]);
   assert.ok(O.isNone(graph.result(NodeId.create("Architect"))));
   await execution.step(); // policy continuation sends the partial and genuinely waits for input
-  assert.equal(committee.members.Librarian.status, "suspended");
-  assert.deepEqual([...graph.available().keys()], ["DesignAssignment"]);
+  assert.equal(librarian.status, "suspended");
+  assert.deepEqual(available(), ["DesignAssignment"]);
 
-  await execution.run();
+  await run();
   assert.ok(committee.memberInputs.Architect[0]?.includes("Partial research"));
   assert.ok(committee.memberInputs.Reducer[0]?.includes("HTTP 403"));
   assert.deepEqual(committee.review.takeVerdict(), approved);
@@ -214,14 +197,7 @@ test("a later failed lookup sends partial research even after an earlier search 
   await using committee = await scriptedCommittee({
     lookups: [[emptySearch(), rateLimited()]],
   });
-  const plan = await convene(
-    request,
-    committee.members,
-    committee.search,
-    committee.review,
-    undefined,
-    quiet,
-  );
+  const plan = await committee.run();
   assert.equal(committee.search.searches(), 1);
   assert.equal(committee.search.failures(), 1);
   assert.ok(committee.memberInputs.Architect[0]?.includes("HTTP 403"));
@@ -233,15 +209,8 @@ test("a truncated closing report after a handoff never reaches the Reducer", asy
     lookups: [[rateLimited()]],
     librarianStopReason: "length",
   });
-  const { execution } = await ReviewRound.create(
-    request,
-    committee.members,
-    committee.search,
-    undefined,
-    quiet,
-  );
-  await using graph = execution.graph;
-  const error = await execution.run().catch((thrown: unknown) => thrown);
+  const { execution: { graph }, run } = await committee.open();
+  const error = await run().catch((thrown: unknown) => thrown);
   assert.ok(
     error instanceof DataflowNodeError && error.nodeId === "ReviewAssignment",
   );
@@ -263,15 +232,8 @@ test("a truncated research report never reaches the Architect", async () => {
   await using committee = await scriptedCommittee({
     librarianStopReason: "length",
   });
-  const { execution } = await ReviewRound.create(
-    request,
-    committee.members,
-    committee.search,
-    undefined,
-    quiet,
-  );
-  await using graph = execution.graph;
-  const error = await execution.run().catch((thrown: unknown) => thrown);
+  const { execution: { graph }, run } = await committee.open();
+  const error = await run().catch((thrown: unknown) => thrown);
   assert.ok(
     error instanceof DataflowNodeError && error.nodeId === "DesignAssignment",
   );
@@ -339,14 +301,7 @@ test("the design code node rejects missing searches and malformed partial handof
     await using committee = await scriptedCommittee({
       lookups: [[rateLimited()]],
     });
-    const { execution } = await ReviewRound.create(
-      request,
-      committee.members,
-      committee.search,
-      undefined,
-      quiet,
-    );
-    await using graph = execution.graph;
+    const { execution: { graph } } = await committee.open();
     if (entry.failed)
       await assert.rejects(
         committee.search.tool.execute("failed-search", {
@@ -384,14 +339,7 @@ test("a valid empty search is reported without inventing a candidate", async () 
   await using committee = await scriptedCommittee({
     lookups: [[emptySearch()]],
   });
-  const plan = await convene(
-    request,
-    committee.members,
-    committee.search,
-    committee.review,
-    undefined,
-    quiet,
-  );
+  const plan = await committee.run();
   assert.ok(
     committee.memberInputs.Architect[0]?.includes(
       "No matching OSS libraries found",
@@ -545,18 +493,11 @@ test("the Reducer sends the Librarian and Architect back until it approves", asy
   const markdownFeedback =
     "Research a maintained Markdown renderer instead of custom rendering.";
   const cacheFeedback =
-    "Drop the custom paging cache; use the library's own scrolling.";
+    "  Drop the custom paging cache;\nuse the library's own scrolling.  ";
   await using committee = await scriptedCommittee({
     reviews: [revise(markdownFeedback), revise(cacheFeedback), approved],
   });
-  const plan = await convene(
-    request,
-    committee.members,
-    committee.search,
-    committee.review,
-    undefined,
-    quiet,
-  );
+  const plan = await committee.run();
   assert.ok(plan.includes("Review round: 3"));
   assert.ok(!plan.includes("Review round: 1"));
   assert.equal(committee.searchQueries.length, 3);
@@ -585,16 +526,7 @@ test("the Reducer sends the Librarian and Architect back until it approves", asy
 
 test("a round without a review verdict publishes nothing", async () => {
   await using committee = await scriptedCommittee({ reviews: ["skip"] });
-  await assert.rejects(
-    convene(
-      request,
-      committee.members,
-      committee.search,
-      committee.review,
-      undefined,
-      quiet,
-    ),
-  );
+  await assert.rejects(committee.run(), /did not record a review verdict/);
   assert.equal(committee.memberInputs.Reducer.length, 1);
 }, 5_000);
 
@@ -603,15 +535,63 @@ test("a failed lookup in one round does not block a later normal round", async (
     lookups: [[rateLimited()]],
     reviews: [revise("Retry the terminal UI research."), approved],
   });
-  const plan = await convene(
-    request,
-    committee.members,
-    committee.search,
-    committee.review,
-    undefined,
-    quiet,
-  );
+  const sinks: unknown[] = [];
+  const sessions = new Map<string, Set<unknown>>();
+  const observer = new class extends DummyTracer {
+    override startRun<S, N extends TSchema, T, EH>(graph: DataflowGraph<S, N, T, EH>): DataflowRunTrace<N, T> {
+      return { startNode: id => {
+        if (["Librarian", "Architect", "Reducer"].includes(id)) {
+          const seen = sessions.get(id) ?? new Set();
+          seen.add(graph.getNode(id)!.state);
+          sessions.set(id, seen);
+        }
+        return { end: step => { if (id === "$sink" && step.done) sinks.push(step.value); }, fail() {} };
+      }, end() {}, fail() {} };
+    }
+  };
+  const plan = await committee.run(observer);
+  assert.equal(sessions.size, 3);
+  for (const seen of sessions.values()) assert.equal(seen.size, 1);
+  assert.equal(sinks.length, 1);
+  assert.equal(approvedPlan(sinks[0]), plan);
   assert.ok(plan.includes("Review round: 2"));
   assert.ok(plan.includes(repositoryUrl));
   assert.equal(committee.search.failures(), 1);
+}, 5_000);
+
+test("a second-round partial waits for this round's Architect even when the Librarian requested immediate resumption", async () => {
+  const feedback = "Retry the public search and account for missing evidence.";
+  await using committee = await scriptedCommittee({
+    lookups: [[emptySearch()], [rateLimited()]], reviews: [revise(feedback), approved], waitForInput: false,
+  });
+  const plan = await committee.run();
+  const requests = committee.modelRequests;
+  assert.equal(committee.memberInputs.Architect.length, 2);
+  assert.match(committee.memberInputs.Architect[1]!, /Partial research:.*\n.*HTTP 403/s);
+  assert.ok(committee.memberInputs.Architect[1]!.includes(feedback));
+  assert.ok(requests.lastIndexOf("Architect") < requests.lastIndexOf("Librarian"));
+  assert.ok(requests.lastIndexOf("Librarian") < requests.lastIndexOf("Reducer"));
+  assert.ok(plan.includes("Review round: 2"));
+  assert.ok(plan.includes("HTTP 403"));
+  assert.ok(!plan.includes("Review round: 1"));
+}, 5_000);
+
+test("cancellation at Reducer settlement does not publish or start another round", async () => {
+  await using committee = await scriptedCommittee();
+  const controller = new AbortController();
+  const reason = new Error("stop before publication");
+  let published = false;
+  const observer = new class extends DummyTracer {
+    override startRun<S, N extends TSchema, T, EH>(_graph: DataflowGraph<S, N, T, EH>): DataflowRunTrace<N, T> {
+      return { startNode: id => ({
+        end: step => {
+          if (id === "Reducer" && step.done) controller.abort(reason);
+          if (id === "$sink") published = true;
+        }, fail() {},
+      }), end() {}, fail() {} };
+    }
+  };
+  await assert.rejects(committee.run(observer, controller.signal), error => error === reason);
+  assert.equal(published, false);
+  assert.equal(committee.memberInputs.Reducer.length, 1);
 }, 5_000);

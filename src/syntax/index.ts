@@ -7,6 +7,7 @@ export {
   type FromYamlOptions,
   finalText,
   resolveAgents,
+  type YamlAgentOptions,
 } from "./build.js";
 export {
   ValidationError,
@@ -15,11 +16,11 @@ export {
 } from "./errors.js";
 export { type ParseOptions, parse } from "./parse.js";
 export {
-  BUILTIN_TOOL_NAMES,
   type EdgeSpec,
   type GraphSpec,
   type JuncoDocument,
   JuncoDocumentSchema,
+  nodeKey,
   type NodeSpec,
   type TriggerSpec,
 } from "./schema.js";

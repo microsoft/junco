@@ -7,10 +7,13 @@ import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate } from "node:timers/promises";
-import type { AgentTool, PromptTemplate, Skill } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, TSchema } from "@earendil-works/pi-ai";
+import { BACKGROUND_CONTEXT, JsonlSessionRepo } from "@earendil-works/pi-agent-core";
+import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
+import { type AssistantMessage, type Context as PiContext, contentText, fauxAssistantMessage, fauxToolCall, getCurrentTools, type TSchema } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { graph, JuncoGraph, MockAgent, type MockRun, schedules, syntax, tracer } from "junco";
+import { captureUsageContext, runWithUsageContext } from "dataflow-engine";
+import { graph, JuncoGraph, schedules, syntax, tools, tracer } from "junco";
+import { countedCollection, fauxRuntime, offlineLadder } from "../../test/support.ts";
 import { grafanaUrl } from "../benchmark-telemetry.ts";
 import * as cb from "./wf.ts";
 import * as solo from "./solo.ts";
@@ -18,12 +21,16 @@ import {
   BLOCKED_DEFAULTS,
   cancelBranch,
   checkDocument,
+  collectAgents,
   checkLadder,
   containerBash,
   describe,
   guardedModels,
+  readManifest,
+  recordedSessions,
   sandboxBash,
   sandboxOps,
+  sessionMessages,
   teeRecorder,
 } from "./run-workflow.ts";
 
@@ -32,7 +39,9 @@ const docker = (...args: string[]) => spawnSync("docker", args, { encoding: "utf
 const running = (id: string) => docker("inspect", "-f", "{{.State.Running}}", id).stdout.trim() === "true";
 const owned: string[] = [];
 const start = () => {
-  const id = docker("run", "-d", "--network", "none", IMAGE, "tail", "-f", "/dev/null").stdout.trim();
+  const started = docker("run", "-d", "--network", "none", IMAGE, "tail", "-f", "/dev/null");
+  if (started.error || started.status !== 0) throw started.error ?? new Error(`starting ${IMAGE}: ${started.stderr}`);
+  const id = started.stdout.trim();
   owned.push(id);
   return id;
 };
@@ -84,7 +93,13 @@ test("a guarded agent sends no request to a model other than its role's", async 
   const dir = mkdtempSync(join(tmpdir(), "guard-"));
   const log = join(dir, "requests.jsonl");
   writeFileSync(log, "");
-  const ladder = new schedules.ModelLadder(guardedModels(decoyModels, log, "Worker", "decoy/other"), schedules.uniformLadder({ model: "decoy/m" }));
+  const models = guardedModels(decoyModels, log, new Map([["Worker", "decoy/other"]]));
+  const model = decoyModels.getModel("decoy", "m")!;
+  for (const nodePath of [undefined, ["Other"], ["Other", "Worker"]]) {
+    const result = await runWithUsageContext(nodePath && { budgets: [], nodePath }, () => models.completeSimple(model, { messages: [] }));
+    expect(result.errorMessage).toMatch(/refused model request from unknown role/);
+  }
+  const ladder = new schedules.ModelLadder(models, schedules.uniformLadder({ model: "decoy/m" }));
   const document = syntax.parse(`
 graph:
   nodes:
@@ -97,27 +112,59 @@ graph:
     - {from: Assignment, to: Worker, kind: message, schema: {}}
     - {from: Worker, to: $sink, schema: {}}
 `);
+  const { collection, active } = countedCollection();
   const execution = await JuncoGraph.fromYaml(document, {
     cwd: dir, scheduler: () => schedules.parallel(), tracer: new tracer.DummyTracer(),
-    createAgent: (spec) => syntax.createJuncoAgent(spec, ladder),
+    ladder, collection,
   });
   let value: unknown;
+  let failure: string | undefined;
   try {
     await execution.run();
     const terminal = execution.graph.result(execution.graph.sink.id);
     if (terminal._tag === "Some") value = terminal.value;
-  } catch {
-    // A refused request may surface as a failed run; the assertions below decide.
+  } catch (error) {
+    failure = describe(error);
   } finally {
     await execution.graph.close();
+    await collection.close();
+    expect(active.bindings).toBe(0);
   }
   expect(hits).toBe(0);
   expect(readFileSync(log, "utf8")).toBe("");
+  expect(failure ?? (value as AssistantMessage | undefined)?.errorMessage).toContain("Worker: refused request to decoy/m");
   expect(() => syntax.finalText(value, "Worker")).toThrow();
 });
 
+test("a session setup failure releases earlier recordings and preserves close failures", async () => {
+  await using lifetime = new AsyncDisposableStack();
+  const cwd = mkdtempSync(join(tmpdir(), "swe-session-setup-"));
+  lifetime.defer(() => rmSync(cwd, { recursive: true, force: true }));
+  const env = new NodeExecutionEnv({ cwd });
+  lifetime.defer(() => env.cleanup(BACKGROUND_CONTEXT));
+  const repo = new JsonlSessionRepo({ fileSystem: env, sessionsRoot: cwd });
+  lifetime.defer(() => repo.close(BACKGROUND_CONTEXT));
+  const create = repo.create.bind(repo);
+  let opened = 0, closed = 0;
+  repo.create = async (...args) => {
+    if (opened++) throw new Error("second session unavailable");
+    const session = await create(...args);
+    const close = session.close.bind(session);
+    session.close = async (ctx) => {
+      closed++;
+      await close(ctx);
+      throw new Error("close failed");
+    };
+    return session;
+  };
+  const assignments = new Map(["A/Worker", "B/Worker"].map((path) => [graph.NodeId.create(path), "faux/m"]));
+  const result = await recordedSessions(assignments, cwd, repo, join(cwd, "index.jsonl")).catch(describe);
+  expect(result).toBe("opening SWE-bench sessions failed: second session unavailable; close failed");
+  expect(closed).toBe(1);
+});
+
 test("container bash keeps argument boundaries, output and nonzero exit codes", async () => {
-  const bash = containerBash(start(), () => {});
+  const bash = tools.BashTool.create("/testbed", containerBash(start(), () => {}));
   const result = await bash.execute("t", { command: `printf '%s|' 'a b' "c  d" 'it'"'"'s'; echo err >&2; exit 7` });
   const text = result.content.map((c) => ("text" in c ? c.text : "")).join("");
   expect(text).toContain("a b|c  d|it's|");
@@ -131,7 +178,7 @@ test("a timed-out command stops its own container and leaves other containers ru
   const mine = start();
   const sentinel = start();
   let fatal: Error | undefined;
-  const bash = containerBash(mine, (reason) => { fatal = reason; });
+  const bash = tools.BashTool.create("/testbed", containerBash(mine, (reason) => { fatal = reason; }));
   await expect(bash.execute("t", { command: "sleep 60 & sleep 60", timeout: 1 })).rejects.toThrow(/timed out/);
   expect(fatal?.message).toMatch(/timeout/);
   expect(running(mine)).toBe(false);
@@ -139,7 +186,7 @@ test("a timed-out command stops its own container and leaves other containers ru
 }, 60_000);
 
 // ---- Coordination: the real workflow topology and code nodes, with root agents scripted as code nodes
-// and Planner agents kept as real MockAgents so staged instructions and steered messages stay separate.
+// and Planner agents kept as real YAML-owned sessions so instruction staging and steering stay separate.
 type Fake = {
   files: Record<string, string>;
   log: string[];
@@ -274,25 +321,11 @@ function scriptedDocument(source: syntax.JuncoDocument = cb.document): syntax.Ju
   return document;
 }
 
-type YamlMock = MockAgent<Skill, PromptTemplate, AgentTool, TSchema, unknown>;
-/** A Planner mock that logs every request, including continuations and correction assignments. */
-class Draft extends MockAgent<Skill, PromptTemplate, AgentTool, TSchema, unknown> {
-  constructor(runs: readonly MockRun[], readonly h: Fake, readonly id = "Draft") {
-    super({ runs, steeringMode: "all" });
-  }
-  override next(...args: Parameters<YamlMock["next"]>) {
-    this.h.log.push(`${this.id}:next`);
-    return super.next(...args);
-  }
-}
-const settled = (text: string): MockRun["frames"][number] => ({ step: { kind: "settled", message: message(text) } });
-/** One Draft run per entry: a plan text settles at once; frames are used verbatim. */
-const drafts = (...runs: (string | MockRun["frames"])[]): MockRun[] =>
-  runs.map((run) => ({
-    frames: (typeof run === "string" ? [settled(run)] : run).map((frame, index) => index === 0 ? { ...frame, drain: ["steer"] } : frame),
-    interrupted: { step: { kind: "settled", message: message("aborted", "aborted") } },
-  }));
-const userTexts = (request: Draft["requests"][number]): string[] => request.messages
+type Draft = { id: string; requests: PiContext[]; result?: unknown };
+/** One response per provider request, including actual native yield calls. */
+const drafts = (...turns: (string | AssistantMessage)[]) =>
+  turns.map((turn) => typeof turn === "string" ? fauxAssistantMessage(turn) : turn);
+const userTexts = (request: PiContext): string[] => request.messages
   .filter((message) => message.role === "user")
   .map(({ content }) => typeof content === "string" ? content : content.map((part) => "text" in part ? part.text : "").join(""));
 /** Corrections delivered to this producer, from the cumulative session in its final request. */
@@ -308,7 +341,7 @@ function corrections(agent: Draft): { attempt: number; feedback: string }[] {
 
 async function scenario(
   overrides: Record<string, Script> = {},
-  runs: MockRun[] | Record<string, MockRun[]> = drafts(plan(CHECKS)),
+  runs: AssistantMessage[] | Record<string, AssistantMessage[]> = drafts(plan(CHECKS)),
   code: (h: Fake) => Record<string, syntax.DeterministicNode<cb.Context>> = () => ({}),
   recorder?: tracer.ProfileRecorder<string>,
   workflow: typeof cb = cb,
@@ -326,18 +359,32 @@ async function scenario(
     .filter(([, node]) => node.kind === undefined || node.kind === "agent")
     .map(([id]) => [id, participant(id, scripts[id] ?? {}, h)]));
   const agents = new Map<string, Draft>();
-  const execution = await JuncoGraph.fromYaml<cb.Context>(scriptedDocument(document), {
+  const source = scriptedDocument(document);
+  const scriptsByPath = new Map<string, AssistantMessage[]>();
+  for (const { path, node } of await syntax.resolveAgents(source, { cwd: tmpdir() })) {
+    if (!path.startsWith("Planner/")) throw new Error(`unexpected agent ${path}`);
+    const turns = Array.isArray(runs) ? runs : runs[path];
+    if (turns === undefined) throw new Error(`no scripted requests for ${path}`);
+    agents.set(path, { id: node, requests: [] });
+    scriptsByPath.set(path, turns);
+  }
+  const respond = (context: PiContext) => {
+    const path = captureUsageContext()?.nodePath.join("/") ?? "";
+    const log = agents.get(path);
+    if (!log) throw new Error(`request outside a scripted role: ${path}`);
+    h.log.push(`${log.id}:next`);
+    const response = scriptsByPath.get(path)?.[log.requests.length];
+    log.requests.push(structuredClone(context));
+    if (!response) throw new Error(`unexpected request ${log.requests.length} for ${path}`);
+    return response;
+  };
+  const ladder = await offlineLadder([...scriptsByPath.values()].flatMap((turns) => turns.map(() => respond)));
+  const { collection, active } = countedCollection();
+  const execution = await JuncoGraph.fromYaml<cb.Context>(source, {
     cwd: tmpdir(),
     scheduler: workflow.scheduler,
     code: { ...workflow.code, ...participants, ...code(h) },
-    createAgent: async (spec) => {
-      if (!spec.path.startsWith("Planner/")) throw new Error(`unexpected agent ${spec.path}`);
-      const transcript = Array.isArray(runs) ? runs : runs[spec.path];
-      if (transcript === undefined) throw new Error(`no scripted runs for ${spec.path}`);
-      const agent = new Draft(transcript, h, spec.path.split("/").at(-1));
-      agents.set(spec.path, agent);
-      return agent;
-    },
+    ladder, collection,
     context: { ...h.host, race: {} },
     signal: h.abort.signal,
     tracer: new tracer.DummyTracer(),
@@ -348,6 +395,14 @@ async function scenario(
   let error: string | undefined;
   try {
     await execution.run();
+    execution.graph.forEachNode((id, { state }) => {
+      if (id !== "Planner" || !(state instanceof JuncoGraph)) return;
+      state.forEachNode((childId) => {
+        const draft = agents.get(`Planner/${childId}`);
+        const result = state.result(childId);
+        if (draft && result._tag === "Some") draft.result = result.value;
+      });
+    });
     const planner = execution.graph.result(graph.NodeId.create("Planner"));
     if (planner._tag === "Some") plannerResult = planner.value;
     const terminal = execution.graph.result(execution.graph.sink.id);
@@ -356,6 +411,8 @@ async function scenario(
     error = describe(failure);
   } finally {
     await execution.graph.close();
+    await collection.close();
+    expect(active.bindings).toBe(0);
   }
   const at = (entry: string) => h.log.indexOf(entry);
   const count = (entry: string) => h.log.filter((e) => e === entry).length;
@@ -376,16 +433,22 @@ async function withWorkflow<T>(document: syntax.JuncoDocument, act: (workflow: t
 }
 
 group("solo baseline", () => {
-  const runSolo = (h: Fake, stop: AssistantMessage["stopReason"] = "stop") => solo.run({
-    cwd: tmpdir(),
-    context: h.host,
-    tools: { bash: containerBash("unused", () => {}) },
-    createAgent: async () => new MockAgent({ runs: [{
-      frames: [{ drain: ["steer"], step: { kind: "settled", message: message("solo report", stop) } }],
-      interrupted: { step: { kind: "settled", message: message("aborted", "aborted") } },
-    }] }),
-    tracer: new tracer.DummyTracer(),
-  });
+  const runSolo = async (h: Fake, stop: AssistantMessage["stopReason"] = "stop") => {
+    const { collection, active } = countedCollection();
+    const ladder = await offlineLadder([fauxAssistantMessage("solo report", { stopReason: stop, ...(stop === "error" ? { errorMessage: "solo error" } : {}) })]);
+    try {
+      return await solo.run({
+        cwd: tmpdir(), context: h.host, ladder, collection, tracer: new tracer.DummyTracer(),
+      }, (g) => {
+        const members = new Map();
+        collectAgents(g, members);
+        expect([...members.keys()]).toEqual(["Solo"]);
+      });
+    } finally {
+      await collection.close();
+      expect(active.bindings).toBe(0);
+    }
+  };
 
   test("a solo patch reaches canonical after either a normal or abnormal agent stop", async () => {
     checkDocument(solo);
@@ -438,7 +501,7 @@ group("coordination", () => {
     expect(run.draft.requests).toHaveLength(2);
     expect(run.corrections).toHaveLength(1);
     expect(userTexts(run.draft.requests[1]).at(-2)).toBe(userTexts(run.draft.requests[0])[0]);
-    expect(run.plannerResult).toBe(run.draft.history.at(-1));
+    expect(run.plannerResult).toBe(run.draft.result);
     expect(run.corrections[0].attempt).toBe(1);
     expect(run.corrections[0].feedback).toContain("No regression check survived the baseline run");
     expect(run.corrections[0].feedback).toContain("missing-class");
@@ -469,7 +532,7 @@ group("coordination", () => {
     expect(run.error).toBeUndefined();
     expect(run.report).toContain("Final patch verified");
     expect(run.draft.requests).toHaveLength(4);
-    expect(run.plannerResult).toBe(run.draft.history.at(-1));
+    expect(run.plannerResult).toBe(run.draft.result);
     expect(run.files.canonical).toBe(diff("FIX A"));
     for (const candidate of ["CandidateA", "CandidateB"]) {
       expect(run.at(`${candidate}:start`)).toBeGreaterThan(run.at("save:planning/degraded.txt"));
@@ -509,11 +572,8 @@ group("coordination", () => {
 
   test("a slow checker validates each distinct draft once and a native yield costs no correction turn", async () => {
     const bad = plan([{ kind: "reproduction", name: "repro", command: "import-error" }, { kind: "regression", name: "slow", command: "slow" }]);
-    const yielding: MockRun["frames"] = [
-      { step: { kind: "yield", reasons: [{ kind: "tool", toolCallId: "y1", toolName: "yield", reason: "thinking" }] } },
-      settled(bad),
-    ];
-    const run = await scenario({}, drafts(yielding, bad, plan([CHECKS[0], { kind: "regression", name: "slow", command: "slow" }])));
+    const yielding = fauxAssistantMessage([fauxToolCall("yield", { reason: "thinking" })], { stopReason: "toolUse" });
+    const run = await scenario({}, drafts(yielding, bad, bad, plan([CHECKS[0], { kind: "regression", name: "slow", command: "slow" }])));
     expect(run.error).toBeUndefined();
     expect(run.draft.requests).toHaveLength(4); // yield + settle, then one request per correction
     expect(run.corrections.map(({ attempt }) => attempt)).toEqual([1, 2]);
@@ -662,7 +722,7 @@ group("coordination", () => {
 
 group("dormant topology capabilities", () => {
   test("the incumbent routes every role to its non-Opus model and thinking level", async () => {
-    const agents = await syntax.resolveAgents(cb.document, { cwd: tmpdir(), tools: { bash: containerBash("unused", () => {}) } });
+    const agents = await syntax.resolveAgents(cb.document, { cwd: tmpdir() });
     const sonnet = { model: "github-copilot/claude-sonnet-5.5", thinking: "high" } as const;
     const haiku = { model: "github-copilot/claude-haiku-5.5", thinking: "medium" } as const;
     const luna = { model: "github-copilot/gpt-6-luna", thinking: "medium" } as const;
@@ -685,6 +745,7 @@ group("dormant topology capabilities", () => {
     level.source = { ...level.source, routes: { "JoinEvidence~>Planner": ["$source~>Draft", "$source~>Critic"] } };
     level.nodes.Draft.trigger = "$source~>Draft";
     level.nodes.Critic = {
+      tool_block: [...BLOCKED_DEFAULTS],
       trigger: { any: ["Draft->Critic", "CheckPlan~>Critic"] },
       prompt: "Review the issue, evidence and draft. On a correction, return the complete plan addressing the baseline feedback.\n\n# Draft plan\n{{Draft->Critic}}",
     };
@@ -759,10 +820,10 @@ group("dormant topology capabilities", () => {
     const correction = level.edges!.find((edge) => edge.from === "CheckPlan" && edge.to === "Draft")!;
     level.source = { ...level.source, routes: { "JoinEvidence~>Planner": ["$source~>DraftA", "$source~>DraftB", "$source~>Merge"] } };
     level.nodes = {
-      DraftA: { trigger: "$source~>DraftA", prompt: "Draft a plan from the evidence in the user message following this prompt." },
-      DraftB: { trigger: "$source~>DraftB", prompt: "Draft a plan from the evidence in the user message following this prompt." },
+      DraftA: { trigger: "$source~>DraftA", prompt: "Draft a plan from the evidence in the user message following this prompt.", tool_block: [...BLOCKED_DEFAULTS] },
+      DraftB: { trigger: "$source~>DraftB", prompt: "Draft a plan from the evidence in the user message following this prompt.", tool_block: [...BLOCKED_DEFAULTS] },
       JoinDrafts: { kind: "code", trigger: { all: ["DraftA->JoinDrafts", "DraftB->JoinDrafts"] } },
-      Merge: { trigger: { any: ["JoinDrafts~>Merge", "CheckPlan~>Merge"] }, prompt: "Merge the evidence and named drafts into one plan. On a correction, return the complete plan addressing the baseline feedback." },
+      Merge: { trigger: { any: ["JoinDrafts~>Merge", "CheckPlan~>Merge"] }, prompt: "Merge the evidence and named drafts into one plan. On a correction, return the complete plan addressing the baseline feedback.", tool_block: [...BLOCKED_DEFAULTS] },
       CheckPlan: { ...level.nodes.CheckPlan, trigger: "Merge~>CheckPlan" },
     };
     level.edges = [
@@ -798,7 +859,7 @@ group("dormant topology capabilities", () => {
       expect(corrections(merge)).toEqual([{ attempt: 1, feedback: expect.stringContaining("The plan has no regression check") }]);
 
       const abnormal = await scenario({}, {
-        "Planner/DraftA": drafts([{ step: { kind: "settled", message: message("broken draft", "error") } }]),
+        "Planner/DraftA": drafts(fauxAssistantMessage("broken draft", { stopReason: "error", errorMessage: "broken draft" })),
         "Planner/DraftB": drafts("second independent draft"),
         "Planner/Merge": drafts(plan(CHECKS)),
       }, undefined, undefined, workflow);
@@ -870,8 +931,24 @@ function nestedA(nodes: Record<string, Spec>, sandbox: Record<string, string>, e
   } as unknown as syntax.NodeSpec;
   return { ...cb, document, SANDBOX: { ...rest, ...sandbox } as Workflow["SANDBOX"], ...extra };
 }
-const shell = { trigger: "$source~>Worker", prompt: "Investigate the assignment in your sandbox.", tools: ["bash"] };
-const helper = { trigger: "$source~>Helper", prompt: "Review the assignment." };
+const shell = { trigger: "$source~>Worker", prompt: "Investigate the assignment in your sandbox.", tool_block: BLOCKED_DEFAULTS.filter((name) => name !== "bash") };
+const helper = { trigger: "$source~>Helper", prompt: "Review the assignment.", tool_block: [...BLOCKED_DEFAULTS] };
+
+test("manifest refuses aliases that could share an acceptance container", () => {
+  const dir = mkdtempSync(join(tmpdir(), "swe-manifest-"));
+  const path = join(dir, "manifest.json");
+  const accept = "a".repeat(64);
+  try {
+    for (const candidate of ["b".repeat(64), accept, accept.slice(0, 12), "acceptA"]) {
+      writeFileSync(path, JSON.stringify({ baseline: "0".repeat(40), containers: { candidateA: candidate, acceptA: accept } }));
+      const read = () => readManifest(path, ["candidateA", "acceptA"]);
+      if (candidate.startsWith("b")) expect(read().containers.candidateA).toBe(candidate);
+      else expect(read).toThrow(/distinct full container IDs/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("nested pairs are checked at every depth against the runtime's permissions and sandboxes", () => {
   expect(() => checkDocument(cb)).not.toThrow();
@@ -881,9 +958,12 @@ test("nested pairs are checked at every depth against the runtime's permissions 
   expect(() => checkDocument(nestedA(deep, { "CandidateA/Inner/Worker": "candidateA" }))).not.toThrow();
   const rejects = (workflow: Workflow, error: RegExp) => expect(() => checkDocument(workflow)).toThrow(error);
   rejects(nestedA({ ...legal, Mystery: { kind: "code", trigger: "$source~>Mystery" } }, { "CandidateA/Worker": "candidateA" }), /CandidateA\/Mystery has no exported definition Mystery/);
-  rejects(nestedA(legal, {}), /CandidateA\/Worker uses bash but has no sandbox/);
+  rejects(nestedA(legal, {}), /CandidateA\/Worker: tool_block must include bash/);
   rejects(nestedA(legal, { CandidateA: "candidateA", "CandidateA/Worker": "candidateA" }), /SANDBOX\.CandidateA must bind a bash-using agent path/);
-  rejects(nestedA({ ...legal, Helper: { ...helper, tools: ["read"] } }, { "CandidateA/Worker": "candidateA" }), /CandidateA\/Helper: tool read is not permitted/);
+  for (const tool of BLOCKED_DEFAULTS) {
+    rejects(nestedA({ ...legal, Helper: { ...helper, tool_block: BLOCKED_DEFAULTS.filter((name) => name !== tool) } }, { "CandidateA/Worker": "candidateA" }), new RegExp(`CandidateA/Helper: tool_block must include ${tool}`));
+  }
+  rejects(nestedA({ Worker: helper }, { "CandidateA/Worker": "candidateA" }), /mapped sandbox requires unblocked bash/);
   rejects(nestedA({ ...legal, Helper: { ...helper, skills: ["x"] } }, { "CandidateA/Worker": "candidateA" }), /CandidateA\/Helper: skills are not permitted/);
   rejects(nestedA({ "Two/Parts": shell }, { "CandidateA/Two/Parts": "candidateA" }), /must not contain \//);
   rejects(nestedA(legal, { "CandidateA/Worker": "acceptA" }), /acceptance sandbox acceptA is reserved/);
@@ -909,7 +989,7 @@ test("cancelling one contender stops only its command and sandboxes", async () =
   const controller = new AbortController();
   const contender = { abort: async () => controller.abort() };
   let fatal: Error | undefined;
-  const bash = sandboxBash(cb, containers, new Map([["CandidateB", contender]]), (reason) => { fatal = reason; })("CandidateB");
+  const bash = tools.BashTool.create("/testbed", sandboxBash(cb, containers, new Map([["CandidateB", contender]]), (reason) => { fatal = reason; })("CandidateB"));
   const started = Promise.withResolvers<void>();
   const command = bash.execute("t", { command: "echo started; sleep 60" }, controller.signal, () => started.resolve());
   const settled = command.then(() => undefined, (error: unknown) => error);
@@ -921,18 +1001,124 @@ test("cancelling one contender stops only its command and sandboxes", async () =
   expect([containers.candidateA, containers.acceptA, containers.canonical, sentinel].map(running)).toEqual([true, true, true, true]);
 }, 60_000);
 
-test("same-named nested shells in different branches bind their own containers", async () => {
-  const containers = { candidateA: start(), candidateB: start() };
-  const workflow = { SANDBOX: { "CandidateA/Worker": "candidateA", "CandidateB/Worker": "candidateB" } as Workflow["SANDBOX"], BRANCHES: cb.BRANCHES };
-  const bind = sandboxBash(workflow, containers, new Map(), (reason) => { throw reason; });
-  const sh = async (path: string, command: string) =>
-    (await bind(path).execute("t", { command })).content.map((c) => ("text" in c ? c.text : "")).join("");
-  await sh("CandidateA/Worker", "echo A > sentinel_a");
-  await sh("CandidateB/Worker", "echo B > sentinel_b");
-  expect(await sh("CandidateA/Worker", "cat sentinel_a; test -e sentinel_b && echo LEAK || echo clean")).toBe("A\nclean\n");
-  expect(await sh("CandidateB/Worker", "cat sentinel_b; test -e sentinel_a && echo LEAK || echo clean")).toBe("B\nclean\n");
-  expect(() => bind("CandidateA")).toThrow(/CandidateA has no sandbox/);
-}, 60_000);
+/** Exercise the same path guard and session handoff with and without a native Docker-bound collection. */
+async function nestedWorkers(shells: boolean): Promise<void> {
+  await using lifetime = new AsyncDisposableStack();
+  const dir = mkdtempSync(join(tmpdir(), "swe-nested-"));
+  lifetime.defer(() => rmSync(dir, { recursive: true, force: true }));
+  const log = join(dir, "requests.jsonl");
+  const index = join(dir, "index.jsonl");
+  const env = new NodeExecutionEnv({ cwd: dir });
+  lifetime.defer(() => env.cleanup(BACKGROUND_CONTEXT));
+  const repo = new JsonlSessionRepo({ fileSystem: env, sessionsRoot: dir });
+  lifetime.defer(() => repo.close(BACKGROUND_CONTEXT));
+  const branches = ["A", "B"] as const;
+  const containers: Record<string, string> = {};
+  const sandbox: Record<string, cb.Role> = {};
+  const members = new Map<string, { abort(): Promise<unknown> }>();
+  const collections = new Map<graph.NodeIdType, tools.ToolCollection>();
+  let cwd = dir;
+  if (shells) {
+    // The package fixture creates and removes an isolated production seed under JUNCO_BTRFS_TEST_ROOT.
+    const { createBtrfsFixture }: { createBtrfsFixture(): Promise<{ seed: string; close(): Promise<void> }> } =
+      require("../../packages/junco-tools/tests/btrfs-fixture.mjs");
+    const fixture = await createBtrfsFixture();
+    lifetime.defer(() => fixture.close());
+    cwd = fixture.seed;
+    for (const branch of branches) {
+      const role = `candidate${branch}` as const;
+      sandbox[`Candidate${branch}/Worker`] = role;
+      containers[role] = start();
+      containers[`accept${branch}`] = start();
+      expect(sh(containers[role], `printf '%s' '${branch}' > /tmp/worker-sentinel`).status).toBe(0);
+    }
+    const bind = sandboxBash({ SANDBOX: sandbox, BRANCHES: cb.BRANCHES }, containers, members, (error) => { throw error; });
+    expect(() => bind("CandidateA")).toThrow(/no sandbox/);
+    for (const path of Object.keys(sandbox)) {
+      const collection = await tools.ToolCollection.create(cwd, { bash: bind(path) });
+      lifetime.defer(() => collection.close());
+      collections.set(graph.NodeId.create(path), collection);
+    }
+  }
+  const respond = (context: PiContext) => {
+    const role = userTexts(context)[0];
+    expect(["Worker A", "Worker B"]).toContain(role);
+    const names = getCurrentTools(context.messages).map((tool) => tool.name);
+    for (const name of BLOCKED_DEFAULTS) expect(names.includes(name)).toBe(shells && name === "bash");
+    if (!shells) return fauxAssistantMessage(role);
+    const last = context.messages.at(-1);
+    return last?.role === "toolResult"
+      ? fauxAssistantMessage(`${role}: ${contentText(last.content).trim()}`)
+      : fauxAssistantMessage([fauxToolCall("bash", { command: "cat /tmp/worker-sentinel" })], { stopReason: "toolUse" });
+  };
+  const { models } = await fauxRuntime(Array(shells ? 4 : 2).fill(respond), "swe", [{ id: "a" }, { id: "b" }]);
+  const rungs = { ...schedules.uniformLadder({ model: "swe/a" }), high: { model: "swe/b" } };
+  const document = syntax.parse(JSON.stringify({
+    graph: {
+      nodes: {
+        Start: { kind: "emit", text: "Run the assignment.", spec: "Report the worker's evidence." },
+        ...Object.fromEntries(branches.map((branch) => [`Candidate${branch}`, {
+          kind: "graph", graph: {
+            source: { routes: { [`Start~>Candidate${branch}`]: ["$source~>Worker"] } },
+            nodes: { Worker: { prompt: `Worker ${branch}`, tool_block: shells ? shell.tool_block : BLOCKED_DEFAULTS } },
+            edges: [{ from: "$source", to: "Worker", kind: "message", schema: {} }, { from: "Worker", to: "$sink", schema: {} }],
+          },
+        }])),
+      },
+      edges: branches.flatMap((branch) => [
+        { from: "Start", to: `Candidate${branch}`, kind: "message", schema: {} },
+        { from: `Candidate${branch}`, to: "$sink", schema: {} },
+      ]),
+      sink: { returns: "CandidateA" },
+    },
+  }));
+  const strengthOf = (path: string) => path === "CandidateB/Worker" ? "high" : "med";
+  const assignments = checkDocument({ ...cb, document, ladder: rungs, strengthOf, SANDBOX: sandbox, BRANCHES: shells ? cb.BRANCHES : {} });
+  const ladder = new schedules.ModelLadder(guardedModels(models, log, assignments), rungs);
+  const counted = shells ? undefined : countedCollection();
+  if (counted) lifetime.defer(() => counted.collection.close());
+  const execution = await JuncoGraph.fromYaml(document, {
+    cwd, tools: collections, collection: counted?.collection, ladder, tracer: new tracer.DummyTracer(),
+    scheduler: (_, prefix) => schedules.strength((_snapshot, id) => strengthOf(`${prefix}/${id}`), schedules.parallel()),
+    agentOptions: await recordedSessions(assignments, cwd, repo, index),
+  });
+  try {
+    collectAgents(execution.graph, members);
+    expect([...members.keys()].sort()).toEqual(["CandidateA/Worker", "CandidateB/Worker"]);
+    await execution.run();
+    for (const branch of branches) {
+      const result = execution.graph.result(graph.NodeId.create(`Candidate${branch}`));
+      expect(result._tag === "Some" && syntax.finalText(result.value, branch)).toBe(`Worker ${branch}${shells ? `: ${branch}` : ""}`);
+    }
+    if (shells) {
+      expect(await cancelBranch(cb.BRANCHES, containers, members)("A")).toEqual([]);
+      expect([running(containers.candidateA), running(containers.acceptA)]).toEqual([false, false]);
+      expect([running(containers.candidateB), running(containers.acceptB)]).toEqual([true, true]);
+    }
+  } finally {
+    await execution.graph.close();
+  }
+  if (counted) expect(counted.active.bindings).toBe(0);
+  const requests = readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const entries = readFileSync(index, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  expect(entries).toHaveLength(2);
+  expect(entries[0].session).not.toBe(entries[1].session);
+  for (const branch of branches) {
+    const role = `Candidate${branch}/Worker`;
+    const model = branch.toLowerCase();
+    expect(requests.filter((r) => r.role === role)).toEqual(Array(shells ? 2 : 1).fill({ role, provider: "swe", model }));
+    const entry = entries.find((e) => e.node === role);
+    expect(entry.model).toBe(`swe/${model}`);
+    const messages = await sessionMessages(dir, entry.session);
+    const last = messages.at(-1);
+    expect(last?.role).toBe("assistant");
+    expect(last?.content).toContainEqual(expect.objectContaining({ type: "text", text: `Worker ${branch}${shells ? `: ${branch}` : ""}` }));
+    expect(messages.some((m) => m?.role === "toolResult" && m.toolName === "bash")).toBe(shells);
+  }
+}
+
+test("nested guard accepts only each worker's selected rung and records its own durable session", () => nestedWorkers(false));
+test("same-named nested workers call only their own container bash and cancelling A leaves B live", () => nestedWorkers(true), 120_000);
 
 test("cancelling a nested branch aborts every member under its root, concurrently, and nothing else", async () => {
   const containers = { candidateA: start(), candidateB: start(), acceptA: start(), acceptB: start() };
@@ -959,7 +1145,7 @@ test("a nested contender's timeout aborts its own branch members and is not inst
   const acquired = new Map([member("CandidateA/Worker"), member("CandidateA/Helper"), member("CandidateAB"), member("CandidateB/Worker")]);
   const workflow = { SANDBOX: { "CandidateA/Worker": "candidateA", "CandidateB/Worker": "candidateB" } as Workflow["SANDBOX"], BRANCHES: cb.BRANCHES };
   let fatal: Error | undefined;
-  const bash = sandboxBash(workflow, containers, acquired, (reason) => { fatal = reason; })("CandidateA/Worker");
+  const bash = tools.BashTool.create("/testbed", sandboxBash(workflow, containers, acquired, (reason) => { fatal = reason; })("CandidateA/Worker"));
   await expect(bash.execute("t", { command: "sleep 60", timeout: 1 })).rejects.toThrow(/timed out/);
   expect(fatal).toBeUndefined();
   expect(aborted).toEqual(["CandidateA/Worker", "CandidateA/Helper"]);

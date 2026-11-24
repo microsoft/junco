@@ -1,6 +1,10 @@
 // Offline scaffolding for test/yak-shaver.test.ts: in-memory Graft graphs and real JuncoAgent lanes
 // on faux providers, driven by the example's real batch graph and native task tool.
 
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import {
   type AssistantMessage,
@@ -8,22 +12,21 @@ import {
   contentText,
   fauxAssistantMessage,
   fauxToolCall,
+  getCurrentTools,
 } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
 import type { YamlAgent } from "../examples/support.ts";
 import {
   type CandidateLane,
   type CandidateWork,
   type GraftSnapshot,
-  ProposalRecorder,
   parseSnapshot,
   type RefactorVerdict,
   type SearchReport,
-  VerdictRecorder,
+  runCandidateBatch,
 } from "../examples/yak-shaver/yak-shaver.ts";
-import { agent as agentApi, tools as toolsApi } from "../src/index.ts";
+import { agent, graph, tools, tracer } from "../src/index.ts";
 import { userTexts } from "./deterministic-support.ts";
-import { nativeOptions, toolTurn } from "./support.ts";
+import { copyTreeNative, offlineLadder, toolTurn } from "./support.ts";
 
 /** One graph node; omitted fields follow Graft's shape for an unexported AST class on line 1. */
 export type NodeInput = {
@@ -161,23 +164,6 @@ function latestResults(context: Context) {
   return results;
 }
 
-const readParameters = Type.Object({ path: Type.String() });
-
-/** A tool that returns in-memory source; researchers have it, nothing calls it unscripted. */
-export function sourceTool(
-  sources: ReadonlyMap<string, string>,
-): AgentTool<typeof readParameters, undefined> {
-  return {
-    name: "source_read",
-    label: "source_read",
-    description: "Read an in-memory source file.",
-    parameters: readParameters,
-    execute: async (_id, { path }) => ({
-      content: [{ type: "text", text: sources.get(path) ?? "missing" }],
-      details: undefined,
-    }),
-  };
-}
 
 /** How one scripted lane behaves. */
 export type LaneScript = {
@@ -230,6 +216,7 @@ export type LaneLog = {
   /** Names of the original launch's handles. */
   handles: string[];
   submitErrors: string[];
+  submitted: boolean;
   forbidden: { toolName: string; isError: boolean; text: string }[];
   /** Fresh researcher starts, every attempt counted. */
   researchers: number;
@@ -251,23 +238,24 @@ export type LaneLog = {
 export type ScriptedLane = {
   readonly lane: CandidateLane;
   readonly log: LaneLog;
+  readonly members: YamlAgent[];
+  readonly respond: (context: Context) => Promise<AssistantMessage>;
 };
 
 /**
- * A real proposer/judge lane on faux providers. The proposer's provider also serves its native task
- * children (they inherit its model), so one dispatcher answers both roles from the request context.
+ * Script for a lane's shared provider. Dispatch by role and candidate rank in the transcript.
  */
-export async function scriptedLane(
+export function scriptedLane(
   work: CandidateWork,
-  snapshot: GraftSnapshot,
   sources: ReadonlyMap<string, string>,
   script: LaneScript = {},
   extraTools: readonly AgentTool[] = [],
-): Promise<ScriptedLane> {
+): ScriptedLane {
   const log: LaneLog = {
     proposerInput: [],
     handles: [],
     submitErrors: [],
+    submitted: false,
     forbidden: [],
     researchers: 0,
     starts: {},
@@ -278,13 +266,6 @@ export async function scriptedLane(
     judgeInputs: [],
     received: [],
   };
-  const proposal = new ProposalRecorder({
-    snapshot,
-    work,
-    readSource: async (path) => sources.get(path),
-    taskResults: () => proposer.getTaskResults(),
-  });
-  const verdict = new VerdictRecorder();
   let earlyTried = false;
   let started = false;
   let yieldsLeft = script.beforeResearchYields ?? 0;
@@ -328,12 +309,12 @@ export async function scriptedLane(
         await script.hold.gate;
       }
       if (script.readAssigned)
-        return toolTurn(...files.map((path) => call("source_read", { path })));
+        return toolTurn(...files.map((path) => call("read", { path })));
     } else if (script.forbiddenProbe === shard) {
       log.forbidden.push(...latestResults(context));
     } else if (script.readAssigned) {
       log.reads += latestResults(context).filter(
-        (result) => result.toolName === "source_read" && !result.isError,
+        (result) => result.toolName === "read" && !result.isError,
       ).length;
     }
     // Attempts of one shard run one after another, so its latest start is this attempt.
@@ -357,8 +338,25 @@ export async function scriptedLane(
   const dispatch = async (context: Context) => {
     const texts = userTexts(context.messages);
     const prompt = texts[0] ?? "";
-    if (prompt.startsWith("You are a read-only researcher"))
+    const granted = new Set(getCurrentTools(context.messages).map((tool) => tool.name));
+    for (const denied of ["bash", "edit", "ast_edit", "release"]) assert.ok(!granted.has(denied), denied);
+    if (prompt.startsWith("You are a read-only researcher")) {
+      for (const denied of ["submit_refactor", "judge_refactor", "task"]) assert.ok(!granted.has(denied), denied);
+      assert.ok(granted.has("read"));
       return researcher(context, prompt);
+    }
+    if (prompt.startsWith("Judge the checked proposal")) {
+      assert.ok(granted.has("judge_refactor") && !granted.has("submit_refactor") && !granted.has("task"));
+      if (latestResults(context).some((result) => result.toolName === "judge_refactor" && !result.isError))
+        return fauxAssistantMessage("verdict recorded");
+      log.judgeCalls++;
+      script.onJudge?.();
+      log.judgeInputs.push(texts);
+      log.received.push(...texts.filter((text) => text.startsWith('{"id":"summary:')));
+      if (script.skipVerdict) return fauxAssistantMessage("verdict omitted");
+      return toolTurn(call("judge_refactor", script.verdict ?? allPass));
+    }
+    assert.ok(granted.has("submit_refactor") && !granted.has("judge_refactor"));
     if (!log.proposerInput.length) log.proposerInput.push(...texts);
     if (!started) {
       if (
@@ -421,8 +419,10 @@ export async function scriptedLane(
       log.submitErrors.push(submitted.text);
       return fauxAssistantMessage("waiting for researchers");
     }
-    if (submitted !== undefined)
+    if (submitted !== undefined) {
+      log.submitted = true;
       return fauxAssistantMessage(script.proposerFinal ?? "result recorded");
+    }
     const reports = reportsIn(context);
     const decided = new Set(log.decisions);
     const question = reports.find(
@@ -478,42 +478,51 @@ export async function scriptedLane(
     return toolTurn(call("submit_refactor", args));
   };
 
-  const proposerOptions = await nativeOptions(
-    Array.from({ length: 200 }, () => dispatch),
-  );
-  const judgeOptions = await nativeOptions([
-    (context: Context) => {
-      log.judgeCalls++;
-      script.onJudge?.();
-      const messages = userTexts(context.messages);
-      log.judgeInputs.push(messages);
-      log.received.push(...messages.filter((text) => text.startsWith('{"id":"summary:')));
-      if (script.skipVerdict) return fauxAssistantMessage("verdict omitted");
-      return toolTurn(call("judge_refactor", script.verdict ?? allPass));
+  return { lane: { work, readSource: async (path) => sources.get(path), research: extraTools }, log, members: [], respond: dispatch };
+}
+
+/** Run the actual lane builder on a temporary CopyTree seed and one transcript-dispatched ladder. */
+export async function runScriptedBatch(
+  options: Omit<Parameters<typeof runCandidateBatch>[0], "root" | "collection" | "ladder" | "lanes"> & { lanes: readonly ScriptedLane[] },
+  signal?: AbortSignal,
+) {
+  const { lanes, observer = new tracer.DummyTracer() } = options;
+  const byRank = new Map(lanes.map((script) => [script.lane.work.rank, script]));
+  const ladder = await offlineLadder((ctx) => {
+    const rank = userTexts(ctx.messages).map((text) => /Candidate \(rank (\d+)\):/.exec(text)?.[1]).find(Boolean);
+    const script = byRank.get(Number(rank));
+    assert.ok(script, `missing candidate rank ${rank} in transcript`);
+    return script.respond(ctx);
+  });
+  await using owned = new AsyncDisposableStack();
+  const root = await mkdtemp(join(tmpdir(), "yak-batch-"));
+  owned.defer(() => rm(root, { recursive: true, force: true }));
+  for (const path of options.snapshot.files) {
+    const source = await lanes[0]!.lane.readSource(path);
+    if (source === undefined) continue;
+    await mkdir(dirname(join(root, path)), { recursive: true });
+    await writeFile(join(root, path), source);
+  }
+  const collection = owned.adopt(await tools.ToolCollection.create(root, {
+    native: await copyTreeNative(), policy: tools.LockPolicy, sandbox: "always",
+  }), (collection) => collection.close());
+  return await runCandidateBatch({
+    ...options, root, collection, ladder, lanes: lanes.map(({ lane }) => lane),
+    observer: {
+      startRun(workflow) {
+        if (workflow.getNode(graph.NodeId.create("FinalizeBatch"))) {
+          for (const { members, lane } of lanes) if (!members.length) {
+            for (const role of ["Proposer", "Judge"]) {
+              const member = workflow.getNode(graph.NodeId.create(`${role}:${lane.work.rank}`))?.state;
+              assert.ok(member instanceof agent.JuncoAgent);
+              members.push(member);
+            }
+          }
+        }
+        return observer.startRun(workflow);
+      },
     },
-    fauxAssistantMessage("verdict recorded"),
-  ]);
-  const read = sourceTool(sources);
-  const proposer: YamlAgent = await agentApi.JuncoAgent.fromResolved({
-    ...proposerOptions.options,
-    systemPrompt: "analyst",
-    tools: [
-      read,
-      ...extraTools,
-      ...(script.beforeResearchYields === undefined
-        ? []
-        : [new toolsApi.YieldTool()]),
-      new toolsApi.SendTool(),
-      new toolsApi.TaskTool(),
-      proposal.tool,
-    ],
-  });
-  const judge: YamlAgent = await agentApi.JuncoAgent.fromResolved({
-    ...judgeOptions.options,
-    systemPrompt: "judge",
-    tools: [read, verdict.tool],
-  });
-  return { lane: { work, proposer, judge, proposal, verdict }, log };
+  }, signal);
 }
 
 /** A barrier every `size` callers enter before any of them continues. */
