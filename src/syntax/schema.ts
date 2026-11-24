@@ -29,12 +29,12 @@ const edge = Type.Object(
 );
 const common = {
   description: Type.Optional(Type.String()),
+  trigger: Type.Optional(trigger),
   repeat: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
 };
 export const AgentNodeSchema = Type.Object({
   ...common,
   kind: Type.Optional(Type.Literal("agent")),
-  trigger: Type.Optional(trigger),
   system: Type.Optional(Type.String()),
   tool_block: Type.Optional(strings),
   skills: Type.Optional(strings),
@@ -54,7 +54,7 @@ const graphSchema = Type.Cyclic(
           Type.Object(
             {
               description: common.description,
-              trigger: Type.Optional(trigger),
+              trigger: common.trigger,
               routes: Type.Optional(Type.Record(Type.String(), strings)),
             },
             strict,
@@ -64,7 +64,7 @@ const graphSchema = Type.Cyclic(
           Type.Object(
             {
               description: common.description,
-              trigger: Type.Optional(trigger),
+              trigger: common.trigger,
               returns: Type.Optional(Type.String()),
               stream: Type.Optional(Type.Literal(true)),
             },
@@ -79,7 +79,6 @@ const graphSchema = Type.Cyclic(
               {
                 ...common,
                 kind: Type.Literal("emit"),
-                trigger: Type.Optional(trigger),
                 text: Type.String(),
                 /** When the emitted task counts as complete. */
                 spec: Type.String(),
@@ -90,7 +89,6 @@ const graphSchema = Type.Cyclic(
               {
                 ...common,
                 kind: Type.Literal("graph"),
-                trigger: Type.Optional(trigger),
                 graph: Type.Ref("Graph"),
               },
               strict,
@@ -99,7 +97,6 @@ const graphSchema = Type.Cyclic(
               {
                 ...common,
                 kind: Type.Literal("code"),
-                trigger: Type.Optional(trigger),
               },
               strict,
             ),

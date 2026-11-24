@@ -349,22 +349,6 @@ async function resolvedAgent(
 const toolNamed = (tools: readonly AgentTool[], name: string) =>
   tools.find((tool) => tool.name === name);
 const namesOf = (tools: readonly AgentTool[]) => tools.map((tool) => tool.name);
-const DEFAULT_NAMES = [
-  "read",
-  "bash",
-  "edit",
-  "release",
-  "grep",
-  "find",
-  "ast_grep",
-  "ast_edit",
-  "diff",
-  "code_graph",
-  "task",
-  "yield",
-  "send",
-  "info",
-] as const;
 
 /** Executes `tool` directly with no arguments and returns its text. */
 async function callText(tool: AgentTool | undefined): Promise<string> {
@@ -556,6 +540,7 @@ test("subagents of a mixed list share ordinary tools and reconnect every definit
 
 test("a tool subset only narrows inherited MCP capabilities", () =>
   withNativeCleanup(async (defer) => {
+    const defaults = [...namesOf(collection.tools), "task", "yield", "send", "info"];
     const definition = fixture("fx");
     const parent = await resolvedAgent(
       [
@@ -583,8 +568,8 @@ test("a tool subset only narrows inherited MCP capabilities", () =>
       const [inherit, none] = await parent.createSubagents([{}, { tools: [] }]);
       defer(() => inherit!.return());
       defer(() => none!.return());
-      const inherited = [...DEFAULT_NAMES, "mcp__fx__read_state", "complain"];
-      const defaultsOnly = [...DEFAULT_NAMES, "complain"];
+      const inherited = [...defaults, "mcp__fx__read_state", "complain"];
+      const defaultsOnly = [...defaults, "complain"];
       expect(namesOf(inherit!.getTools())).toEqual(inherited);
       expect(namesOf(inherit!.getActiveTools())).toEqual(inherited);
       expect(namesOf(none!.getTools())).toEqual(defaultsOnly);

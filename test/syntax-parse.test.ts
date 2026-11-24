@@ -1211,6 +1211,8 @@ test("strict object boundaries and malformed list/map entries", () => {
     ["/graph/extra", (d) => (d.graph.extra = true)],
     ["/graph/source/extra", (d) => (d.graph.source = { extra: true })],
     ["/graph/sink/extra", (d) => (d.graph.sink = { extra: true })],
+    ["/graph/source/repeat", (d) => (d.graph.source = { repeat: 1 })],
+    ["/graph/sink/repeat", (d) => (d.graph.sink = { repeat: 1 })],
     [
       "/graph/source/profiles",
       (d) => (d.graph.source = { profiles: { memory: "1 MB" } }),

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { BACKGROUND_CONTEXT, MemorySessionRepo } from "@earendil-works/pi-agent-core";
 import { Deterministic, graph, JuncoGraph, schedules, syntax, tracer } from "junco";
 import type { TSchema } from "typebox";
-import { offlineLadder } from "./support.ts";
+import { countedCollection, offlineLadder } from "./support.ts";
 
 const options = () => ({
   cwd: process.cwd(),
@@ -60,8 +60,10 @@ for (const failure of ["invalid prompt", "legacy available"] as const)
     const close = session.close.bind(session);
     let disposals = 0, requests = 0;
     session.close = async (context) => { disposals++; return close(context); };
+    const { collection, events, active } = countedCollection();
     const config = {
       ...options(),
+      collection,
       ladder: await offlineLadder(() => { requests++; assert.fail("unexpected request"); }),
       agentOptions: new Map([[graph.NodeId.create("Child/Worker"), { session }]]),
     };
@@ -78,7 +80,10 @@ for (const failure of ["invalid prompt", "legacy available"] as const)
       );
       assert.equal(disposals, 1);
       assert.equal(requests, 0);
+      assert.deepEqual(events, []);
+      assert.deepEqual(active, { leases: 0, bindings: 0, creatorCloses: 0 });
     } finally {
+      await collection.close();
       if (!disposals) await session.close(BACKGROUND_CONTEXT);
       await repo.close(BACKGROUND_CONTEXT);
     }

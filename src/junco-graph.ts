@@ -817,6 +817,7 @@ export class JuncoGraph<
       checkRecorder(this.#recorder, member);
     }
     let complete: CompleteNode<N, T>;
+    let repeatOnReturn = false;
     if (spec.step !== undefined) complete = { ...spec, policy };
     else if (state instanceof Deterministic)
       complete = { ...spec, policy, state, step: state.step };
@@ -826,11 +827,9 @@ export class JuncoGraph<
       if (!("prompt" in spec))
         throw new DataflowDefinitionError("A graph-managed agent requires a prompt");
       complete = AgentDriver.node<N, T>(state, { ...spec, policy });
+      repeatOnReturn = true;
     } else throw new TypeError("An agentic node requires a step");
-    const id = this.registerNode(
-      complete,
-      spec.step === undefined && (state instanceof JuncoAgent || state instanceof MockAgent),
-    );
+    const id = this.registerNode(complete, repeatOnReturn);
     const current = (): AbortSignal => this.signal;
     const recorder = () => this.recorder;
     const sendParameters = () => this.#sendParameters(id);

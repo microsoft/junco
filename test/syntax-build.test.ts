@@ -167,12 +167,12 @@ const fauxLadder = schedules.uniformLadder({ model: "faux/faux-1" });
 
 for (const repeat of [0, 1, 2, undefined]) {
   test(`YAML repeat=${repeat} limits prompt runs, not model turns`, async () => {
-    const { models, faux } = await fauxRuntime([
+    const role = script(
       fauxAssistantMessage([fauxToolCall("yield", { reason: "continue this run" })], { stopReason: "toolUse" }),
-      fauxAssistantMessage("first"),
-      fauxAssistantMessage("second"),
-    ]);
-    const { collection } = countedCollection();
+      "first",
+      "second",
+    );
+    const config = await offline({ A: role });
     const execution = await JuncoGraph.fromYaml(`graph:
   nodes:
     Seed: {kind: emit, text: Begin, spec: Done}
@@ -185,20 +185,20 @@ for (const repeat of [0, 1, 2, undefined]) {
     - {from: Seed, to: A, kind: message, schema: {}}
     - {from: A, to: A, schema: {}}
     - {from: A, to: $sink, kind: message, on: return, id: product, schema: {}}
-`, { ...options(), collection, ladder: new schedules.ModelLadder(models, fauxLadder) });
+`, { ...options(), ...config });
     const g = execution.graph;
+    const seedId = graph.NodeId.create("Seed");
     const products = () => g.observe().inputs.get(g.sink.id)!.messages.get(graph.EdgeId.create("product")) ?? [];
     const expected = repeat ?? 2;
     try {
-      for (let i = 0; i < 12 && (products().length < expected || g.available().has(graph.NodeId.create("Seed"))); i++)
-        await execution.step();
+      await stepUntil(execution, () => products().length >= expected && !g.available().has(seedId));
       assert.deepEqual(products().map(x => contentText((x as AssistantMessage).content)), ["first", "second"].slice(0, expected));
       assert.equal(g.available().has(graph.NodeId.create("A")), repeat === undefined);
       if (repeat !== undefined) await execution.run();
-      assert.equal(faux.state.callCount, expected === 0 ? 0 : expected + 1);
+      assert.equal(role.requests.length, expected === 0 ? 0 : expected + 1);
     } finally {
       await g.close();
-      await collection.close();
+      await config.collection.close();
     }
   });
 }
@@ -678,24 +678,6 @@ test("nested message ingress and final egress stage the owning agent's prompt", 
     assert.deepEqual(lastPrompts(final), ["got: WORKER-OUT"]);
   } finally {
     await execution.graph.close();
-  }
-});
-
-for (const target of ["A", "$sink"])
-test(`legacy availability on ${target} is rejected before any request`, async () => {
-  const ladder = await offlineLadder([]);
-  const { collection, events } = countedCollection();
-  try {
-    const config = {
-      ...options(),
-      ladder, collection,
-      available: { [target]: () => assert.fail("legacy hook invoked") },
-    };
-    await assert.rejects(build(roundDoc("work"), config), (error) =>
-      error instanceof graph.DataflowDefinitionError && /trigger/.test(error.message));
-    assert.deepEqual(events, []);
-  } finally {
-    await collection.close();
   }
 });
 
