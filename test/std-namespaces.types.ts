@@ -1472,14 +1472,14 @@ export function yamlConstructorOptions(
     scheduler: () => schedules.parallel(),
   };
   const config: syntax.FromYamlOptions = { args, parameters };
-  // @ts-expect-error the scheduler belongs to parameters
   graph.JuncoGraph.fromYaml("", {
+    // @ts-expect-error the scheduler belongs to parameters
     args: { ...args, scheduler: parameters.scheduler },
     parameters,
   });
-  // @ts-expect-error code is a program capability
   graph.JuncoGraph.fromYaml("", {
     args,
+    // @ts-expect-error code is a program capability
     parameters: { ...parameters, code: {} },
   });
   // @ts-expect-error execution parameters are required
@@ -1488,14 +1488,14 @@ export function yamlConstructorOptions(
   graph.JuncoGraph.fromYaml("", { parameters });
   // @ts-expect-error the old flat configuration is not a supported overload
   graph.JuncoGraph.fromYaml("", { cwd: ".", scheduler: parameters.scheduler });
-  // @ts-expect-error admission is declared by a YAML trigger, not by program arguments
   graph.JuncoGraph.fromYaml("", {
+    // @ts-expect-error admission is declared by a YAML trigger, not by program arguments
     args: { ...args, available: true },
     parameters,
   });
-  // @ts-expect-error tuning parameters cannot override admission
   graph.JuncoGraph.fromYaml("", {
     args,
+    // @ts-expect-error tuning parameters cannot override admission
     parameters: { ...parameters, available: true },
   });
   // @ts-expect-error a caller cannot replace the YAML agent's ladder model

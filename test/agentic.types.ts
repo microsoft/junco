@@ -320,10 +320,10 @@ export function everyKindSharesOneNodeOptions(
     raw,
   ];
   const ids: NodeIdType[] = nodes.map((node) => graph.addNode(node));
-  // @ts-expect-error every node spec carries its policy
   void graph.addNode({
     trigger: TriggerRule.always(),
     state: mock,
+    // @ts-expect-error every node spec carries its policy
     prompt: "go",
   });
   // @ts-expect-error raw node specs carry their policy too
@@ -1628,10 +1628,10 @@ export async function schemaDomainsStayExact(
       return `${payloads?.[0]}`;
     },
   });
-  // @ts-expect-error a callback over another input domain is rejected
   numeric.addNode({
     ...policy,
     state: numericAgent,
+    // @ts-expect-error a callback over another input domain is rejected
     prompt: (_inputs: ParentView<Str, AssistantMessage>) => "",
   });
   // Dynamic YAML inputs stay unknown until narrowed.

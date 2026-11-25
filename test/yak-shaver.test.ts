@@ -1226,7 +1226,8 @@ describe("candidate batch graph", () => {
       const assignment = input!
         .slice(1)
         .find((text) => text.startsWith("Proposer:"));
-      assert.ok(assignment?.includes(own));
+      assert.ok(assignment, "judge input must contain the proposer assignment");
+      assert.ok(assignment.includes(own));
       assert.ok(assignment.includes('final summary: "result recorded"'));
       assert.ok(input?.every((text) => !text.includes(other)));
       assert.ok(
